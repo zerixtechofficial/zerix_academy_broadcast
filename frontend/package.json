@@ -1,0 +1,35 @@
+{
+  "name": "live-classroom-studio",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3000 -H 0.0.0.0",
+    "build": "next build",
+    "start": "next start -p 3000 -H 0.0.0.0",
+    "lint": "next lint",
+    "test": "../services/live-broadcast-engine/node_modules/.bin/tsx --test tests/phase2.test.ts"
+  },
+  "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.0",
+    "@socket.io/msgpack-parser": "npm:socket.io-msgpack-parser@^3.0.2",
+    "clsx": "^2.1.1",
+    "livekit-client": "^2.9.2",
+    "lucide-react": "^0.475.0",
+    "next": "14.2.24",
+    "perfect-freehand": "^1.2.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "socket.io-client": "^4.8.1",
+    "socket.io-msgpack-parser": "^3.0.2",
+    "tailwind-merge": "^3.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.3",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.8.2"
+  }
+}

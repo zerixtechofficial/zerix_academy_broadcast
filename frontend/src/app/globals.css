@@ -1,0 +1,174 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --brand-primary: #12a3ff;
+  --bg-workspace: #f8fafc;
+  --surface-card: #ffffff;
+  --surface-border: #e2e8f0;
+}
+
+html, body {
+  background-color: var(--bg-workspace);
+  color: #0f172a;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-overscroll-behavior: none;
+}
+
+/* Clean Light Theme scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* 800px Virtual Content Container */
+.virtual-page-container {
+  width: 800px;
+  min-height: 100%;
+  transform-origin: top center;
+  transition: transform 0.05s ease-out;
+}
+
+/* Excalidraw full-size light wrapper */
+.excalidraw-wrapper {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.excalidraw-wrapper .excalidraw {
+  width: 100% !important;
+  height: 100% !important;
+  --color-primary: #12a3ff;
+  --color-primary-darker: #0284c7;
+  --color-primary-darkest: #0369a1;
+  --color-primary-light: #e0f2fe;
+}
+
+/* Hide scrollbars utility for horizontal pill toolbars on mobile */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Remove Hamburger Menu Button, Library Button, Bottom-Right Help Button & Misc Clutter from Whiteboard */
+.excalidraw-wrapper .excalidraw .main-menu-trigger,
+.excalidraw-wrapper .excalidraw .App-menu_top__left .dropdown-menu-button,
+.excalidraw-wrapper .excalidraw .App-bottom-bar .dropdown-menu-button,
+.excalidraw-wrapper .excalidraw .App-menu_top__left > div:first-child,
+.excalidraw-wrapper .excalidraw .default-sidebar-trigger,
+.excalidraw-wrapper .excalidraw .sidebar-trigger,
+.excalidraw-wrapper .excalidraw .sidebar-trigger__label-element,
+.excalidraw-wrapper .excalidraw .layer-ui__wrapper__top-right,
+.excalidraw-wrapper .excalidraw .layer-ui__wrapper__footer-right,
+.excalidraw-wrapper .excalidraw .help-icon,
+.excalidraw-wrapper .excalidraw button.help-icon,
+.excalidraw-wrapper .excalidraw [aria-label="Help"],
+.excalidraw-wrapper .excalidraw [title*="Shortcuts"],
+.excalidraw-wrapper .excalidraw .mobile-misc-tools-container {
+  display: none !important;
+}
+
+/* Hide mobile toolbars on View-Only Student Live Whiteboard */
+.excalidraw-wrapper--student-live .excalidraw .App-bottom-bar,
+.excalidraw-wrapper--student-live .excalidraw .App-top-bar,
+.excalidraw-wrapper--student-live .excalidraw .App-toolbar {
+  display: none !important;
+}
+
+/* Dock Excalidraw main drawing toolbar at the bottom-center of the Whiteboard (Desktop/Tablet) */
+.excalidraw-wrapper .excalidraw .shapes-section {
+  position: absolute !important;
+  bottom: 0 !important;
+  top: auto !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  z-index: 25 !important;
+  width: max-content !important;
+  max-width: calc(100% - 1rem) !important;
+}
+
+/* Ensure Extra Tools dropdown opens upward from the bottom-docked toolbar */
+.excalidraw-wrapper .excalidraw .App-toolbar__extra-tools-dropdown {
+  bottom: calc(100% + 0.5rem) !important;
+  top: auto !important;
+  margin-top: 0 !important;
+  z-index: 40 !important;
+}
+
+/* Hide HintViewer text so it does not overflow below the bottom-docked toolbar */
+.excalidraw-wrapper .excalidraw .HintViewer {
+  display: none !important;
+}
+
+/* Mobile editor mode: dock main drawing toolbar cleanly above bottom Undo/Palette bar without clipping */
+.excalidraw-wrapper .excalidraw--mobile .App-top-bar {
+  top: auto !important;
+  bottom: 3.75rem !important;
+  left: 0.25rem !important;
+  right: 0.25rem !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  z-index: 24 !important;
+  display: flex !important;
+  justify-content: center !important;
+}
+
+.excalidraw-wrapper .excalidraw--mobile .App-toolbar--mobile {
+  width: 100% !important;
+  max-width: 100% !important;
+  padding: 0.15rem 0.25rem !important;
+  box-sizing: border-box !important;
+}
+
+.excalidraw-wrapper .excalidraw--mobile .App-toolbar--mobile > .Stack_horizontal {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 1px !important;
+  width: 100% !important;
+}
+
+.excalidraw-wrapper .excalidraw--mobile .App-toolbar__divider {
+  margin: 0 2px !important;
+}
+
+.excalidraw-wrapper .excalidraw--mobile .App-bottom-bar {
+  left: 0.25rem !important;
+  right: 0.25rem !important;
+  bottom: 0 !important;
+}
+
+.excalidraw-wrapper .excalidraw--mobile .App-bottom-bar:has(.App-mobile-menu) {
+  z-index: 30 !important;
+}
+
+/* Pulse animation for active mic indicator */
+@keyframes micPulse {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.12); opacity: 0.85; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.mic-active-pulse {
+  animation: micPulse 1.5s infinite;
+}

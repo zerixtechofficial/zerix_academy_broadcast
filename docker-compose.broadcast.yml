@@ -1,0 +1,82 @@
+services:
+  # 1. State, Ring Buffer & Distributed Locks
+  redis:
+    image: redis:7.4-alpine
+    container_name: broadcast-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ""
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - broadcast-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # 2. LiveKit Two-Way SFU Audio Server
+  livekit:
+    image: livekit/livekit-server:v1.8.3
+    container_name: broadcast-livekit
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    ports:
+      - "7880:7880"         # HTTP API & WebRTC Signaling
+      - "7881:7881"         # TCP Fallback
+      - "7882:7882/udp"     # UDP Signaling
+      - "50000-50100:50000-50100/udp" # WebRTC Media Traffic Range
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    networks:
+      - broadcast-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7880 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # 3. Live Broadcast Engine Microservice (Fastify + Socket.io + PM2 Cluster)
+  broadcast-engine:
+    build:
+      context: ./services/live-broadcast-engine
+      dockerfile: Dockerfile
+    container_name: live-broadcast-engine
+    restart: unless-stopped
+    environment:
+      PORT: 4000
+      HOST: 0.0.0.0
+      NODE_ENV: production
+      DATA_SOURCE_MODE: mock_json
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      LIVEKIT_URL: http://livekit:7880
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+      LIVEKIT_PUBLIC_URL: ws://0.0.0.0:7880
+      TEACHER_GRACE_TIMEOUT_SECONDS: 300
+      CHECKPOINT_INTERVAL_SECONDS: 30
+      LARAVEL_API_BASE_URL: http://127.0.0.1:8000
+      LARAVEL_INTERNAL_API_SECRET: secret_laravel_broadcast_key
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./storage:/app/storage
+      - ./services/live-broadcast-engine/mock-data:/app/mock-data
+    depends_on:
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_healthy
+    networks:
+      - broadcast-network
+
+networks:
+  broadcast-network:
+    driver: bridge
+
+volumes:
+  redis-data:

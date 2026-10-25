@@ -1,0 +1,42 @@
+{
+  "name": "live-broadcast-engine",
+  "version": "1.0.0",
+  "description": "Real-Time Learning Page Broadcasting & Attendance Microservice",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch --exclude 'storage_cache/**' src/index.ts",
+    "test": "tsx --test tests/unit/phase1.unit.test.ts tests/integration/phase1.integration.test.ts tests/load/phase1.load.test.ts tests/integration/phase4.e2e.test.ts",
+    "test:unit": "tsx --test tests/unit/phase1.unit.test.ts",
+    "test:integration": "tsx --test tests/integration/phase1.integration.test.ts tests/integration/phase4.e2e.test.ts",
+    "test:load": "tsx --test tests/load/phase1.load.test.ts",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:stop": "pm2 stop ecosystem.config.cjs",
+    "pm2:monit": "pm2 monit",
+    "pm2:logs": "pm2 logs live-broadcast-engine"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.758.0",
+    "@fastify/cors": "^10.0.2",
+    "@fastify/sensible": "^6.0.3",
+    "@sinclair/typebox": "^0.34.14",
+    "@socket.io/msgpack-parser": "npm:socket.io-msgpack-parser@^3.0.2",
+    "@socket.io/redis-adapter": "^8.3.0",
+    "bullmq": "^5.41.6",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "ioredis": "^5.6.0",
+    "livekit-server-sdk": "^2.11.2",
+    "socket.io": "^4.8.1",
+    "socket.io-msgpack-parser": "^3.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": []
+  }
+}

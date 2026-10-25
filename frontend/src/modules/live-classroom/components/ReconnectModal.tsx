@@ -1,0 +1,75 @@
+'use client';
+
+import React from 'react';
+import { WifiOff, RefreshCw, Clock } from 'lucide-react';
+
+interface ReconnectModalProps {
+  isDisconnected: boolean;
+  teacherDisconnected: {
+    active: boolean;
+    gracePeriodSeconds: number;
+    message: string;
+  };
+  lastSeqId: number;
+  onManualReconnect: () => void;
+}
+
+export const ReconnectModal: React.FC<ReconnectModalProps> = ({
+  isDisconnected,
+  teacherDisconnected,
+  lastSeqId,
+  onManualReconnect,
+}) => {
+  if (!isDisconnected && !teacherDisconnected.active) {
+    return null;
+  }
+
+  // Non-blocking compact floating banner when only Teacher is reconnecting
+  if (!isDisconnected && teacherDisconnected.active) {
+    return (
+      <div className="pointer-events-none fixed top-16 left-1/2 -translate-x-1/2 z-40 px-4">
+        <div className="pointer-events-auto flex items-center gap-2.5 px-3.5 py-2 rounded-full bg-amber-50/95 backdrop-blur-md border border-amber-200 shadow-md text-xs text-amber-800">
+          <Clock className="w-3.5 h-3.5 text-amber-600 animate-spin shrink-0" />
+          <span className="font-semibold">Teacher reconnecting (5-min grace active)</span>
+          <span className="text-amber-500 hidden sm:inline">•</span>
+          <span className="text-amber-700 hidden sm:inline">
+            Live Whiteboard &amp; Content remain active (Seq #{lastSeqId})
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/35 backdrop-blur-xs p-4">
+      <div className="w-full max-w-md rounded-2xl bg-white border border-slate-200 shadow-2xl p-6 text-center space-y-4">
+        <div className="mx-auto w-12 h-12 rounded-2xl bg-sky-50 border border-sky-200 flex items-center justify-center">
+          <WifiOff className="w-6 h-6 text-[#12a3ff] animate-pulse" />
+        </div>
+
+        <div className="space-y-1.5">
+          <h3 className="text-lg font-bold text-slate-900">
+            Connection Interrupted — Rejoining Studio...
+          </h3>
+          <p className="text-xs text-slate-600 leading-relaxed">
+            {`Preserving your live canvas and audio stage state. Catching up from packet sequence #${lastSeqId} via Redis ring buffer...`}
+          </p>
+        </div>
+
+        <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between text-xs text-slate-600">
+          <span>Ring Buffer Sequence ID</span>
+          <span className="font-mono font-bold text-[#12a3ff]">#{lastSeqId}</span>
+        </div>
+
+        <button
+          type="button"
+          onClick={onManualReconnect}
+          className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-[#12a3ff] hover:bg-[#0d8de0] text-white text-xs font-bold shadow-sm transition-all cursor-pointer"
+        >
+          <RefreshCw className="w-4 h-4" />
+          <span>Reconnect Immediately</span>
+        </button>
+      </div>
+    </div>
+  );
+};

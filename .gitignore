@@ -1,0 +1,71 @@
+# ============================================================================
+# Dependencies & Package Managers
+# ============================================================================
+node_modules/
+**/node_modules/
+.pnpm-store/
+.pnp
+.pnp.js
+
+# ============================================================================
+# Build Outputs & TypeScript / Next.js Caches
+# ============================================================================
+frontend/.next/
+frontend/out/
+services/live-broadcast-engine/dist/
+**/dist/
+**/build/
+**/*.tsbuildinfo
+
+# ============================================================================
+# Environment & Secret Files (Keep *.example templates tracked)
+# ============================================================================
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!.env.local.example
+!**/.env.example
+!**/.env.local.example
+
+# ============================================================================
+# Runtime Storage, Recorded 720p Videos, Whiteboard Gzips & Session Caches
+# ============================================================================
+storage/
+storage_cache/
+**/storage/
+**/storage_cache/
+services/live-broadcast-engine/mock-data/session_completed_summary.json
+
+# ============================================================================
+# Local Dev / Audit Scratch Files, Graphify & Laravel Reference Contracts
+# ============================================================================
+graphify-out/
+.graphifyignore
+scratch/
+tasks.md
+backend-contracts/
+*.csv
+
+# ============================================================================
+# Logs, Process Managers (PM2) & OS / IDE Metadata
+# ============================================================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.pm2/
+pids
+*.pid
+*.seed
+*.pid.lock
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
