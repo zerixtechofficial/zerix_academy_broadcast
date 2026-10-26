@@ -224,6 +224,7 @@ describe('Phase 1 Load & Scalability Tests: 1,000+ Concurrent Users & Jittered 7
           url: `/api/v1/sessions/${loadSessionId}/video-chunk?chunkIndex=${idx}&courseId=88&boardId=14&languageId=1&chapterId=10&lessonId=301&version=1&academicYear=2026`,
           headers: {
             'content-type': 'application/octet-stream',
+            authorization: 'Bearer DEV_TOKEN_TEACHER_501',
           },
           payload: buf,
         });
@@ -232,10 +233,13 @@ describe('Phase 1 Load & Scalability Tests: 1,000+ Concurrent Users & Jittered 7
     );
     const uploadElapsedMs = performance.now() - uploadStart;
 
+    const teacherHeaders = { authorization: 'Bearer DEV_TOKEN_TEACHER_501' };
+
     // Navigate from Lesson 301 -> Lesson 299 (reference_only) -> Lesson 302 (taught)
     await server.fastify.inject({
       method: 'POST',
       url: `/api/v1/sessions/${loadSessionId}/whiteboard/save`,
+      headers: teacherHeaders,
       payload: {
         chapterId: 10,
         lessonId: 301,
@@ -250,6 +254,7 @@ describe('Phase 1 Load & Scalability Tests: 1,000+ Concurrent Users & Jittered 7
     await server.fastify.inject({
       method: 'POST',
       url: `/api/v1/sessions/${loadSessionId}/curriculum/navigate`,
+      headers: teacherHeaders,
       payload: {
         chapterId: 10,
         lessonId: 299,
@@ -263,6 +268,7 @@ describe('Phase 1 Load & Scalability Tests: 1,000+ Concurrent Users & Jittered 7
     await server.fastify.inject({
       method: 'POST',
       url: `/api/v1/sessions/${loadSessionId}/curriculum/navigate`,
+      headers: teacherHeaders,
       payload: {
         chapterId: 10,
         lessonId: 302,
@@ -276,6 +282,7 @@ describe('Phase 1 Load & Scalability Tests: 1,000+ Concurrent Users & Jittered 7
     await server.fastify.inject({
       method: 'POST',
       url: `/api/v1/sessions/${loadSessionId}/whiteboard/save`,
+      headers: teacherHeaders,
       payload: {
         chapterId: 10,
         lessonId: 302,
@@ -287,6 +294,7 @@ describe('Phase 1 Load & Scalability Tests: 1,000+ Concurrent Users & Jittered 7
     const finRes = await server.fastify.inject({
       method: 'POST',
       url: `/api/v1/sessions/${loadSessionId}/finalize`,
+      headers: teacherHeaders,
       payload: {
         totalDurationSec: 200,
         relationalContext: loadRelCtx,

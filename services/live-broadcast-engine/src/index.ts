@@ -670,10 +670,10 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
     // 10c-2. Per-Device Mic Active Sync (notifies server when a student's specific device activates or deactivates its mic)
     socket.on(
       'AUDIO_DEVICE_MIC_ACTIVE',
-      async (data?: { deviceId?: string; micActive?: boolean }) => {
+      async (data?: { deviceId?: string; micActive?: boolean; active?: boolean }) => {
         if (user.role !== 'student') return;
         const devId = getSocketDeviceId(data?.deviceId);
-        const micActive = Boolean(data?.micActive);
+        const micActive = Boolean(data?.micActive ?? data?.active);
         const state = await AudioStageController.setStudentDeviceMicState(
           sessionId,
           user.userId,
@@ -743,6 +743,46 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
         teacherId: user.userId,
       });
     });
+
+    // 11b. Real-Time Port-443 WebAudio Voice Relay (Hybrid Fallback for Firewalled Networks / Blocked UDP-7881 ICE)
+    socket.on(
+      'AUDIO_VOICE_FRAME',
+      async (data: {
+        pcm?: number[] | Int16Array | Uint8Array | string;
+        sampleRate?: number;
+        seq?: number;
+        rms?: number;
+        deviceId?: string;
+      }) => {
+        if (!data || !data.pcm) return;
+
+        // Authorize publisher: Teachers (Host & Co-Host) are always authorized;
+        // Students must either have an active mic grant or allowStudentUnmute enabled.
+        if (user.role !== 'teacher') {
+          const normStudentId = AudioStageController.normalizeStudentId(user.userId);
+          const [allowAll, hasGrant] = await Promise.all([
+            AudioStageController.getAllowStudentUnmute(sessionId),
+            redis.sismember(AudioStageController.activeMicsKey(sessionId), normStudentId),
+          ]);
+          if (!allowAll && hasGrant !== 1) return;
+        }
+
+        const relayPayload = {
+          senderId: user.userId,
+          senderName: user.name,
+          role: user.role,
+          deviceId: getSocketDeviceId(data.deviceId),
+          pcm: data.pcm,
+          sampleRate: Number(data.sampleRate) || 16000,
+          seq: Number(data.seq) || 0,
+          rms: typeof data.rms === 'number' ? data.rms : undefined,
+          ts: Date.now(),
+        };
+
+        const target = socket.volatile ? socket.volatile.to(sessionId) : socket.to(sessionId);
+        target.emit('AUDIO_VOICE_FRAME', relayPayload);
+      }
+    );
 
     // 12. Co-Teacher Invitation & Whiteboard Access Controls (Host Teacher)
     socket.on(

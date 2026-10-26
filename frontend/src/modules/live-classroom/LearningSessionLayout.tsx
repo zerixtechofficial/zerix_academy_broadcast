@@ -125,6 +125,7 @@ export default function LearningSessionLayout() {
   const [curriculum, setCurriculum] = useState<any>(null);
   const [lessonContent, setLessonContent] = useState<any>(null);
   const [livekitToken, setLivekitToken] = useState<string>('');
+  const [livekitUrl, setLivekitUrl] = useState<string | undefined>(undefined);
   const [canPublishAudio, setCanPublishAudio] = useState<boolean>(false);
   const [pendingMicAutoActivate, setPendingMicAutoActivate] = useState<boolean>(false);
 
@@ -187,9 +188,10 @@ export default function LearningSessionLayout() {
     toggleFullscreen,
   } = useFullscreenWorkspace(workspaceContainerRef);
 
-  const setMicrophoneActiveRef = useRef<(active: boolean) => Promise<void>>(() =>
-    Promise.resolve()
+  const setMicrophoneActiveRef = useRef<(active: boolean) => Promise<boolean>>(() =>
+    Promise.resolve(false)
   );
+  const playIncomingVoiceFrameRef = useRef<(packet: any) => void>(() => {});
 
   // Real-time Socket.io + MsgPack Broadcast Hook
   const {
@@ -251,6 +253,7 @@ export default function LearningSessionLayout() {
     studentSelfUnmute,
     studentSelfMute,
     notifyDeviceMicActive,
+    broadcastVoiceFrame,
     setStudentMultiDeviceAccess,
     retryJoinRoom,
     broadcastTeacherMicState,
@@ -282,6 +285,9 @@ export default function LearningSessionLayout() {
       setCanPublishAudio(false);
       setMicrophoneActiveRef.current(false).catch(() => {});
     },
+    onIncomingVoiceFrame: (packet) => {
+      playIncomingVoiceFrameRef.current(packet);
+    },
   });
 
   // Prevent phone/tablet/desktop screen from turning off during an active live broadcast
@@ -309,6 +315,9 @@ export default function LearningSessionLayout() {
         setSessionMetadata(initData.sessionContext);
         if (initData.livekit) {
           setLivekitToken(initData.livekit.token);
+          if (initData.livekit.url) {
+            setLivekitUrl(initData.livekit.url);
+          }
           setCanPublishAudio(initData.livekit.canPublishAudio);
         }
         if (Array.isArray(initData.attendance) && initData.attendance.length > 0) {
@@ -436,15 +445,22 @@ export default function LearningSessionLayout() {
     activeStudentMics.includes(studentId) ||
     activeStudentMics.includes(studentId.replace('student_', ''));
 
-  // LiveKit Two-Way Audio Stage Hook (All Mics Muted by Default + Active DSP Noise Cancellation)
+  // LiveKit Two-Way Audio Stage Hook (All Mics Muted by Default + Active DSP Noise Cancellation + Port-443 Voice Relay)
   const {
     isMicrophoneEnabled,
     isNoiseCancellationEnabled,
     isAudioConnected,
+    audioPlaybackBlocked,
+    micError,
+    clearMicError,
+    ensureMicrophonePermission,
+    playIncomingVoiceFrame,
     setMicrophoneActive,
     toggleMicrophone,
     toggleNoiseCancellation,
+    unlockAudioPlayback,
   } = useLiveKitStage({
+    livekitUrl,
     token: livekitToken,
     canPublishAudio: hasStudentMicGrant,
     autoActivateMic: pendingMicAutoActivate,
@@ -455,11 +471,16 @@ export default function LearningSessionLayout() {
         notifyDeviceMicActive(enabled);
       }
     },
+    onEmitVoiceFrame: broadcastVoiceFrame,
   });
 
   useEffect(() => {
     setMicrophoneActiveRef.current = setMicrophoneActive;
   }, [setMicrophoneActive]);
+
+  useEffect(() => {
+    playIncomingVoiceFrameRef.current = playIncomingVoiceFrame;
+  }, [playIncomingVoiceFrame]);
 
   // Auto-activate student microphone when host grants mic access
   useEffect(() => {
@@ -471,32 +492,58 @@ export default function LearningSessionLayout() {
     }
   }, [pendingMicAutoActivate, role, setMicrophoneActive]);
 
-  // Handle local microphone toggle:
-  // - Teachers toggle normally
+  // Student Raise Hand Handler:
+  // First checks/requests browser microphone permission in real time.
+  // Only after permission is granted by the student's browser do we emit raiseHand()
+  // so the student is shown to the Host / Co-Host in the "Allow Mic" queue.
+  const handleStudentRaiseHand = useCallback(async () => {
+    unlockAudioPlayback();
+    const perm = await ensureMicrophonePermission();
+    if (!perm.granted) {
+      return;
+    }
+    raiseHand();
+  }, [ensureMicrophonePermission, raiseHand, unlockAudioPlayback]);
+
+  // Handle local microphone toggle for ALL user types (Host Teacher, Co-Host Teacher, Student):
+  // - Checks browser microphone permission in real time whenever unmuting
   // - Students notify server per-device on mute/unmute so multi-device mics operate independently
   const handleToggleLocalMic = useCallback(async () => {
+    unlockAudioPlayback();
     if (role === 'student') {
       if (isMicrophoneEnabled) {
         await setMicrophoneActive(false);
         studentSelfMute();
       } else {
+        const perm = await ensureMicrophonePermission();
+        if (!perm.granted) {
+          return;
+        }
         if (allowStudentUnmute && !canPublishAudio) {
           studentSelfUnmute();
         }
         await setMicrophoneActive(true);
       }
     } else {
-      toggleMicrophone();
+      if (!isMicrophoneEnabled) {
+        const perm = await ensureMicrophonePermission();
+        if (!perm.granted) {
+          return;
+        }
+      }
+      await toggleMicrophone();
     }
   }, [
     role,
     isMicrophoneEnabled,
     allowStudentUnmute,
     canPublishAudio,
+    ensureMicrophonePermission,
     setMicrophoneActive,
     studentSelfMute,
     studentSelfUnmute,
     toggleMicrophone,
+    unlockAudioPlayback,
   ]);
 
   // Normalize Curriculum Chapters for Sidebar
@@ -1133,7 +1180,7 @@ export default function LearningSessionLayout() {
         onToggleLocalMic={handleToggleLocalMic}
         onToggleNoiseCancellation={toggleNoiseCancellation}
         onToggleAllowStudentUnmute={(allow) => setAllowStudentUnmuteOption(allow)}
-        onRaiseHand={raiseHand}
+        onRaiseHand={handleStudentRaiseHand}
         onLowerHand={() => lowerHand(currentUserId)}
         onGrantStudentMic={(targetStudentId, _studentName, cb) => {
           clearAudioError();
@@ -1169,6 +1216,72 @@ export default function LearningSessionLayout() {
         onLeaveMeeting={handleLeaveMeeting}
         onEndClass={handleEndClass}
       />
+
+      {/* 1b. Real-Time Microphone Permission Alert & Autoplay Audio Unlock Banners */}
+      {micError && (
+        <div
+          data-testid="mic-permission-alert-banner"
+          role="alert"
+          className="z-40 px-4 py-2 bg-amber-50 border-b border-amber-200 text-amber-900 flex flex-wrap items-center justify-between gap-2 text-xs font-medium shrink-0"
+        >
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-amber-200 text-amber-900 font-bold">
+              🎤
+            </span>
+            <span>{micError}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              data-testid="retry-mic-permission-btn"
+              onClick={async () => {
+                const res = await ensureMicrophonePermission();
+                if (res.granted) {
+                  if (role === 'student' && !hasStudentMicGrant && !hasRaisedHand) {
+                    raiseHand();
+                  } else if (role === 'teacher' || hasStudentMicGrant) {
+                    await handleToggleLocalMic();
+                  }
+                }
+              }}
+              className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold transition-colors"
+            >
+              Grant Mic Permission
+            </button>
+            <button
+              type="button"
+              data-testid="dismiss-mic-error-btn"
+              onClick={clearMicError}
+              className="px-2 py-1 rounded-lg text-amber-700 hover:bg-amber-100 font-semibold transition-colors"
+              aria-label="Dismiss microphone error"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
+      {audioPlaybackBlocked && (
+        <div
+          data-testid="audio-autoplay-unlock-banner"
+          className="z-40 px-4 py-2 bg-sky-50 border-b border-sky-200 text-sky-900 flex flex-wrap items-center justify-between gap-2 text-xs font-medium shrink-0"
+        >
+          <div className="flex items-center gap-2">
+            <span>🔊</span>
+            <span>
+              Your browser paused live audio playback. Tap once to hear the teacher and classroom voice.
+            </span>
+          </div>
+          <button
+            type="button"
+            data-testid="unlock-audio-playback-btn"
+            onClick={() => unlockAudioPlayback()}
+            className="px-3 py-1 rounded-lg bg-[#12a3ff] hover:bg-[#0d8de0] text-white font-semibold shadow-2xs transition-colors"
+          >
+            Tap to Enable Audio
+          </button>
+        </div>
+      )}
 
       {/* 2. Main Studio Workspace (Collapsible 260px Sidebar + 90%+ Canvas/Content Area) */}
       <div className="flex flex-1 min-h-0 w-full overflow-hidden relative">

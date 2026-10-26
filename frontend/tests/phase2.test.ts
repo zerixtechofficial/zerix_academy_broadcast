@@ -20,6 +20,13 @@ import {
 } from '../src/modules/live-classroom/services/curriculumClient';
 
 import * as ContentSyncMath from '../src/modules/live-classroom/utils/contentSyncMath';
+import {
+  requestBrowserMicrophonePermission,
+  downsampleFloat32ToInt16,
+  encodePcmInt16ToBase64,
+  decodePcmToFloat32,
+  VOICE_RELAY_SAMPLE_RATE,
+} from '../src/modules/live-classroom/hooks/useLiveKitStage';
 
 describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topic Navigation & Rough Pad Removal', () => {
   describe('1. 720p Browser Hardware Encoder & Random Jitter Unit Tests', () => {
@@ -567,6 +574,133 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
           contentStageSource.includes('laserPointer.authorId !== currentUserId'),
         true,
         'VirtualContentStage must render remote laser pointer and live cursor for all participants (Host, Co-Host, and Students)'
+      );
+    });
+  });
+
+  describe('8. Real-Time Microphone Permission Check & Hybrid LiveKit + Port-443 Voice Relay', () => {
+    it('requests real-time browser microphone permission and stops temporary stream tracks when granted', async () => {
+      let stoppedCount = 0;
+      const originalNavigator = (globalThis as any).navigator;
+      try {
+        Object.defineProperty(globalThis, 'navigator', {
+          configurable: true,
+          writable: true,
+          value: {
+            mediaDevices: {
+              getUserMedia: async () => ({
+                getTracks: () => [
+                  {
+                    stop: () => {
+                      stoppedCount += 1;
+                    },
+                  },
+                ],
+              }),
+            },
+          },
+        });
+
+        const res = await requestBrowserMicrophonePermission();
+        assert.equal(res.granted, true);
+        assert.equal(res.errorCode, undefined);
+        assert.equal(stoppedCount, 1, 'Temporary permission check tracks must be stopped immediately');
+      } finally {
+        Object.defineProperty(globalThis, 'navigator', {
+          configurable: true,
+          writable: true,
+          value: originalNavigator,
+        });
+      }
+    });
+
+    it('returns actionable PERMISSION_DENIED and NO_DEVICE errors when browser microphone access fails', async () => {
+      const originalNavigator = (globalThis as any).navigator;
+      try {
+        Object.defineProperty(globalThis, 'navigator', {
+          configurable: true,
+          writable: true,
+          value: {
+            mediaDevices: {
+              getUserMedia: async () => {
+                const err = new Error('Permission denied by user');
+                err.name = 'NotAllowedError';
+                throw err;
+              },
+            },
+          },
+        });
+
+        const deniedRes = await requestBrowserMicrophonePermission();
+        assert.equal(deniedRes.granted, false);
+        assert.equal(deniedRes.errorCode, 'PERMISSION_DENIED');
+        assert.ok(deniedRes.error?.includes('Microphone permission'));
+
+        Object.defineProperty(globalThis, 'navigator', {
+          configurable: true,
+          writable: true,
+          value: {
+            mediaDevices: {
+              getUserMedia: async () => {
+                const err = new Error('Requested device not found');
+                err.name = 'NotFoundError';
+                throw err;
+              },
+            },
+          },
+        });
+
+        const noDeviceRes = await requestBrowserMicrophonePermission();
+        assert.equal(noDeviceRes.granted, false);
+        assert.equal(noDeviceRes.errorCode, 'NO_DEVICE');
+      } finally {
+        Object.defineProperty(globalThis, 'navigator', {
+          configurable: true,
+          writable: true,
+          value: originalNavigator,
+        });
+      }
+    });
+
+    it('accurately downsamples, encodes, and decodes 16kHz PCM voice frames for the Port-443 voice relay', () => {
+      assert.equal(VOICE_RELAY_SAMPLE_RATE, 16000);
+      const input48k = new Float32Array(480);
+      for (let i = 0; i < input48k.length; i++) {
+        input48k[i] = Math.sin((2 * Math.PI * i) / 48) * 0.5;
+      }
+
+      const { pcmInt16, rms } = downsampleFloat32ToInt16(input48k, 48000, VOICE_RELAY_SAMPLE_RATE);
+      assert.equal(pcmInt16.length, 160);
+      assert.ok(rms > 0.2 && rms < 0.5, 'RMS level must be computed accurately');
+
+      const b64 = encodePcmInt16ToBase64(pcmInt16);
+      assert.ok(typeof b64 === 'string' && b64.length > 0);
+
+      const decoded = decodePcmToFloat32(b64);
+      assert.ok(decoded, 'Decoded Float32Array must not be null');
+      assert.equal(decoded!.length, 160);
+      assert.ok(Math.abs(decoded![12] - input48k[36]) < 0.01, 'Decoded PCM sample must match input waveform');
+    });
+
+    it('enforces real-time mic permission before Student raiseHand (so Host/Co-Host only see permitted students) and before Host/Co-Host/Student unmute', () => {
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+
+      assert.equal(
+        layoutSource.includes('const handleStudentRaiseHand = useCallback(async () => {') &&
+          layoutSource.includes('const perm = await ensureMicrophonePermission();') &&
+          layoutSource.includes('if (!perm.granted) {\n      return;\n    }\n    raiseHand();'),
+        true,
+        'LearningSessionLayout must verify browser microphone permission in handleStudentRaiseHand before calling raiseHand()'
+      );
+
+      assert.equal(
+        layoutSource.includes('data-testid="mic-permission-alert-banner"') &&
+          layoutSource.includes('data-testid="audio-autoplay-unlock-banner"'),
+        true,
+        'LearningSessionLayout must render mic permission alert banner and audio autoplay unlock banner'
       );
     });
   });

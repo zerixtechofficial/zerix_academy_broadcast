@@ -226,6 +226,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           attendance: liveAttendance,
           livekit: {
             token: livekit.token,
+            url: livekit.url,
             canPublishAudio: livekit.canPublishAudio,
           },
         },

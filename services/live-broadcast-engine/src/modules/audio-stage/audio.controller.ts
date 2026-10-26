@@ -1,4 +1,5 @@
 import { redis } from '../../config/redis';
+import { env } from '../../config/env';
 import { generateLiveKitToken, livekitRoomService } from '../../config/livekit';
 import { InvitedTeacherEntry, RaisedHandEntry, UserAuthPayload } from '../../types/broadcast.types';
 import { RoomManager } from '../room/room.manager';
@@ -69,7 +70,7 @@ export class AudioStageController {
     role: 'teacher' | 'student',
     deviceIdOrForcePublish?: string | boolean,
     maybeDeviceId?: string
-  ): Promise<{ token: string; canPublishAudio: boolean; participantIdentity: string }> {
+  ): Promise<{ token: string; url: string; canPublishAudio: boolean; participantIdentity: string }> {
     let canPublish = false;
     const deviceId =
       typeof deviceIdOrForcePublish === 'string'
@@ -105,7 +106,12 @@ export class AudioStageController {
       canSubscribe: true,
     });
 
-    return { token, canPublishAudio: canPublish, participantIdentity };
+    return {
+      token,
+      url: env.LIVEKIT_PUBLIC_URL || env.LIVEKIT_URL,
+      canPublishAudio: canPublish,
+      participantIdentity,
+    };
   }
 
   /**

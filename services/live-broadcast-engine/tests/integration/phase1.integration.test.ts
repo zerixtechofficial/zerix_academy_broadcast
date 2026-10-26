@@ -1060,4 +1060,147 @@ describe('Phase 1 Integration Tests: End-to-End Fastify REST & Streaming Pipelin
       'Unauthorized viewer student must not overwrite CONTENT_SCROLL_SYNC'
     );
   });
+
+  it('11. Hybrid Voice Relay (AUDIO_VOICE_FRAME) & LiveKit URL in Session Init', async () => {
+    const { EventEmitter } = await import('node:events');
+    const { AudioStageController } = await import('../../src/modules/audio-stage/audio.controller');
+
+    // 1. Verify POST /api/v1/sessions/init returns livekit.url alongside token & roomName
+    const initRes = await server.fastify.inject({
+      method: 'POST',
+      url: '/api/v1/sessions/init',
+      headers: teacherHeaders,
+      payload: {
+        sessionId: 'sess_voice_init_test',
+        batchId: 'batch_voice_1',
+      },
+    });
+    assert.equal(initRes.statusCode, 200);
+    const initBody = initRes.json();
+    assert.equal(initBody.success, true);
+    assert.ok(initBody.data.livekit.token, 'livekit.token must be present');
+    assert.ok(initBody.data.livekit.url, 'livekit.url must be returned in /api/v1/sessions/init');
+
+    // 2. Verify AUDIO_VOICE_FRAME relays authorized teacher & permitted student audio while blocking unauthorized students
+    const connectionListeners = server.io.listeners('connection') as Array<(socket: any) => Promise<void>>;
+    const handleConnection = connectionListeners[0];
+
+    const roomBroadcasts: Array<{ event: string; payload: any }> = [];
+    const createVoiceTestSocket = (user: any, boundSessionId: string, deviceId?: string) => {
+      const emitter = new EventEmitter();
+      const joinedRooms = new Set<string>();
+      const registeredHandlers = new Map<string, (...args: any[]) => Promise<void>>();
+
+      const fakeSocket: any = {
+        id: `sock_${user.userId}_${deviceId || 'default'}_${Date.now()}`,
+        user,
+        sessionId: boundSessionId,
+        deviceId,
+        handshake: {
+          auth: { deviceId },
+          query: { sessionId: boundSessionId, deviceId },
+        },
+        data: {},
+        joinedRooms,
+        join: async (room: string) => {
+          joinedRooms.add(room);
+        },
+        leave: async (room: string) => {
+          joinedRooms.delete(room);
+        },
+        emit: (event: string, payload: any) => {
+          emitter.emit(event, payload);
+        },
+        on: (event: string, handler: (...args: any[]) => Promise<void>) => {
+          registeredHandlers.set(event, handler);
+        },
+        to: () => ({
+          emit: (event: string, payload: any) => {
+            roomBroadcasts.push({ event, payload });
+          },
+        }),
+        volatile: {
+          to: () => ({
+            emit: (event: string, payload: any) => {
+              roomBroadcasts.push({ event, payload });
+            },
+          }),
+        },
+        disconnect: () => {},
+        triggerClientEvent: async (event: string, payload?: any, ack?: any) => {
+          const handler = registeredHandlers.get(event);
+          assert.ok(handler, `Handler for ${event} must be registered`);
+          await handler(payload, ack);
+        },
+      };
+      return fakeSocket;
+    };
+
+    const roomVoice = `sess_voice_relay_test_${Date.now()}`;
+    const hostSocket = createVoiceTestSocket(
+      {
+        userId: 'teacher_501',
+        name: 'Dr. Anand Sharma',
+        role: 'teacher',
+        batchId: roomVoice,
+        sessionId: roomVoice,
+      },
+      roomVoice,
+      'dev_host_voice'
+    );
+    const studentSocket = createVoiceTestSocket(
+      {
+        userId: 'student_101',
+        name: 'Rahul Verma',
+        role: 'student',
+        batchId: roomVoice,
+        sessionId: roomVoice,
+      },
+      roomVoice,
+      'dev_student_voice'
+    );
+
+    await handleConnection(hostSocket);
+    await handleConnection(studentSocket);
+    await hostSocket.triggerClientEvent('JOIN_ROOM', { sessionId: roomVoice, lastSeqId: 0 });
+    await studentSocket.triggerClientEvent('JOIN_ROOM', { sessionId: roomVoice, lastSeqId: 0 });
+
+    roomBroadcasts.length = 0;
+
+    // Host teacher emits AUDIO_VOICE_FRAME -> relayed to room
+    await hostSocket.triggerClientEvent('AUDIO_VOICE_FRAME', {
+      pcm: 'AAAA//8AAAD//w==',
+      sampleRate: 16000,
+      seq: 1,
+      rms: 0.25,
+    });
+    const hostFrame = roomBroadcasts.find((b) => b.event === 'AUDIO_VOICE_FRAME' && b.payload.senderId === 'teacher_501');
+    assert.ok(hostFrame, 'Host teacher AUDIO_VOICE_FRAME must be relayed to room participants');
+
+    // Unauthorized student emits AUDIO_VOICE_FRAME -> blocked
+    roomBroadcasts.length = 0;
+    await studentSocket.triggerClientEvent('AUDIO_VOICE_FRAME', {
+      pcm: 'AAAA//8AAAD//w==',
+      sampleRate: 16000,
+      seq: 2,
+      rms: 0.3,
+    });
+    const unauthStudentFrame = roomBroadcasts.find(
+      (b) => b.event === 'AUDIO_VOICE_FRAME' && b.payload.senderId === 'student_101'
+    );
+    assert.equal(unauthStudentFrame, undefined, 'Unauthorized student AUDIO_VOICE_FRAME must NOT be relayed');
+
+    // Grant student mic -> student emits AUDIO_VOICE_FRAME -> relayed to room
+    await AudioStageController.grantStudentMic(roomVoice, 'student_101', false);
+    await studentSocket.triggerClientEvent('AUDIO_VOICE_FRAME', {
+      pcm: 'AAAA//8AAAD//w==',
+      sampleRate: 16000,
+      seq: 3,
+      rms: 0.35,
+    });
+    const authStudentFrame = roomBroadcasts.find(
+      (b) => b.event === 'AUDIO_VOICE_FRAME' && b.payload.senderId === 'student_101'
+    );
+    assert.ok(authStudentFrame, 'Authorized student AUDIO_VOICE_FRAME must be relayed to room participants');
+  });
 });

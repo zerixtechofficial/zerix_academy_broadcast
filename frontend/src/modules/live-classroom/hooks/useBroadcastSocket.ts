@@ -234,6 +234,7 @@ export interface UseBroadcastSocketParams {
   deviceId?: string;
   onStudentTokenRefresh?: (token: string, autoActivate?: boolean) => void;
   onStudentMicRevoked?: () => void;
+  onIncomingVoiceFrame?: (packet: any) => void;
 }
 
 export function useBroadcastSocket({
@@ -245,6 +246,7 @@ export function useBroadcastSocket({
   deviceId: propDeviceId,
   onStudentTokenRefresh,
   onStudentMicRevoked,
+  onIncomingVoiceFrame,
 }: UseBroadcastSocketParams) {
   const socketRef = useRef<Socket | null>(null);
   const seqIdRef = useRef<number>(0);
@@ -262,6 +264,11 @@ export function useBroadcastSocket({
   useEffect(() => {
     onStudentTokenRefreshRef.current = onStudentTokenRefresh;
   }, [onStudentTokenRefresh]);
+
+  const onIncomingVoiceFrameRef = useRef(onIncomingVoiceFrame);
+  useEffect(() => {
+    onIncomingVoiceFrameRef.current = onIncomingVoiceFrame;
+  }, [onIncomingVoiceFrame]);
 
   const [isConnected, setIsConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
@@ -813,6 +820,12 @@ export function useBroadcastSocket({
       }
     });
 
+    socket.on('AUDIO_VOICE_FRAME', (data: any) => {
+      if (data && data.pcm) {
+        onIncomingVoiceFrameRef.current?.(data);
+      }
+    });
+
     socket.on(
       'CO_TEACHERS_UPDATED',
       (data: { invitedTeachers?: InvitedTeacherEntry[]; whiteboardEditors?: string[] }) => {
@@ -1172,10 +1185,30 @@ export function useBroadcastSocket({
         socketRef.current.emit('AUDIO_DEVICE_MIC_ACTIVE', {
           deviceId: clientDeviceIdRef.current,
           active,
+          micActive: active,
         });
       }
     },
     [role]
+  );
+
+  // Emit real-time Port-443 WebAudio PCM Voice Frame over Socket.IO
+  const broadcastVoiceFrame = useCallback(
+    (frame: { pcm: string; sampleRate: number; seq: number; rms?: number }) => {
+      const sock = socketRef.current;
+      if (sock?.connected && frame?.pcm) {
+        const payload = {
+          ...frame,
+          deviceId: clientDeviceIdRef.current,
+        };
+        if (sock.volatile) {
+          sock.volatile.emit('AUDIO_VOICE_FRAME', payload);
+        } else {
+          sock.emit('AUDIO_VOICE_FRAME', payload);
+        }
+      }
+    },
+    []
   );
 
   // Host Teacher toggles multi-device join permission for a specific student
@@ -1414,6 +1447,7 @@ export function useBroadcastSocket({
     studentSelfUnmute,
     studentSelfMute,
     notifyDeviceMicActive,
+    broadcastVoiceFrame,
     setStudentMultiDeviceAccess,
     retryJoinRoom,
     broadcastTeacherMicState,
