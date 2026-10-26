@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: 'live-broadcast-engine',
+      name: 'broadcast-engine',
       script: './dist/index.js',
       instances: process.env.PM2_INSTANCES || 1,
       exec_mode: 'fork',
