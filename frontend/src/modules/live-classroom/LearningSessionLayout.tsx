@@ -1105,11 +1105,24 @@ export default function LearningSessionLayout() {
     () =>
       (attendanceList || []).map((s: any) => {
         const resolvedId = s.studentId || s.userId || '';
+        const cleanResolvedId = String(resolvedId).replace(/^student_/, '');
+        const cleanCurrentStudentId = String(studentId || '').replace(/^student_/, '');
+        const isSelfStudent =
+          role === 'student' &&
+          Boolean(
+            cleanResolvedId &&
+              cleanCurrentStudentId &&
+              cleanResolvedId === cleanCurrentStudentId
+          );
+        const rawName = s.studentName || s.name || s.userName || '';
         const resolvedName =
-          s.studentName ||
-          s.name ||
-          s.userName ||
-          `Student #${String(resolvedId).replace(/^student_/, '')}`;
+          isSelfStudent &&
+          verifiedUserName &&
+          (!rawName || rawName.startsWith('Student #'))
+            ? verifiedUserName
+            : rawName ||
+              (isSelfStudent && verifiedUserName ? verifiedUserName : '') ||
+              `Student #${cleanResolvedId}`;
         return {
           studentId: resolvedId,
           studentName: resolvedName,
@@ -1125,7 +1138,7 @@ export default function LearningSessionLayout() {
           status: (String(s.status || 'PRESENT').toUpperCase() as any) || 'PRESENT',
         };
       }),
-    [attendanceList]
+    [attendanceList, role, studentId, verifiedUserName]
   );
 
   // Map Audio Stage State for TopModeNavbar & Joined Students Drawer
@@ -1323,15 +1336,21 @@ export default function LearningSessionLayout() {
   };
 
   const currentTeacherDisplayName = useMemo(() => {
-    if (role === 'teacher' && verifiedUserName) return verifiedUserName;
-    return sessionMetadata?.teacherName || verifiedUserName || 'Instructor';
-  }, [role, verifiedUserName, sessionMetadata]);
+    if (role === 'teacher' && isHostTeacher && verifiedUserName) return verifiedUserName;
+    return (
+      sessionMetadata?.teacherName ||
+      (role === 'teacher' && isHostTeacher ? verifiedUserName : '') ||
+      'Instructor'
+    );
+  }, [role, isHostTeacher, verifiedUserName, sessionMetadata]);
 
   const currentUserDisplayName = useMemo(() => {
     if (verifiedUserName) return verifiedUserName;
-    if (role === 'teacher') return currentTeacherDisplayName;
+    if (role === 'teacher') {
+      return isHostTeacher ? currentTeacherDisplayName : 'Co-Host';
+    }
     return studentId ? `Student #${studentId}` : 'Student';
-  }, [verifiedUserName, role, currentTeacherDisplayName, studentId]);
+  }, [verifiedUserName, role, isHostTeacher, currentTeacherDisplayName, studentId]);
 
   // Disconnect LiveKit audio automatically when the broadcast ends
   useEffect(() => {

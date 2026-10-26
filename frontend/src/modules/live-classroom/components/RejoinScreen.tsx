@@ -164,7 +164,6 @@ export default function RejoinScreen() {
       role,
       ...(studentId ? { studentId } : {}),
       ...(teacherId ? { teacherId } : {}),
-      ...(token ? { token } : {}),
     });
     window.location.href = `/?${params.toString()}`;
   };
@@ -179,7 +178,6 @@ export default function RejoinScreen() {
       sessionId: selectedSessionId,
       role: 'teacher',
       ...(teacherId ? { teacherId } : {}),
-      ...(token ? { token } : {}),
     });
     window.location.href = `/?${params.toString()}`;
   };

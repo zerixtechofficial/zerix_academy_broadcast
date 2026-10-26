@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   ActiveMode,
   AudioStageState,
+  InvitedTeacherEntry,
   StudentAttendanceSummary,
 } from '../hooks/useBroadcastSocket';
 import {
@@ -45,6 +46,177 @@ export interface BatchOption {
   name: string;
   subject: string;
   teacherName: string;
+}
+
+/**
+ * Strips leading `student_` or `teacher_` prefix so participant IDs match
+ * regardless of whether the caller passed `student_101` or `101`.
+ */
+export function normalizeParticipantId(rawId?: string | null): string {
+  return String(rawId || '')
+    .trim()
+    .replace(/^(student_|teacher_)/i, '');
+}
+
+/**
+ * Returns true when `entryStudentId` belongs to the currently logged-in Student.
+ */
+export function isCurrentStudentEntry(
+  entryStudentId: string,
+  currentUserId: string,
+  role: 'teacher' | 'student'
+): boolean {
+  if (role !== 'student') return false;
+  const cleanEntry = normalizeParticipantId(entryStudentId);
+  const cleanCurrent = normalizeParticipantId(currentUserId);
+  return Boolean(cleanEntry && cleanCurrent && cleanEntry === cleanCurrent);
+}
+
+/**
+ * Returns true when `entryTeacherId` belongs to the currently logged-in Co-Host Teacher.
+ */
+export function isCurrentCoHostEntry(
+  entryTeacherId: string,
+  currentUserId: string,
+  role: 'teacher' | 'student',
+  isHostTeacher: boolean
+): boolean {
+  if (role !== 'teacher' || isHostTeacher) return false;
+  const cleanEntry = normalizeParticipantId(entryTeacherId);
+  const cleanCurrent = normalizeParticipantId(currentUserId);
+  return Boolean(cleanEntry && cleanCurrent && cleanEntry === cleanCurrent);
+}
+
+/**
+ * Places the currently logged-in Student at index 0 (top of the list) and ensures
+ * their entry is always present even before the next attendance broadcast tick.
+ */
+export function prioritizeStudentsForCurrentUser(params: {
+  attendanceList: StudentAttendanceSummary[];
+  role: 'teacher' | 'student';
+  currentUserId: string;
+  currentUserName: string;
+  isConnected?: boolean;
+}): StudentAttendanceSummary[] {
+  const {
+    attendanceList,
+    role,
+    currentUserId,
+    currentUserName,
+    isConnected = true,
+  } = params;
+  const list = Array.isArray(attendanceList) ? attendanceList : [];
+  if (role !== 'student') return list;
+
+  const cleanCurrentId = normalizeParticipantId(currentUserId);
+  if (!cleanCurrentId) return list;
+
+  const matched: StudentAttendanceSummary[] = [];
+  const others: StudentAttendanceSummary[] = [];
+
+  for (const item of list) {
+    if (isCurrentStudentEntry(item.studentId, currentUserId, role)) {
+      const preferUserName =
+        currentUserName &&
+        currentUserName.trim().length > 0 &&
+        (!item.studentName || item.studentName.startsWith('Student #'));
+      matched.push({
+        ...item,
+        studentName: preferUserName ? currentUserName.trim() : item.studentName,
+      });
+    } else {
+      others.push(item);
+    }
+  }
+
+  if (matched.length > 0) {
+    return [...matched, ...others];
+  }
+
+  const now = Date.now();
+  const selfEntry: StudentAttendanceSummary = {
+    studentId: currentUserId.startsWith('student_')
+      ? currentUserId
+      : `student_${cleanCurrentId}`,
+    studentName:
+      currentUserName && currentUserName.trim().length > 0
+        ? currentUserName.trim()
+        : `Student #${cleanCurrentId}`,
+    totalJoinedSeconds: 0,
+    totalJoinedMinutes: 0,
+    totalJoinedHours: 0,
+    attendancePercentage: 100,
+    status: 'PRESENT',
+    rejoinCount: 0,
+    isOnline: isConnected,
+    firstJoinedAt: now,
+    lastSeenAt: now,
+    leftAt: null,
+  };
+
+  return [selfEntry, ...others];
+}
+
+/**
+ * Places the currently logged-in Co-Host Teacher at index 0 (top of the Invited Co-Teachers list)
+ * and ensures their entry is always present when logged in as a Co-Host.
+ */
+export function prioritizeInvitedTeachersForCurrentUser(params: {
+  invitedTeachers: InvitedTeacherEntry[];
+  role: 'teacher' | 'student';
+  isHostTeacher: boolean;
+  currentUserId: string;
+  currentUserName: string;
+  canEditWhiteboard?: boolean;
+}): InvitedTeacherEntry[] {
+  const {
+    invitedTeachers,
+    role,
+    isHostTeacher,
+    currentUserId,
+    currentUserName,
+    canEditWhiteboard = false,
+  } = params;
+  const list = Array.isArray(invitedTeachers) ? invitedTeachers : [];
+  if (role !== 'teacher' || isHostTeacher) return list;
+
+  const cleanCurrentId = normalizeParticipantId(currentUserId);
+  if (!cleanCurrentId) return list;
+
+  const matched: InvitedTeacherEntry[] = [];
+  const others: InvitedTeacherEntry[] = [];
+
+  for (const ct of list) {
+    if (isCurrentCoHostEntry(ct.teacherId, currentUserId, role, isHostTeacher)) {
+      const preferUserName =
+        currentUserName &&
+        currentUserName.trim().length > 0 &&
+        (!ct.name || ct.name === 'Co-Host');
+      matched.push({
+        ...ct,
+        name: preferUserName ? currentUserName.trim() : ct.name,
+      });
+    } else {
+      others.push(ct);
+    }
+  }
+
+  if (matched.length > 0) {
+    return [...matched, ...others];
+  }
+
+  const selfCoHost: InvitedTeacherEntry = {
+    teacherId: currentUserId,
+    name:
+      currentUserName && currentUserName.trim().length > 0
+        ? currentUserName.trim()
+        : 'Co-Host',
+    canUseWhiteboard: Boolean(canEditWhiteboard),
+    invitedAt: Date.now(),
+    isOnline: true,
+  };
+
+  return [selfCoHost, ...others];
 }
 
 interface TopModeNavbarProps {
@@ -236,6 +408,55 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
   const invitedTeachers = audioStage.invitedTeachers || [];
   const whiteboardEditors = audioStage.whiteboardEditors || [];
   const multiDeviceStudents = audioStage.multiDeviceStudents || [];
+
+  const sortedAttendanceList = useMemo(
+    () =>
+      prioritizeStudentsForCurrentUser({
+        attendanceList,
+        role,
+        currentUserId: userId,
+        currentUserName: userName,
+        isConnected,
+      }),
+    [attendanceList, role, userId, userName, isConnected]
+  );
+
+  const sortedInvitedTeachers = useMemo(
+    () =>
+      prioritizeInvitedTeachersForCurrentUser({
+        invitedTeachers,
+        role,
+        isHostTeacher,
+        currentUserId: userId,
+        currentUserName: userName,
+        canEditWhiteboard,
+      }),
+    [invitedTeachers, role, isHostTeacher, userId, userName, canEditWhiteboard]
+  );
+
+  const sortedRaisedHands = useMemo(() => {
+    const hands = audioStage.raisedHands || [];
+    if (role !== 'student') return hands;
+    const selfHands = hands.filter((h) =>
+      isCurrentStudentEntry(h.studentId, userId, role)
+    );
+    const otherHands = hands.filter(
+      (h) => !isCurrentStudentEntry(h.studentId, userId, role)
+    );
+    return [...selfHands, ...otherHands];
+  }, [audioStage.raisedHands, role, userId]);
+
+  const sortedActiveStudentMics = useMemo(() => {
+    const speakers = audioStage.activeStudentMics || [];
+    if (role !== 'student') return speakers;
+    const selfSpeakers = speakers.filter((s) =>
+      isCurrentStudentEntry(s.studentId, userId, role)
+    );
+    const otherSpeakers = speakers.filter(
+      (s) => !isCurrentStudentEntry(s.studentId, userId, role)
+    );
+    return [...selfSpeakers, ...otherSpeakers];
+  }, [audioStage.activeStudentMics, role, userId]);
 
   const handleApproveMic = (studentId: string, studentName: string) => {
     setMicValidationError(null);
@@ -752,7 +973,7 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                   <Users className="w-3.5 h-3.5" />
                   <span>Students</span>
                   <span className="px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold">
-                    {Math.max(participantsCount, attendanceList.length)}
+                    {Math.max(participantsCount, sortedAttendanceList.length)}
                   </span>
                   {raisedHandsCount > 0 && (
                     <span className="px-1.5 py-0.2 rounded-full bg-amber-500 text-white text-[10px] font-bold">
@@ -774,7 +995,7 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                   <GraduationCap className="w-3.5 h-3.5" />
                   <span>Teachers</span>
                   <span className="px-1.5 py-0.2 rounded-full bg-indigo-50 text-indigo-700 text-[10px] font-bold">
-                    {1 + invitedTeachers.length}
+                    {1 + sortedInvitedTeachers.length}
                   </span>
                 </button>
               </div>
@@ -868,20 +1089,25 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
 
                 <div className="flex-1 overflow-y-auto p-5 space-y-5">
                   {/* Section 1: Raised Hands Queue */}
-                  {audioStage.raisedHands.length > 0 && (
+                  {sortedRaisedHands.length > 0 && (
                     <div className="space-y-2">
                       <div className="text-xs font-bold uppercase tracking-wider text-amber-600 flex items-center gap-1.5">
                         <Hand className="w-3.5 h-3.5" />
-                        <span>Raised Hands Queue ({audioStage.raisedHands.length})</span>
+                        <span>Raised Hands Queue ({sortedRaisedHands.length})</span>
                       </div>
                       <div className="space-y-2">
-                        {audioStage.raisedHands.map((hand) => {
+                        {sortedRaisedHands.map((hand) => {
                           const normHandId = hand.studentId.startsWith('student_')
                             ? hand.studentId
                             : `student_${hand.studentId}`;
                           const hasHandWbAccess =
                             whiteboardEditors.includes(hand.studentId) ||
                             whiteboardEditors.includes(normHandId);
+                          const isSelfHand = isCurrentStudentEntry(
+                            hand.studentId,
+                            userId,
+                            role
+                          );
 
                           return (
                             <div
@@ -889,8 +1115,16 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                               className="flex items-center justify-between p-3 rounded-xl bg-amber-50/70 border border-amber-200"
                             >
                               <div>
-                                <div className="text-xs font-bold text-slate-900">
-                                  {hand.studentName}
+                                <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                                  <span>{hand.studentName}</span>
+                                  {isSelfHand && (
+                                    <span
+                                      data-testid="raised-hand-you-badge"
+                                      className="px-1.5 py-0.2 rounded bg-[#12a3ff] text-white text-[10px] font-bold tracking-wide shadow-2xs"
+                                    >
+                                      You
+                                    </span>
+                                  )}
                                 </div>
                                 <div className="text-[11px] text-amber-700">
                                   Requested at {formatClockTime(hand.raisedAt)}
@@ -956,22 +1190,27 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                   )}
 
                   {/* Section 2: Active Student Microphones */}
-                  {audioStage.activeStudentMics.length > 0 && (
+                  {sortedActiveStudentMics.length > 0 && (
                     <div className="space-y-2">
                       <div className="text-xs font-bold uppercase tracking-wider text-emerald-600 flex items-center gap-1.5">
                         <Mic className="w-3.5 h-3.5" />
                         <span>
-                          Live Student Speakers ({audioStage.activeStudentMics.length})
+                          Live Student Speakers ({sortedActiveStudentMics.length})
                         </span>
                       </div>
                       <div className="space-y-2">
-                        {audioStage.activeStudentMics.map((speaker) => {
+                        {sortedActiveStudentMics.map((speaker) => {
                           const normSpeakerId = speaker.studentId.startsWith('student_')
                             ? speaker.studentId
                             : `student_${speaker.studentId}`;
                           const hasSpeakerWbAccess =
                             whiteboardEditors.includes(speaker.studentId) ||
                             whiteboardEditors.includes(normSpeakerId);
+                          const isSelfSpeaker = isCurrentStudentEntry(
+                            speaker.studentId,
+                            userId,
+                            role
+                          );
 
                           return (
                             <div
@@ -981,8 +1220,16 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                               <div className="flex items-center gap-2.5">
                                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping" />
                                 <div>
-                                  <div className="text-xs font-bold text-slate-900">
-                                    {speaker.studentName}
+                                  <div className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                                    <span>{speaker.studentName}</span>
+                                    {isSelfSpeaker && (
+                                      <span
+                                        data-testid="active-mic-you-badge"
+                                        className="px-1.5 py-0.2 rounded bg-[#12a3ff] text-white text-[10px] font-bold tracking-wide shadow-2xs"
+                                      >
+                                        You
+                                      </span>
+                                    )}
                                   </div>
                                   <div className="text-[11px] text-emerald-700">
                                     Speaking since {formatClockTime(speaker.grantedAt)}
@@ -1011,7 +1258,7 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                                     </span>
                                   </button>
                                 )}
-                                {(role === 'teacher' || speaker.studentId === userId) && (
+                                {(role === 'teacher' || isSelfSpeaker) && (
                                   <button
                                     type="button"
                                     onClick={() => onRevokeStudentMic(speaker.studentId)}
@@ -1032,23 +1279,28 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                   <div className="space-y-2.5">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                        Joined Students ({attendanceList.length})
+                        Joined Students ({sortedAttendanceList.length})
                       </span>
                       <span className="text-[11px] text-slate-400">
                         Mic & Whiteboard Permissions
                       </span>
                     </div>
 
-                    {attendanceList.length === 0 ? (
+                    {sortedAttendanceList.length === 0 ? (
                       <div className="p-6 rounded-xl bg-slate-50 border border-slate-200 text-center text-xs text-slate-500">
                         No students recorded yet in this session.
                       </div>
                     ) : (
                       <div className="space-y-2">
-                        {attendanceList.map((student) => {
+                        {sortedAttendanceList.map((student) => {
                           const normStId = student.studentId.startsWith('student_')
                             ? student.studentId
                             : `student_${student.studentId}`;
+                          const isCurrentUserStudent = isCurrentStudentEntry(
+                            student.studentId,
+                            userId,
+                            role
+                          );
                           const isMicGranted = audioStage.activeStudentMics.some(
                             (m) =>
                               m.studentId === student.studentId || m.studentId === normStId
@@ -1064,7 +1316,12 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                             <div
                               key={student.studentId}
                               data-testid={`student-row-${student.studentId}`}
-                              className="p-3 rounded-xl bg-white border border-slate-200 hover:border-slate-300 transition-all shadow-2xs space-y-2"
+                              data-current-user={isCurrentUserStudent ? 'true' : 'false'}
+                              className={`p-3 rounded-xl border transition-all shadow-2xs space-y-2 ${
+                                isCurrentUserStudent
+                                  ? 'bg-sky-50/30 border-[#12a3ff]/40 ring-1 ring-[#12a3ff]/15'
+                                  : 'bg-white border-slate-200 hover:border-slate-300'
+                              }`}
                             >
                               <div className="flex items-center justify-between gap-2">
                                 <div className="flex items-center gap-2 min-w-0">
@@ -1085,6 +1342,14 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                                   <div className="min-w-0">
                                     <div className="text-xs font-bold text-slate-900 truncate flex items-center gap-1.5 flex-wrap">
                                       <span>{student.studentName}</span>
+                                      {isCurrentUserStudent && (
+                                        <span
+                                          data-testid="student-you-badge"
+                                          className="px-1.5 py-0.2 rounded bg-[#12a3ff] text-white text-[10px] font-bold tracking-wide shadow-2xs"
+                                        >
+                                          You
+                                        </span>
+                                      )}
                                       <span
                                         className={`px-1.5 py-0.2 rounded text-[10px] font-semibold ${
                                           student.status === 'PRESENT'
@@ -1244,7 +1509,15 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                   <div className="text-xs font-bold uppercase tracking-wider text-slate-500">
                     Host Teacher
                   </div>
-                  <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-3">
+                  <div
+                    data-testid="host-teacher-card"
+                    data-current-user={role === 'teacher' && isHostTeacher ? 'true' : 'false'}
+                    className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 ${
+                      role === 'teacher' && isHostTeacher
+                        ? 'bg-sky-50/40 border-[#12a3ff]/40 ring-1 ring-[#12a3ff]/15'
+                        : 'bg-slate-50 border-slate-200'
+                    }`}
+                  >
                     <div className="flex items-center gap-2.5 min-w-0">
                       <div className="relative flex items-center justify-center w-9 h-9 rounded-full bg-[#12a3ff]/10 text-[#12a3ff] text-xs font-bold shrink-0">
                         {(teacherName || 'Teacher')
@@ -1259,8 +1532,16 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                         />
                       </div>
                       <div className="min-w-0">
-                        <div className="text-xs font-bold text-slate-900 truncate flex items-center gap-1.5">
+                        <div className="text-xs font-bold text-slate-900 truncate flex items-center gap-1.5 flex-wrap">
                           <span>{teacherName}</span>
+                          {role === 'teacher' && isHostTeacher && (
+                            <span
+                              data-testid="host-you-badge"
+                              className="px-1.5 py-0.2 rounded bg-[#12a3ff] text-white text-[10px] font-bold tracking-wide shadow-2xs"
+                            >
+                              You
+                            </span>
+                          )}
                           <span className="px-1.5 py-0.2 rounded bg-sky-50 text-[#12a3ff] border border-sky-200 text-[10px] font-semibold">
                             Host
                           </span>
@@ -1297,7 +1578,7 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                   <div className="flex items-center justify-between">
                     <div className="text-xs font-bold uppercase tracking-wider text-indigo-700 flex items-center gap-1.5">
                       <UserPlus className="w-3.5 h-3.5" />
-                      <span>Invited Co-Teachers ({invitedTeachers.length})</span>
+                      <span>Invited Co-Teachers ({sortedInvitedTeachers.length})</span>
                     </div>
                     <span className="text-[10px] font-semibold text-indigo-600 bg-indigo-100/80 px-2 py-0.5 rounded-full">
                       Multi-Teacher Stage
@@ -1377,66 +1658,88 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                     </div>
                   )}
 
-                  {invitedTeachers.length === 0 ? (
+                  {sortedInvitedTeachers.length === 0 ? (
                     <div className="text-xs text-slate-500 text-center py-2">
                       No co-teachers invited yet. Host can invite another teacher and grant Whiteboard access.
                     </div>
                   ) : (
                     <div className="space-y-2">
-                      {invitedTeachers.map((ct) => (
-                        <div
-                          key={ct.teacherId}
-                          data-testid={`invited-coteacher-row-${ct.teacherId}`}
-                          className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-white border border-indigo-200/80 shadow-2xs"
-                        >
-                          <div className="min-w-0">
-                            <div className="text-xs font-bold text-slate-900 truncate flex items-center gap-1.5">
-                              <span>{ct.name}</span>
-                              <span className="px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 text-[10px] font-semibold">
-                                Co-Teacher
-                              </span>
-                            </div>
-                            <div className="text-[11px] text-slate-500">
-                              {ct.canUseWhiteboard
-                                ? 'Whiteboard Access: Enabled (Can Draw & Edit)'
-                                : 'Whiteboard Access: View Only'}
-                            </div>
-                          </div>
+                      {sortedInvitedTeachers.map((ct) => {
+                        const isCurrentCoHost = isCurrentCoHostEntry(
+                          ct.teacherId,
+                          userId,
+                          role,
+                          isHostTeacher
+                        );
 
-                          {role === 'teacher' && isHostTeacher && (
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <button
-                                type="button"
-                                data-testid={`coteacher-wb-toggle-${ct.teacherId}`}
-                                onClick={() =>
-                                  onToggleCoTeacherWhiteboard(
-                                    ct.teacherId,
-                                    !ct.canUseWhiteboard
-                                  )
-                                }
-                                className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors ${
-                                  ct.canUseWhiteboard
-                                    ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200'
-                                    : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
-                                }`}
-                                title="Toggle Co-Teacher Whiteboard Access"
-                              >
-                                <PenTool className="w-3 h-3" />
-                                <span>{ct.canUseWhiteboard ? 'WB On' : 'WB Off'}</span>
-                              </button>
-                              <button
-                                type="button"
-                                data-testid={`coteacher-remove-${ct.teacherId}`}
-                                onClick={() => onRemoveCoTeacher(ct.teacherId)}
-                                className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
-                                title="Remove Co-Teacher"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+                        return (
+                          <div
+                            key={ct.teacherId}
+                            data-testid={`invited-coteacher-row-${ct.teacherId}`}
+                            data-current-user={isCurrentCoHost ? 'true' : 'false'}
+                            className={`flex items-center justify-between gap-2 p-2.5 rounded-lg border shadow-2xs ${
+                              isCurrentCoHost
+                                ? 'bg-indigo-50/40 border-indigo-400 ring-1 ring-indigo-300/40'
+                                : 'bg-white border-indigo-200/80'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="text-xs font-bold text-slate-900 truncate flex items-center gap-1.5 flex-wrap">
+                                <span>{ct.name}</span>
+                                {isCurrentCoHost && (
+                                  <span
+                                    data-testid="cohost-you-badge"
+                                    className="px-1.5 py-0.2 rounded bg-indigo-600 text-white text-[10px] font-bold tracking-wide shadow-2xs"
+                                  >
+                                    You
+                                  </span>
+                                )}
+                                <span className="px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 text-[10px] font-semibold">
+                                  Co-Teacher
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-500">
+                                {ct.canUseWhiteboard
+                                  ? 'Whiteboard Access: Enabled (Can Draw & Edit)'
+                                  : 'Whiteboard Access: View Only'}
+                              </div>
                             </div>
-                          )}
-                        </div>
-                      ))}
+
+                            {role === 'teacher' && isHostTeacher && (
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <button
+                                  type="button"
+                                  data-testid={`coteacher-wb-toggle-${ct.teacherId}`}
+                                  onClick={() =>
+                                    onToggleCoTeacherWhiteboard(
+                                      ct.teacherId,
+                                      !ct.canUseWhiteboard
+                                    )
+                                  }
+                                  className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold border transition-colors ${
+                                    ct.canUseWhiteboard
+                                      ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200'
+                                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
+                                  }`}
+                                  title="Toggle Co-Teacher Whiteboard Access"
+                                >
+                                  <PenTool className="w-3 h-3" />
+                                  <span>{ct.canUseWhiteboard ? 'WB On' : 'WB Off'}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  data-testid={`coteacher-remove-${ct.teacherId}`}
+                                  onClick={() => onRemoveCoTeacher(ct.teacherId)}
+                                  className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                                  title="Remove Co-Teacher"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>

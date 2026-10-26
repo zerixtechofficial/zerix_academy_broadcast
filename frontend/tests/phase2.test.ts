@@ -27,6 +27,15 @@ import {
   decodePcmToFloat32,
   VOICE_RELAY_SAMPLE_RATE,
 } from '../src/modules/live-classroom/hooks/useLiveKitStage';
+import {
+  normalizeParticipantId,
+  isCurrentStudentEntry,
+  isCurrentCoHostEntry,
+  prioritizeStudentsForCurrentUser,
+  prioritizeInvitedTeachersForCurrentUser,
+  StudentAttendanceSummary,
+  InvitedTeacherEntry,
+} from '../src/modules/live-classroom/components/TopModeNavbar';
 
 describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topic Navigation & Rough Pad Removal', () => {
   describe('1. 720p Browser Hardware Encoder & Random Jitter Unit Tests', () => {
@@ -825,6 +834,240 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
         stageSource.includes('if (pointYInViewport >= edgeMargin && pointYInViewport <= viewportHeight - edgeMargin) {'),
         true,
         'VirtualContentStage must not scroll or jump a section to top when the marked/laser point is already visible in the viewport'
+      );
+    });
+  });
+
+  describe('10. Users Drawer Top-Priority Ordering & "You" Badge for Student, Host & Co-Host', () => {
+    it('normalizes participant IDs across student_ and teacher_ prefixes', () => {
+      assert.equal(normalizeParticipantId('student_101'), '101');
+      assert.equal(normalizeParticipantId('101'), '101');
+      assert.equal(normalizeParticipantId('teacher_cohost_abc'), 'cohost_abc');
+      assert.equal(normalizeParticipantId('  Student_42  '), '42');
+      assert.equal(normalizeParticipantId(null), '');
+    });
+
+    it('moves the logged-in student to index 0 of the attendance list and preserves relative order of other students', () => {
+      const attendanceList: StudentAttendanceSummary[] = [
+        {
+          studentId: '101',
+          studentName: 'Aarav Sharma',
+          isOnline: true,
+          status: 'PRESENT',
+          totalActiveSeconds: 420,
+          attendancePercentage: 95,
+        },
+        {
+          studentId: '102',
+          studentName: 'Priya Patel',
+          isOnline: true,
+          status: 'PRESENT',
+          totalActiveSeconds: 380,
+          attendancePercentage: 90,
+        },
+        {
+          studentId: 'student_103',
+          studentName: 'Student #103',
+          isOnline: true,
+          status: 'PRESENT',
+          totalActiveSeconds: 310,
+          attendancePercentage: 85,
+        },
+      ];
+
+      const sorted = prioritizeStudentsForCurrentUser({
+        attendanceList,
+        role: 'student',
+        currentUserId: '103',
+        currentUserName: 'Rohan Verma',
+        isConnected: true,
+      });
+
+      assert.equal(sorted.length, 3);
+      assert.equal(sorted[0].studentId, 'student_103');
+      // Generic "Student #103" placeholder is upgraded to verified userName
+      assert.equal(sorted[0].studentName, 'Rohan Verma');
+      assert.equal(isCurrentStudentEntry(sorted[0].studentId, '103', 'student'), true);
+      assert.equal(isCurrentStudentEntry(sorted[1].studentId, '103', 'student'), false);
+      assert.equal(sorted[1].studentId, '101');
+      assert.equal(sorted[2].studentId, '102');
+    });
+
+    it('prepends the logged-in student at index 0 when not yet present in attendanceList snapshot', () => {
+      const attendanceList: StudentAttendanceSummary[] = [
+        {
+          studentId: '201',
+          studentName: 'Ananya Gupta',
+          isOnline: true,
+          status: 'PRESENT',
+          totalActiveSeconds: 120,
+          attendancePercentage: 100,
+        },
+      ];
+
+      const sorted = prioritizeStudentsForCurrentUser({
+        attendanceList,
+        role: 'student',
+        currentUserId: '205',
+        currentUserName: 'Kabir Nair',
+        isConnected: true,
+      });
+
+      assert.equal(sorted.length, 2);
+      assert.equal(sorted[0].studentId, 'student_205');
+      assert.equal(sorted[0].studentName, 'Kabir Nair');
+      assert.equal(sorted[0].isOnline, true);
+      assert.equal(isCurrentStudentEntry(sorted[0].studentId, '205', 'student'), true);
+      assert.equal(sorted[1].studentId, '201');
+    });
+
+    it('does not inject or reorder students when the viewer is a teacher or co-host', () => {
+      const attendanceList: StudentAttendanceSummary[] = [
+        {
+          studentId: '101',
+          studentName: 'Aarav Sharma',
+          isOnline: true,
+          status: 'PRESENT',
+          totalActiveSeconds: 420,
+          attendancePercentage: 95,
+        },
+        {
+          studentId: '102',
+          studentName: 'Priya Patel',
+          isOnline: true,
+          status: 'PRESENT',
+          totalActiveSeconds: 380,
+          attendancePercentage: 90,
+        },
+      ];
+
+      const sortedForTeacher = prioritizeStudentsForCurrentUser({
+        attendanceList,
+        role: 'teacher',
+        currentUserId: '102',
+        currentUserName: 'Instructor',
+        isConnected: true,
+      });
+
+      assert.equal(sortedForTeacher.length, 2);
+      assert.equal(sortedForTeacher[0].studentId, '101');
+      assert.equal(sortedForTeacher[1].studentId, '102');
+      assert.equal(isCurrentStudentEntry('102', '102', 'teacher'), false);
+    });
+
+    it('moves the logged-in Co-Host to index 0 of invitedTeachers and prepends if not yet hydrated', () => {
+      const invitedTeachers: InvitedTeacherEntry[] = [
+        {
+          teacherId: 'cohost_alpha',
+          name: 'Prof. Kulkarni',
+          invitedAt: 1000,
+          canUseWhiteboard: true,
+          isOnline: true,
+        },
+        {
+          teacherId: 'cohost_beta',
+          name: 'Co-Host',
+          invitedAt: 2000,
+          canUseWhiteboard: false,
+          isOnline: true,
+        },
+      ];
+
+      // 1. Existing Co-Host in list is moved to index 0 and generic name is upgraded
+      const sortedExisting = prioritizeInvitedTeachersForCurrentUser({
+        invitedTeachers,
+        role: 'teacher',
+        isHostTeacher: false,
+        currentUserId: 'cohost_beta',
+        currentUserName: 'Dr. Neha Joshi',
+        canEditWhiteboard: true,
+      });
+
+      assert.equal(sortedExisting.length, 2);
+      assert.equal(sortedExisting[0].teacherId, 'cohost_beta');
+      assert.equal(sortedExisting[0].name, 'Dr. Neha Joshi');
+      assert.equal(
+        isCurrentCoHostEntry(sortedExisting[0].teacherId, 'cohost_beta', 'teacher', false),
+        true
+      );
+      assert.equal(sortedExisting[1].teacherId, 'cohost_alpha');
+
+      // 2. Co-Host not yet hydrated in invitedTeachers is prepended at index 0
+      const sortedHydrated = prioritizeInvitedTeachersForCurrentUser({
+        invitedTeachers,
+        role: 'teacher',
+        isHostTeacher: false,
+        currentUserId: 'cohost_gamma',
+        currentUserName: 'Prof. Vikram Rao',
+        canEditWhiteboard: true,
+      });
+
+      assert.equal(sortedHydrated.length, 3);
+      assert.equal(sortedHydrated[0].teacherId, 'cohost_gamma');
+      assert.equal(sortedHydrated[0].name, 'Prof. Vikram Rao');
+      assert.equal(sortedHydrated[0].canUseWhiteboard, true);
+      assert.equal(
+        isCurrentCoHostEntry(sortedHydrated[0].teacherId, 'cohost_gamma', 'teacher', false),
+        true
+      );
+
+      // 3. Host Teacher does not get added to invitedTeachers or marked as Co-Host
+      const sortedForHost = prioritizeInvitedTeachersForCurrentUser({
+        invitedTeachers,
+        role: 'teacher',
+        isHostTeacher: true,
+        currentUserId: 'teacher_host_1',
+        currentUserName: 'Lead Host',
+        canEditWhiteboard: true,
+      });
+
+      assert.equal(sortedForHost.length, 2);
+      assert.equal(sortedForHost[0].teacherId, 'cohost_alpha');
+      assert.equal(
+        isCurrentCoHostEntry('cohost_alpha', 'teacher_host_1', 'teacher', true),
+        false
+      );
+    });
+
+    it('renders "You" badges and top-priority sorting hooks in TopModeNavbar and LearningSessionLayout', () => {
+      const navbarSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/TopModeNavbar.tsx'),
+        'utf8'
+      );
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+
+      assert.equal(
+        navbarSource.includes('data-testid="student-you-badge"'),
+        true,
+        'TopModeNavbar must render student-you-badge for the logged-in student'
+      );
+      assert.equal(
+        navbarSource.includes('data-testid="host-you-badge"'),
+        true,
+        'TopModeNavbar must render host-you-badge for the logged-in Host Teacher'
+      );
+      assert.equal(
+        navbarSource.includes('data-testid="cohost-you-badge"'),
+        true,
+        'TopModeNavbar must render cohost-you-badge for the logged-in Co-Host'
+      );
+      assert.equal(
+        navbarSource.includes('data-testid="raised-hand-you-badge"'),
+        true,
+        'TopModeNavbar must render raised-hand-you-badge when the logged-in student raises hand'
+      );
+      assert.equal(
+        navbarSource.includes('data-testid="active-mic-you-badge"'),
+        true,
+        'TopModeNavbar must render active-mic-you-badge when the logged-in student has an active mic'
+      );
+      assert.equal(
+        layoutSource.includes('userName={currentUserDisplayName}'),
+        true,
+        'LearningSessionLayout must pass currentUserDisplayName to TopModeNavbar so Co-Host and Student names are preserved accurately'
       );
     });
   });
