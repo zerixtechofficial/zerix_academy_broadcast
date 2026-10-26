@@ -9,7 +9,7 @@ export interface AppEnv {
   PORT: number;
   HOST: string;
   NODE_ENV: string;
-  DATA_SOURCE_MODE: 'mock_json' | 'laravel_api';
+  DATA_SOURCE_MODE: 'laravel_api';
   REDIS_HOST: string;
   REDIS_PORT: number;
   REDIS_PASSWORD?: string;
@@ -61,8 +61,8 @@ const resolvedBucket =
 export const env: AppEnv = {
   PORT: parseInt(process.env.PORT || '4000', 10),
   HOST: process.env.HOST || '0.0.0.0',
-  NODE_ENV: process.env.NODE_ENV || 'development',
-  DATA_SOURCE_MODE: (process.env.DATA_SOURCE_MODE as 'mock_json' | 'laravel_api') || 'mock_json',
+  NODE_ENV: process.env.NODE_ENV || 'production',
+  DATA_SOURCE_MODE: 'laravel_api',
   REDIS_HOST: process.env.REDIS_HOST || '127.0.0.1',
   REDIS_PORT: parseInt(process.env.REDIS_PORT || '6379', 10),
   REDIS_PASSWORD: process.env.REDIS_PASSWORD || undefined,
@@ -70,10 +70,10 @@ export const env: AppEnv = {
   LIVEKIT_URL: process.env.LIVEKIT_URL || 'http://127.0.0.1:7880',
   LIVEKIT_API_KEY: process.env.LIVEKIT_API_KEY || 'devkey',
   LIVEKIT_API_SECRET: process.env.LIVEKIT_API_SECRET || 'secret',
-  LIVEKIT_PUBLIC_URL: process.env.LIVEKIT_PUBLIC_URL || 'ws://127.0.0.1:7880',
+  LIVEKIT_PUBLIC_URL: process.env.LIVEKIT_PUBLIC_URL || 'wss://studio.zerixtech.com/livekit',
   TEACHER_GRACE_TIMEOUT_SECONDS: parseInt(process.env.TEACHER_GRACE_TIMEOUT_SECONDS || '300', 10),
   CHECKPOINT_INTERVAL_SECONDS: parseInt(process.env.CHECKPOINT_INTERVAL_SECONDS || '30', 10),
-  LARAVEL_API_BASE_URL: process.env.LARAVEL_API_BASE_URL || 'http://127.0.0.1:8000',
+  LARAVEL_API_BASE_URL: process.env.LARAVEL_API_BASE_URL || 'https://api-academy.zerixtech.com',
   LARAVEL_INTERNAL_API_SECRET:
     process.env.LARAVEL_INTERNAL_API_SECRET ||
     process.env.BROADCAST_INTERNAL_SECRET ||

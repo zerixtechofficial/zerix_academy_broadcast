@@ -9,27 +9,31 @@ import {
 import { SessionAttendanceSummary } from '../types/attendance.types';
 
 export interface IDataProvider {
-  readonly mode: 'mock_json' | 'laravel_api';
+  readonly mode: 'laravel_api';
 
   /**
-   * Validate incoming token (dev token string or signed JWT)
+   * Validate incoming classroom JWT token
    */
   validateToken(token: string, sessionId?: string): Promise<UserAuthPayload | null>;
 
   /**
    * Resolve session relational metadata
    */
-  getSessionContext(sessionId: string): Promise<SessionContext | null>;
+  getSessionContext(sessionId: string, languageId?: string): Promise<SessionContext | null>;
 
   /**
    * Fetch curriculum hierarchy (Chapters -> Lessons -> Topics)
    */
-  getCurriculumSidebar(courseId: string): Promise<CurriculumSidebar | null>;
+  getCurriculumSidebar(courseId: string, languageId?: string): Promise<CurriculumSidebar | null>;
 
   /**
-   * Fetch 800px virtual stage blocks for a specific lesson
+   * Fetch 800px virtual stage blocks for a specific lesson (and optional topic/language)
    */
-  getLessonContent(lessonId: string): Promise<LessonContent | null>;
+  getLessonContent(
+    lessonId: string,
+    languageId?: string,
+    topicId?: string
+  ): Promise<LessonContent | null>;
 
   /**
    * Persist room checkpoint (R2 or local disk fallback)

@@ -46,8 +46,8 @@ export class ContentEngine {
   public static async getState(sessionId: string): Promise<ContentSyncState> {
     let state: ContentSyncState = {
       sessionId,
-      activeLessonId: 'les_ohms_law',
-      activeTopicId: 'top_resistance',
+      activeLessonId: '',
+      activeTopicId: '',
       activeBlockId: 'blk_header',
       blockOffsetRatio: 0,
       penStrokes: [],
@@ -57,13 +57,22 @@ export class ContentEngine {
     const raw = await redis.get(this.stateKey(sessionId));
     if (raw) {
       try {
-        state = { ...state, ...JSON.parse(raw) };
+        const parsed = JSON.parse(raw);
+        if (parsed.activeLessonId === 'les_ohms_law') {
+          parsed.activeLessonId = '';
+        }
+        if (parsed.activeTopicId === 'top_resistance') {
+          parsed.activeTopicId = '';
+        }
+        state = { ...state, ...parsed };
       } catch {
         // Fallback
       }
     }
 
-    const strokes = await this.getStrokes(sessionId, state.activeLessonId);
+    const strokes = state.activeLessonId
+      ? await this.getStrokes(sessionId, state.activeLessonId)
+      : [];
     state.penStrokes = strokes;
 
     return state;

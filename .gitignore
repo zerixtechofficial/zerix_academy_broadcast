@@ -28,6 +28,7 @@ services/live-broadcast-engine/dist/
 !.env.local.example
 !**/.env.example
 !**/.env.local.example
+!frontend/.env.production
 
 # ============================================================================
 # Runtime Storage, Recorded 720p Videos, Whiteboard Gzips & Session Caches
@@ -36,7 +37,6 @@ storage/
 storage_cache/
 **/storage/
 **/storage_cache/
-services/live-broadcast-engine/mock-data/session_completed_summary.json
 
 # ============================================================================
 # Local Dev / Audit Scratch Files, Graphify & Laravel Reference Contracts

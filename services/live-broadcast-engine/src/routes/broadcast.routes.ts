@@ -56,38 +56,20 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
     };
   });
 
-  // 2. Dev Testing Profiles (Teacher + 12 Students)
-  fastify.get('/api/v1/dev/users', async (request, reply) => {
-    if (
-      process.env.NODE_ENV === 'production' ||
-      process.env.ALLOW_DEV_TOKENS === 'false' ||
-      provider.mode !== 'mock_json'
-    ) {
-      return reply.status(403).send({
-        statusCode: 403,
-        error: 'Forbidden',
-        message: 'Dev testing profiles endpoint is disabled outside standalone mock development mode.',
-      });
-    }
-    try {
-      const devTokensPath = path.resolve(__dirname, '../../mock-data/dev-tokens.json');
-      const data = await FileCache.readJson<any>(devTokensPath);
-      return {
-        success: true,
-        data,
-      };
-    } catch (err: any) {
-      return reply.status(500).send({
-        success: false,
-        message: `Failed to load dev users: ${err.message}`,
-      });
-    }
+  // 2. Dev Testing Profiles (Strictly Disabled in Server Mode)
+  fastify.get('/api/v1/dev/users', async (_request, reply) => {
+    return reply.status(403).send({
+      statusCode: 403,
+      error: 'Forbidden',
+      message: 'Dev testing profiles endpoint is disabled.',
+    });
   });
 
   // 3. Curriculum Sidebar Tree
   fastify.get(
     '/api/v1/curriculum/:courseId',
     {
+      preHandler: [authenticateFastify],
       schema: {
         params: Type.Object({
           courseId: Type.String({ minLength: 1, description: 'Course ID' }),
@@ -96,7 +78,13 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
     },
     async (request, reply) => {
       const { courseId } = request.params as { courseId: string };
-      const curriculum = await provider.getCurriculumSidebar(courseId);
+      const query = (request.query || {}) as Record<string, any>;
+      const languageId =
+        query.language_id || query.languageId || request.user?.languageId || undefined;
+      const curriculum = await provider.getCurriculumSidebar(
+        courseId,
+        languageId ? String(languageId) : undefined
+      );
       if (!curriculum) {
         return reply.status(404).send({
           statusCode: 404,
@@ -112,6 +100,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
   fastify.get(
     '/api/v1/lessons/:lessonId/content',
     {
+      preHandler: [authenticateFastify],
       schema: {
         params: Type.Object({
           lessonId: Type.String({ minLength: 1, description: 'Lesson ID' }),
@@ -120,7 +109,15 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
     },
     async (request, reply) => {
       const { lessonId } = request.params as { lessonId: string };
-      const content = await provider.getLessonContent(lessonId);
+      const query = (request.query || {}) as Record<string, any>;
+      const languageId =
+        query.language_id || query.languageId || request.user?.languageId || undefined;
+      const topicId = query.topic_id || query.topicId || undefined;
+      const content = await provider.getLessonContent(
+        lessonId,
+        languageId ? String(languageId) : undefined,
+        topicId ? String(topicId) : undefined
+      );
       if (!content) {
         return reply.status(404).send({
           statusCode: 404,
@@ -143,6 +140,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           role: Type.Optional(Type.Union([Type.Literal('teacher'), Type.Literal('student')])),
           studentId: Type.Optional(Type.String()),
           teacherId: Type.Optional(Type.String()),
+          languageId: Type.Optional(Type.String()),
           deviceId: Type.Optional(Type.String()),
         }),
       },
@@ -154,22 +152,26 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         role?: 'teacher' | 'student';
         studentId?: string;
         teacherId?: string;
+        languageId?: string;
         deviceId?: string;
       };
 
-      let authToken =
+      const headerAuth = request.headers.authorization;
+      const headerToken =
+        headerAuth && headerAuth.startsWith('Bearer ')
+          ? headerAuth.substring(7).trim()
+          : '';
+      const authToken =
         body.token && body.token !== 'undefined' && body.token !== 'null'
           ? body.token.trim()
-          : '';
-      if (!authToken) {
-        if (body.role === 'teacher') {
-          const cleanTeacherId = body.teacherId
-            ? String(body.teacherId).replace(/^teacher_/, '')
-            : '501';
-          authToken = `DEV_TOKEN_TEACHER_${cleanTeacherId}`;
-        } else {
-          authToken = `DEV_TOKEN_STUDENT_${body.studentId || '101'}`;
-        }
+          : headerToken;
+
+      if (!authToken || authToken.startsWith('DEV_TOKEN_')) {
+        return reply.status(401).send({
+          statusCode: 401,
+          error: 'Unauthorized',
+          message: 'Valid classroom token issued by Zerix Academy is required to join this session.',
+        });
       }
 
       const user = await provider.validateToken(authToken, body.sessionId);
@@ -177,15 +179,18 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         return reply.status(401).send({
           statusCode: 401,
           error: 'Unauthorized',
-          message: 'Invalid credentials or dev token for session initialization.',
+          message: 'Invalid or expired classroom authentication token.',
         });
       }
 
-      let room = await RoomManager.getOrInitRoom(body.sessionId);
+      const resolvedLanguageId =
+        body.languageId || user.languageId || undefined;
+
+      let room = await RoomManager.getOrInitRoom(body.sessionId, resolvedLanguageId);
       if (user.role === 'teacher' && room.status !== 'LIVE') {
         await AutoSaveService.cancelTeacherGraceTimer(body.sessionId);
         await RoomManager.setTeacherStatus(body.sessionId, 'LIVE');
-        room = await RoomManager.getOrInitRoom(body.sessionId);
+        room = await RoomManager.getOrInitRoom(body.sessionId, resolvedLanguageId);
       }
       const [elements, files, cam, cursor, contentState, audioStage, liveAttendance] =
         await Promise.all([
@@ -199,6 +204,17 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           AudioStageController.getStageState(body.sessionId),
           AttendanceEngine.getLiveAttendanceList(body.sessionId),
         ]);
+
+      if (!contentState.activeLessonId || contentState.activeLessonId === '1') {
+        contentState.activeLessonId = String(
+          user.lessonId || room.sessionContext?.lessonId || ''
+        );
+      }
+      if (!contentState.activeTopicId) {
+        contentState.activeTopicId = String(
+          user.topicId || room.sessionContext?.topicId || ''
+        );
+      }
 
       // Generate LiveKit SFU Token (with per-device identity when deviceId is provided)
       const livekit = await AudioStageController.getJoinToken(
@@ -241,6 +257,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
   fastify.get(
     '/api/v1/sessions/:sessionId/state',
     {
+      preHandler: [authenticateFastify],
       schema: {
         params: Type.Object({
           sessionId: Type.String({ minLength: 1 }),
@@ -561,6 +578,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
   fastify.get(
     '/api/v1/sessions/:sessionId/status',
     {
+      preHandler: [authenticateFastify],
       schema: {
         params: Type.Object({
           sessionId: Type.String({ minLength: 1, description: 'Session ID' }),
@@ -573,12 +591,8 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
       const onlineCount = await AttendanceEngine.getOnlineStudentCount(sessionId);
       const isActive = room.status === 'LIVE' || room.status === 'TEACHER_RECONNECTING';
 
-      let roomName =
-        sessionId === 'batch_chemistry_102'
-          ? 'Class 10 Chemistry — Batch B'
-          : sessionId === 'batch_physics_101'
-          ? 'Class 10 Physics — Batch A (Live)'
-          : room.sessionContext?.batchName || room.sessionContext?.title || sessionId;
+      const roomName =
+        room.sessionContext?.batchName || room.sessionContext?.title || sessionId;
 
       return {
         success: true,
@@ -589,9 +603,9 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           roomName,
           title: room.sessionContext?.title || roomName,
           batchName: room.sessionContext?.batchName || roomName,
-          courseName: room.sessionContext?.courseName || 'CBSE Live Curriculum',
-          subjectName: room.sessionContext?.subjectName || 'Science',
-          teacherName: room.sessionContext?.teacherName || 'Prof. Anand Sharma',
+          courseName: room.sessionContext?.courseName || 'Live Course',
+          subjectName: room.sessionContext?.subjectName || 'Course',
+          teacherName: room.sessionContext?.teacherName || 'Instructor',
           lessonTitle: room.sessionContext?.lessonTitle || '',
           onlineCount,
           seqId: room.seqId,

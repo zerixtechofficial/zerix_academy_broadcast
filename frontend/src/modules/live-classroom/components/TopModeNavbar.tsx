@@ -180,8 +180,8 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
 
   const coHostInviteUrl =
     typeof window !== 'undefined'
-      ? `${window.location.origin}${window.location.pathname}?role=teacher&cohost=1&teacherId=teacher_502&sessionId=${selectedSessionId}`
-      : `http://localhost:3000/?role=teacher&cohost=1&teacherId=teacher_502&sessionId=${selectedSessionId}`;
+      ? `${window.location.origin}${window.location.pathname}?role=teacher&cohost=1&sessionId=${selectedSessionId}`
+      : `https://studio.zerixtech.com/?role=teacher&cohost=1&sessionId=${selectedSessionId}`;
 
   const handleCopyCoHostLink = async () => {
     try {
@@ -201,7 +201,7 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
       // Clipboard fallback in headless/non-secure contexts
     }
     setIsCoHostLinkCopied(true);
-    onInviteCoTeacher('teacher_502', 'Prof. R.K. Verma', inviteWithWhiteboard);
+    onInviteCoTeacher('cohost', 'Co-Host Instructor', inviteWithWhiteboard);
     window.setTimeout(() => {
       setIsCoHostLinkCopied(false);
     }, 2000);

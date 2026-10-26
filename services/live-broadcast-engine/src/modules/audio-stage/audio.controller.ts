@@ -832,7 +832,7 @@ export class AudioStageController {
       return false;
     }
 
-    if (sessionTeacherId && sessionTeacherId !== 'teacher_501') {
+    if (sessionTeacherId) {
       return this.teacherIdsMatch(user.userId, sessionTeacherId);
     }
 

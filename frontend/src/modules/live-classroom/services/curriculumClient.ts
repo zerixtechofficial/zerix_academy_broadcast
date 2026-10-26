@@ -107,39 +107,85 @@ export function getApiBaseUrl(): string {
   return process.env.NEXT_PUBLIC_BROADCAST_API_URL || 'http://127.0.0.1:4000';
 }
 
+function getStoredAuthToken(explicitToken?: string): string {
+  if (explicitToken && explicitToken !== 'undefined' && explicitToken !== 'null') {
+    return explicitToken.trim();
+  }
+  if (typeof window !== 'undefined') {
+    const stored = window.sessionStorage.getItem('broadcast_rejoin_token');
+    if (stored && stored !== 'undefined' && stored !== 'null') {
+      return stored.trim();
+    }
+  }
+  return '';
+}
+
 export class CurriculumClient {
   private static async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     const baseUrl = getApiBaseUrl();
     const url = `${baseUrl}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+    const storedToken = getStoredAuthToken();
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...(storedToken ? { Authorization: `Bearer ${storedToken}` } : {}),
+      ...((options.headers as Record<string, string>) || {}),
+    };
 
     const res = await fetch(url, {
       ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...((options.headers as Record<string, string>) || {}),
-      },
+      headers,
     });
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ message: res.statusText }));
-      throw new Error(err.message || `Request failed with status ${res.status}`);
+      const errorObj = new Error(err.message || `Request failed with status ${res.status}`) as Error & {
+        status?: number;
+      };
+      errorObj.status = res.status;
+      throw errorObj;
     }
 
     return await res.json();
   }
 
-  public static async fetchDevUsers() {
-    const res = await this.request<{ success: boolean; data: any }>('/api/v1/dev/users');
+  public static async fetchCurriculum(
+    courseId: string | number,
+    languageId?: string | number,
+    token?: string
+  ) {
+    const authToken = getStoredAuthToken(token);
+    const query = new URLSearchParams();
+    if (languageId !== undefined && languageId !== null && String(languageId).trim() !== '') {
+      query.set('language_id', String(languageId).trim());
+    }
+    const qs = query.toString();
+    const res = await this.request<{ success: boolean; data: any }>(
+      `/api/v1/curriculum/${encodeURIComponent(String(courseId))}${qs ? `?${qs}` : ''}`,
+      authToken ? { headers: { Authorization: `Bearer ${authToken}` } } : {}
+    );
     return res.data;
   }
 
-  public static async fetchCurriculum(courseId: string) {
-    const res = await this.request<{ success: boolean; data: any }>(`/api/v1/curriculum/${courseId}`);
-    return res.data;
-  }
-
-  public static async fetchLessonContent(lessonId: string) {
-    const res = await this.request<{ success: boolean; data: any }>(`/api/v1/lessons/${lessonId}/content`);
+  public static async fetchLessonContent(
+    lessonId: string | number,
+    languageId?: string | number,
+    topicId?: string | number,
+    token?: string
+  ) {
+    const authToken = getStoredAuthToken(token);
+    const query = new URLSearchParams();
+    if (languageId !== undefined && languageId !== null && String(languageId).trim() !== '') {
+      query.set('language_id', String(languageId).trim());
+    }
+    if (topicId !== undefined && topicId !== null && String(topicId).trim() !== '') {
+      query.set('topic_id', String(topicId).trim());
+    }
+    const qs = query.toString();
+    const res = await this.request<{ success: boolean; data: any }>(
+      `/api/v1/lessons/${encodeURIComponent(String(lessonId))}/content${qs ? `?${qs}` : ''}`,
+      authToken ? { headers: { Authorization: `Bearer ${authToken}` } } : {}
+    );
     return res.data;
   }
 
@@ -225,7 +271,8 @@ export class CurriculumClient {
     );
   }
 
-  public static async fetchSessionStatus(sessionId: string) {
+  public static async fetchSessionStatus(sessionId: string, token?: string) {
+    const authToken = getStoredAuthToken(token);
     const res = await this.request<{
       success: boolean;
       data: {
@@ -241,7 +288,10 @@ export class CurriculumClient {
         lessonTitle?: string;
         onlineCount?: number;
       };
-    }>(`/api/v1/sessions/${sessionId}/status`);
+    }>(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/status`,
+      authToken ? { headers: { Authorization: `Bearer ${authToken}` } } : {}
+    );
     return res.data;
   }
 
@@ -265,11 +315,11 @@ export class CurriculumClient {
       ? `/api/v1/sessions/${sessionId}/lessons/${options.lessonId}/video-chunk`
       : `/api/v1/sessions/${sessionId}/video-chunk`;
 
-    const authToken = options.token || 'DEV_TOKEN_TEACHER_501';
+    const authToken = getStoredAuthToken(options.token);
     const headers: Record<string, string> = {
       'Content-Type': options.mimeType || 'video/webm;codecs=vp9,opus',
       'x-chunk-index': String(options.chunkIndex),
-      Authorization: `Bearer ${authToken}`,
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
     };
 
     if (options.relationalContext) {
@@ -309,7 +359,7 @@ export class CurriculumClient {
     }
   ) {
     const { token, ...restPayload } = payload;
-    const authToken = token || 'DEV_TOKEN_TEACHER_501';
+    const authToken = getStoredAuthToken(token);
     return await this.request<{
       success: boolean;
       message: string;
@@ -320,7 +370,7 @@ export class CurriculumClient {
       };
     }>(`/api/v1/sessions/${sessionId}/curriculum-navigate`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${authToken}` },
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
       body: JSON.stringify({
         ...restPayload,
         mode: restPayload.mode || 'taught',
@@ -346,7 +396,7 @@ export class CurriculumClient {
       token?: string;
     }
   ) {
-    const authToken = payload.token || 'DEV_TOKEN_TEACHER_501';
+    const authToken = getStoredAuthToken(payload.token);
     const sanitized = sanitizeWhiteboardPayloadForStorage(payload);
     return await this.request<{
       success: boolean;
@@ -361,7 +411,7 @@ export class CurriculumClient {
       };
     }>(`/api/v1/sessions/${sessionId}/whiteboard-save`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${authToken}` },
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
       body: JSON.stringify({
         chapterId: payload.chapterId,
         lessonId: payload.lessonId,
@@ -394,7 +444,7 @@ export class CurriculumClient {
       token?: string;
     }
   ) {
-    const authToken = payload.token || 'DEV_TOKEN_TEACHER_501';
+    const authToken = getStoredAuthToken(payload.token);
     const bodyPayload: Record<string, any> = {
       totalDurationSec: payload.totalDurationSec,
       relationalContext: payload.relationalContext,
@@ -409,7 +459,7 @@ export class CurriculumClient {
       data: any;
     }>(`/api/v1/sessions/${sessionId}/finalize`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${authToken}` },
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
       body: JSON.stringify(bodyPayload),
     });
   }

@@ -65,58 +65,48 @@ export class LaravelApiDataProvider implements IDataProvider {
     }
   }
 
+  private tokenCache = new Map<string, { user: UserAuthPayload; expiresAt: number }>();
+
   public async validateToken(token: string, sessionId?: string): Promise<UserAuthPayload | null> {
     if (!token) return null;
     const cleanToken = token.trim();
-
-    // Fast-path: Verify HMAC-SHA256 JWT locally in < 0.05ms without making an HTTP call to Laravel
-    if (JwtVerifier.looksLikeJwt(cleanToken)) {
-      const verified = JwtVerifier.verify(cleanToken, { expectedSessionId: sessionId });
-      if (verified.valid && verified.claims) {
-        const claims = verified.claims;
-        return {
-          userId: String(claims.userId || claims.sub),
-          name: claims.name || (claims.role === 'teacher' ? 'Teacher' : 'Student'),
-          role: claims.role === 'teacher' ? 'teacher' : 'student',
-          batchId: String(claims.batchId || sessionId || ''),
-          sessionId: String(claims.sessionId || sessionId || ''),
-          avatar: claims.avatarUrl,
-          isCoTeacher: Boolean((claims as any).isCoTeacher),
-          canUseWhiteboard:
-            typeof claims.canUseWhiteboard === 'boolean'
-              ? claims.canUseWhiteboard
-              : claims.role === 'teacher' && !(claims as any).isCoTeacher,
-        };
-      }
+    if (!cleanToken || cleanToken === 'undefined' || cleanToken === 'null' || cleanToken.startsWith('DEV_TOKEN_')) {
       return null;
     }
 
-    // Optional dev token fallback when ALLOW_DEV_TOKENS=true
-    if (
-      process.env.ALLOW_DEV_TOKENS === 'true' &&
-      (cleanToken.startsWith('DEV_TOKEN_TEACHER_') || cleanToken.startsWith('DEV_TOKEN_STUDENT_'))
-    ) {
-      if (cleanToken.startsWith('DEV_TOKEN_TEACHER_')) {
-        const suffix = cleanToken.replace(/^DEV_TOKEN_TEACHER_/, '') || '501';
-        const isCoHost = ['502', '503', '504'].includes(suffix);
-        return {
-          userId: `teacher_${suffix}`,
-          name: suffix === '501' ? 'Prof. Anand Sharma' : `Teacher #${suffix}`,
-          role: 'teacher',
-          batchId: String(sessionId || 'batch_physics_101'),
-          sessionId: String(sessionId || 'batch_physics_101'),
-          isCoTeacher: isCoHost,
-          canUseWhiteboard: !isCoHost,
+    const cacheKey = `${cleanToken}::${sessionId || ''}`;
+    const cached = this.tokenCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.user;
+    }
+
+    // Fast-path: Verify HMAC-SHA256 JWT locally when shared secret matches
+    if (JwtVerifier.looksLikeJwt(cleanToken)) {
+      const verified = JwtVerifier.verify(cleanToken, { expectedSessionId: sessionId });
+      if (verified.valid && verified.claims) {
+        const claims = verified.claims as any;
+        const userPayload: UserAuthPayload = {
+          userId: String(claims.userId || claims.sub),
+          name: claims.name || (claims.role === 'teacher' ? 'Teacher' : 'Student'),
+          role: claims.role === 'teacher' ? 'teacher' : 'student',
+          batchId: String(claims.batchId ?? sessionId ?? ''),
+          sessionId: String(claims.sessionId || sessionId || ''),
+          courseId: claims.courseId ? String(claims.courseId) : undefined,
+          languageId: claims.languageId ? String(claims.languageId) : undefined,
+          chapterId: claims.chapterId ? String(claims.chapterId) : undefined,
+          lessonId: claims.lessonId ? String(claims.lessonId) : undefined,
+          topicId: claims.topicId ? String(claims.topicId) : undefined,
+          avatar: claims.avatarUrl,
+          isCoTeacher: Boolean(claims.isCoTeacher),
+          canUseWhiteboard:
+            typeof claims.canUseWhiteboard === 'boolean'
+              ? claims.canUseWhiteboard
+              : claims.role === 'teacher' && !claims.isCoTeacher,
         };
+        this.tokenCache.set(cacheKey, { user: userPayload, expiresAt: Date.now() + 60_000 });
+        return userPayload;
       }
-      const stSuffix = cleanToken.replace(/^DEV_TOKEN_STUDENT_/, '') || '101';
-      return {
-        userId: `student_${stSuffix}`,
-        name: `Student #${stSuffix}`,
-        role: 'student',
-        batchId: String(sessionId || 'batch_physics_101'),
-        sessionId: String(sessionId || 'batch_physics_101'),
-      };
+      // If local JWT verification fails (e.g. secret configured on Laravel side), fall through to Laravel API verification
     }
 
     try {
@@ -147,12 +137,17 @@ export class LaravelApiDataProvider implements IDataProvider {
         }
         const resolvedUserId = String(rawUser.userId || rawUser.sub || rawUser.id || '');
         if (!resolvedUserId) return null;
-        return {
+        const userPayload: UserAuthPayload = {
           userId: resolvedUserId,
           name: String(rawUser.name || (rawUser.role === 'teacher' ? 'Teacher' : 'Student')),
           role: rawUser.role === 'teacher' ? 'teacher' : 'student',
           batchId: String(rawUser.batchId ?? sessionId ?? ''),
           sessionId: String(rawUser.sessionId || sessionId || ''),
+          courseId: rawUser.courseId ? String(rawUser.courseId) : undefined,
+          languageId: rawUser.languageId ? String(rawUser.languageId) : undefined,
+          chapterId: rawUser.chapterId ? String(rawUser.chapterId) : undefined,
+          lessonId: rawUser.lessonId ? String(rawUser.lessonId) : undefined,
+          topicId: rawUser.topicId ? String(rawUser.topicId) : undefined,
           avatar: rawUser.avatar || rawUser.avatarUrl,
           isCoTeacher: Boolean(rawUser.isCoTeacher),
           canUseWhiteboard:
@@ -160,6 +155,8 @@ export class LaravelApiDataProvider implements IDataProvider {
               ? rawUser.canUseWhiteboard
               : rawUser.role === 'teacher',
         };
+        this.tokenCache.set(cacheKey, { user: userPayload, expiresAt: Date.now() + 60_000 });
+        return userPayload;
       }
       return null;
     } catch (err: any) {
@@ -168,22 +165,51 @@ export class LaravelApiDataProvider implements IDataProvider {
     }
   }
 
-  public async getSessionContext(sessionId: string): Promise<SessionContext | null> {
+  public async getSessionContext(sessionId: string, languageId?: string): Promise<SessionContext | null> {
     try {
-      const result = await this.request<{ data: SessionContext }>(
-        `/api/internal/broadcast/sessions/${encodeURIComponent(sessionId)}/context`
+      const qs = languageId ? `?language_id=${encodeURIComponent(languageId)}` : '';
+      const result = await this.request<{ data: any }>(
+        `/api/internal/broadcast/sessions/${encodeURIComponent(sessionId)}/context${qs}`
       );
-      return (result as any)?.data ?? (result as any);
+      const raw = (result as any)?.data ?? (result as any);
+      if (!raw) return null;
+
+      return {
+        sessionId: String(raw.sessionId || sessionId),
+        branchId: String(raw.branchId ?? '1'),
+        boardId: String(raw.boardId ?? '1'),
+        languageId: String(raw.languageId ?? languageId ?? '1'),
+        courseId: String(raw.courseId ?? '1'),
+        courseName: String(raw.courseName || raw.title || 'Live Course'),
+        subjectId: String(raw.subjectId ?? '1'),
+        subjectName: raw.subjectName ? String(raw.subjectName) : undefined,
+        chapterId: String(raw.chapterId ?? '1'),
+        chapterTitle: String(raw.chapterTitle || 'Chapter 1'),
+        lessonId: String(raw.lessonId ?? '1'),
+        lessonTitle: String(raw.lessonTitle || 'Lesson 1'),
+        topicId: String(raw.topicId ?? ''),
+        topicTitle: raw.topicTitle ? String(raw.topicTitle) : undefined,
+        batchId: String(raw.batchId ?? sessionId),
+        batchName: raw.batchName ? String(raw.batchName) : undefined,
+        teacherId: String(raw.teacherId ?? '1'),
+        teacherName: String(raw.teacherName || 'Instructor'),
+        title: String(raw.title || raw.lessonTitle || raw.courseName || 'Live Classroom'),
+        startTime: String(raw.startTime || new Date().toISOString()),
+        maxStudentMics: Number(raw.maxStudentMics || 10),
+        mode: (raw.mode as any) || 'CONTENT',
+        status: (raw.status as any) || 'LIVE',
+      };
     } catch (err: any) {
       console.error(`[LaravelApiDataProvider] Failed to get session context for ${sessionId}:`, err.message);
       return null;
     }
   }
 
-  public async getCurriculumSidebar(courseId: string): Promise<CurriculumSidebar | null> {
+  public async getCurriculumSidebar(courseId: string, languageId?: string): Promise<CurriculumSidebar | null> {
     try {
+      const qs = languageId ? `?language_id=${encodeURIComponent(languageId)}` : '';
       const result = await this.request<{ data: any }>(
-        `/api/internal/broadcast/courses/${encodeURIComponent(courseId)}/curriculum`
+        `/api/internal/broadcast/courses/${encodeURIComponent(courseId)}/curriculum${qs}`
       );
       const raw = (result as any)?.data ?? result;
       if (!raw) return null;
@@ -193,7 +219,7 @@ export class LaravelApiDataProvider implements IDataProvider {
         courseId: String(raw.courseId ?? courseId),
         courseName: String(raw.courseName || raw.title || 'Course Curriculum'),
         boardId: String(raw.boardId ?? '1'),
-        languageId: String(raw.languageId ?? '1'),
+        languageId: String(raw.languageId ?? languageId ?? '1'),
         chapters: rawChapters.map((ch: any, chIdx: number) => ({
           chapterId: String(ch.chapterId ?? ch.id ?? chIdx + 1),
           chapterNumber: Number(ch.chapterNumber ?? chIdx + 1),
@@ -211,7 +237,7 @@ export class LaravelApiDataProvider implements IDataProvider {
                   level: top.level || 'Foundation',
                   durationMinutes: Number(top.durationMinutes || 15),
                   boardId: String(top.boardId ?? raw.boardId ?? '1'),
-                  languageId: String(top.languageId ?? raw.languageId ?? '1'),
+                  languageId: String(top.languageId ?? raw.languageId ?? languageId ?? '1'),
                 })
               ),
             })
@@ -224,10 +250,19 @@ export class LaravelApiDataProvider implements IDataProvider {
     }
   }
 
-  public async getLessonContent(lessonId: string): Promise<LessonContent | null> {
+  public async getLessonContent(
+    lessonId: string,
+    languageId?: string,
+    topicId?: string
+  ): Promise<LessonContent | null> {
     try {
+      const params = new URLSearchParams();
+      if (languageId) params.set('language_id', String(languageId));
+      if (topicId) params.set('topic_id', String(topicId));
+      const qs = params.toString() ? `?${params.toString()}` : '';
+
       const result = await this.request<{ data: any }>(
-        `/api/internal/broadcast/lessons/${encodeURIComponent(lessonId)}/content`
+        `/api/internal/broadcast/lessons/${encodeURIComponent(lessonId)}/content${qs}`
       );
       const raw = (result as any)?.data ?? result;
       if (!raw) return null;
@@ -236,13 +271,39 @@ export class LaravelApiDataProvider implements IDataProvider {
       const resolvedChapterId = String(raw.chapterId ?? '1');
       const resolvedLessonTitle = String(raw.lessonTitle || raw.title || 'Lesson');
 
+      const rawTopics = Array.isArray(raw.topics) ? raw.topics : [];
+      const topics = rawTopics.map((top: any, topIdx: number) => ({
+        topicId: String(top.topicId ?? top.id ?? topIdx + 1),
+        title: String(top.title || top.topicTitle || `Topic ${topIdx + 1}`),
+        contentHtml: top.contentHtml ? String(top.contentHtml) : undefined,
+        blocks: Array.isArray(top.blocks)
+          ? top.blocks.map((b: any, idx: number) => ({
+              blockId: String(b.blockId || `blk_topic_${top.topicId ?? topIdx + 1}_${idx + 1}`),
+              topicId: String(b.topicId ?? top.topicId ?? top.id ?? topIdx + 1),
+              topicTitle: String(b.topicTitle || top.title || top.topicTitle || `Topic ${topIdx + 1}`),
+              type: b.type || 'paragraph',
+              title: String(b.title || top.title || `Section ${idx + 1}`),
+              order: Number(b.order ?? idx + 1),
+              content: String(b.content ?? ''),
+              contentHtml: b.contentHtml ? String(b.contentHtml) : undefined,
+              formulaLatex: b.formulaLatex,
+              svgDiagram: b.svgDiagram,
+              calloutType: b.calloutType,
+              supportsSendToBoard: b.supportsSendToBoard ?? true,
+            }))
+          : undefined,
+      }));
+
       let blocks = Array.isArray(raw.blocks)
         ? raw.blocks.map((b: any, idx: number) => ({
             blockId: String(b.blockId || `blk_${resolvedLessonId}_${idx + 1}`),
+            topicId: b.topicId ? String(b.topicId) : undefined,
+            topicTitle: b.topicTitle ? String(b.topicTitle) : undefined,
             type: b.type || 'paragraph',
             title: String(b.title || `Section ${idx + 1}`),
             order: Number(b.order ?? idx + 1),
             content: String(b.content ?? ''),
+            contentHtml: b.contentHtml ? String(b.contentHtml) : undefined,
             formulaLatex: b.formulaLatex,
             svgDiagram: b.svgDiagram,
             calloutType: b.calloutType,
@@ -251,14 +312,19 @@ export class LaravelApiDataProvider implements IDataProvider {
         : [];
 
       if (blocks.length === 0) {
-        const rawTopics = Array.isArray(raw.topics) ? raw.topics : [];
         if (raw.description) {
           blocks.push({
             blockId: `blk_les_${resolvedLessonId}_intro`,
+            topicId: undefined,
+            topicTitle: undefined,
             type: 'heading',
             title: resolvedLessonTitle,
             order: 1,
             content: String(raw.description),
+            contentHtml: String(raw.description),
+            formulaLatex: undefined,
+            svgDiagram: undefined,
+            calloutType: undefined,
             supportsSendToBoard: true,
           });
         }
@@ -272,12 +338,16 @@ export class LaravelApiDataProvider implements IDataProvider {
 
           blocks.push({
             blockId: `blk_topic_${topId}`,
+            topicId: topId,
+            topicTitle: topTitle,
             type: 'paragraph',
             title: topTitle,
             order: blocks.length + 1,
             content: cleanText || topTitle,
+            contentHtml: rawHtml || undefined,
             formulaLatex: top.formulaLatex,
             svgDiagram: top.svgDiagram,
+            calloutType: undefined,
             supportsSendToBoard: true,
           });
         }
@@ -285,10 +355,16 @@ export class LaravelApiDataProvider implements IDataProvider {
         if (blocks.length === 0) {
           blocks.push({
             blockId: `blk_les_${resolvedLessonId}_default`,
+            topicId: topics[0]?.topicId,
+            topicTitle: topics[0]?.title,
             type: 'heading',
             title: resolvedLessonTitle,
             order: 1,
             content: resolvedLessonTitle,
+            contentHtml: undefined,
+            formulaLatex: undefined,
+            svgDiagram: undefined,
+            calloutType: undefined,
             supportsSendToBoard: true,
           });
         }
@@ -298,6 +374,8 @@ export class LaravelApiDataProvider implements IDataProvider {
         lessonId: resolvedLessonId,
         lessonTitle: resolvedLessonTitle,
         chapterId: resolvedChapterId,
+        languageId: String(raw.languageId ?? languageId ?? '1'),
+        topics,
         blocks,
       };
     } catch (err: any) {

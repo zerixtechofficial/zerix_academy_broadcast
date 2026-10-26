@@ -6,6 +6,11 @@ export interface UserAuthPayload {
   role: UserRole;
   batchId: string;
   sessionId: string;
+  courseId?: string;
+  languageId?: string;
+  chapterId?: string;
+  lessonId?: string;
+  topicId?: string;
   email?: string;
   avatar?: string;
   rollNumber?: string;
@@ -75,14 +80,17 @@ export interface CurriculumSidebar {
   chapters: ChapterItem[];
 }
 
-export type ContentBlockType = 'heading' | 'paragraph' | 'callout' | 'formula' | 'diagram';
+export type ContentBlockType = 'heading' | 'paragraph' | 'callout' | 'formula' | 'diagram' | 'question';
 
 export interface ContentBlock {
   blockId: string;
+  topicId?: string;
+  topicTitle?: string;
   type: ContentBlockType;
   title: string;
   order: number;
   content?: string;
+  contentHtml?: string;
   formulaLatex?: string;
   svgDiagram?: string;
   calloutType?: 'info' | 'warning' | 'danger' | 'success';
@@ -93,6 +101,13 @@ export interface LessonContent {
   lessonId: string;
   lessonTitle: string;
   chapterId: string;
+  languageId?: string;
+  topics?: Array<{
+    topicId: string;
+    title: string;
+    contentHtml?: string;
+    blocks?: ContentBlock[];
+  }>;
   blocks: ContentBlock[];
 }
 

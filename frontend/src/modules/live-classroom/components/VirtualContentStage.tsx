@@ -38,6 +38,8 @@ export interface LessonBlock {
   content: string;
   formulaLatex?: string;
   svgDiagram?: string;
+  topicId?: string;
+  topicTitle?: string;
 }
 
 interface VirtualContentStageProps {
@@ -1298,6 +1300,11 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
           {/* Structured Lesson Blocks with Block-ID & Word-Token Anchoring */}
           <div className="space-y-3 sm:space-y-5">
+            {blocks.length === 0 ? (
+              <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">
+                Select a topic from the Course Curriculum sidebar to display its lesson notes and interactive content.
+              </div>
+            ) : null}
             {blocks.map((block) => {
               const blockStrokes = contentState.penStrokes.filter(
                 (s) => s.blockId === block.blockId

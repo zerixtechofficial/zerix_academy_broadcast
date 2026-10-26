@@ -37,24 +37,11 @@ export async function authenticateFastify(
     token = String(queryToken).trim();
   }
 
-  // Protected REST routes require an explicit Bearer token or ?token parameter.
-  // Query-based ?role= fallback is strictly disabled unless ALLOW_QUERY_ROLE_BYPASS=true in non-production.
-  if (
-    !token &&
-    process.env.ALLOW_QUERY_ROLE_BYPASS === 'true' &&
-    process.env.NODE_ENV !== 'production' &&
-    ((request.query as any)?.role || (request.query as any)?.studentId)
-  ) {
-    const role = (request.query as any)?.role;
-    const studentId = (request.query as any)?.studentId;
-    token = role === 'teacher' ? 'DEV_TOKEN_TEACHER_501' : `DEV_TOKEN_STUDENT_${studentId || '101'}`;
-  }
-
-  if (!token) {
+  if (!token || token === 'undefined' || token === 'null' || token.startsWith('DEV_TOKEN_')) {
     reply.status(401).send({
       statusCode: 401,
       error: 'Unauthorized',
-      message: 'Authentication token is required via Bearer header or ?token query param.',
+      message: 'Valid classroom authentication token is required.',
       timestamp: new Date().toISOString(),
     });
     return;
@@ -67,7 +54,22 @@ export async function authenticateFastify(
     reply.status(401).send({
       statusCode: 401,
       error: 'Unauthorized',
-      message: 'Invalid or expired authentication token.',
+      message: 'Invalid or expired classroom authentication token.',
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
+
+  if (
+    user.sessionId &&
+    user.sessionId !== '*' &&
+    sessionId &&
+    String(user.sessionId) !== String(sessionId)
+  ) {
+    reply.status(403).send({
+      statusCode: 403,
+      error: 'Forbidden',
+      message: 'Token does not match the requested live classroom session.',
       timestamp: new Date().toISOString(),
     });
     return;
@@ -132,28 +134,18 @@ export async function authenticateSocket(
     const query = socket.handshake.query || {};
 
     const rawToken = (auth.token || query.token || '') as string;
-    let token =
+    const token =
       rawToken && rawToken !== 'undefined' && rawToken !== 'null'
         ? String(rawToken).trim()
         : '';
-    const sessionId = (auth.sessionId || query.sessionId || 'batch_physics_101') as string;
+    const rawSessionId = (auth.sessionId || query.sessionId || '') as string;
+    const sessionId =
+      rawSessionId && rawSessionId !== 'undefined' && rawSessionId !== 'null'
+        ? String(rawSessionId).trim()
+        : '';
 
-    // Support 1-click dev testing switcher (?role=teacher or ?role=student&studentId=101..112)
-    if (!token) {
-      const role = auth.role || query.role;
-      const studentId = auth.studentId || query.studentId;
-      const teacherId = auth.teacherId || query.teacherId;
-
-      if (role === 'teacher') {
-        const cleanTeacherId = teacherId ? String(teacherId).replace(/^teacher_/, '') : '501';
-        token = `DEV_TOKEN_TEACHER_${cleanTeacherId}`;
-      } else if (role === 'student' || studentId) {
-        token = `DEV_TOKEN_STUDENT_${studentId || '101'}`;
-      }
-    }
-
-    if (!token) {
-      return next(new Error('Authentication failed: Missing token or role specification.'));
+    if (!token || token.startsWith('DEV_TOKEN_') || !sessionId) {
+      return next(new Error('Authentication failed: Valid classroom token and sessionId are required.'));
     }
 
     const provider = getDataProvider();
@@ -164,7 +156,7 @@ export async function authenticateSocket(
     }
 
     socket.user = user;
-    socket.sessionId = sessionId;
+    socket.sessionId = user.sessionId || sessionId;
     next();
   } catch (err: any) {
     next(new Error(`Authentication error: ${err.message}`));

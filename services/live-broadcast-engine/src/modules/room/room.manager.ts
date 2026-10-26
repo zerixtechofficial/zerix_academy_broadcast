@@ -23,7 +23,7 @@ export class RoomManager {
   public static async getActiveSessions(): Promise<string[]> {
     const members = await redis.smembers(this.ACTIVE_SESSIONS_KEY);
     if (!members || members.length === 0) {
-      return ['batch_physics_101'];
+      return [];
     }
     return members;
   }
@@ -31,10 +31,11 @@ export class RoomManager {
   /**
    * Initializes or fetches room session state from Redis or DataProvider.
    */
-  public static async getOrInitRoom(sessionId: string): Promise<SessionSnapshot> {
+  public static async getOrInitRoom(sessionId: string, languageId?: string): Promise<SessionSnapshot> {
     await redis.sadd(this.ACTIVE_SESSIONS_KEY, sessionId);
     const key = `${this.keyPrefix(sessionId)}:snapshot`;
     const cached = await redis.get(key);
+    const provider = getDataProvider();
 
     if (cached) {
       try {
@@ -43,32 +44,57 @@ export class RoomManager {
         if (seqRaw) {
           parsed.seqId = Number(seqRaw) || parsed.seqId;
         }
+        const isStaleMock =
+          parsed.sessionContext?.courseId === 'course_phys_class10' ||
+          parsed.sessionContext?.lessonId === 'les_ohms_law';
+        const isLangChanged =
+          Boolean(languageId) &&
+          String(parsed.sessionContext?.languageId || '') !== String(languageId);
+
+        if (isStaleMock || isLangChanged) {
+          const freshCtx = await provider.getSessionContext(sessionId, languageId);
+          if (freshCtx) {
+            parsed.sessionContext = freshCtx;
+            if (isStaleMock || !parsed.contentState?.activeLessonId || parsed.contentState.activeLessonId === 'les_ohms_law') {
+              parsed.contentState = {
+                ...parsed.contentState,
+                activeLessonId: String(freshCtx.lessonId || ''),
+                activeTopicId: String(freshCtx.topicId || ''),
+              };
+            }
+            await redis.set(key, JSON.stringify(parsed));
+            await redis.set(`${this.keyPrefix(sessionId)}:context`, JSON.stringify(freshCtx));
+          }
+        }
         return parsed;
       } catch {
         // Fallback to fresh init
       }
     }
 
-    const provider = getDataProvider();
-    const context = (await provider.getSessionContext(sessionId)) || {
+    const parsedMatch = /^session_b(\d+)_c(\d+)_/i.exec(sessionId);
+    const fallbackBatchId = parsedMatch ? parsedMatch[1] : sessionId;
+    const fallbackCourseId = parsedMatch ? parsedMatch[2] : '1';
+
+    const context: SessionContext = (await provider.getSessionContext(sessionId, languageId)) || {
       sessionId,
-      branchId: 'default_branch',
-      boardId: 'cbse_10',
-      languageId: 'en_in',
-      courseId: 'course_phys_class10',
-      courseName: 'Class 10 CBSE Physics Mastery',
-      subjectId: 'subject_physics',
-      subjectName: 'Physics',
-      chapterId: 'chap_electricity',
-      chapterTitle: 'Chapter 1: Electricity & Circuit Dynamics',
-      lessonId: 'les_ohms_law',
-      lessonTitle: "Lesson 1.1: Ohm's Law & Electric Resistance",
-      topicId: 'top_resistance',
-      topicTitle: "Topic 1.1.2: Ohm's Law & Resistance Factors",
-      batchId: sessionId,
-      teacherId: 'teacher_501',
-      teacherName: 'Prof. Anand Sharma',
-      title: 'Class 10 Physics Live Lecture',
+      branchId: '1',
+      boardId: '1',
+      languageId: String(languageId || '1'),
+      courseId: fallbackCourseId,
+      courseName: 'Live Course',
+      subjectId: '1',
+      subjectName: 'Course Subject',
+      chapterId: '1',
+      chapterTitle: 'Chapter 1',
+      lessonId: '1',
+      lessonTitle: 'Lesson 1',
+      topicId: '',
+      topicTitle: '',
+      batchId: fallbackBatchId,
+      teacherId: '1',
+      teacherName: 'Instructor',
+      title: 'Live Classroom Session',
       startTime: new Date().toISOString(),
       maxStudentMics: 10,
       mode: 'CONTENT' as BroadcastMode,
@@ -98,8 +124,8 @@ export class RoomManager {
       excalidrawElements: [],
       contentState: {
         sessionId,
-        activeLessonId: context.lessonId || 'les_ohms_law',
-        activeTopicId: context.topicId || 'top_resistance',
+        activeLessonId: String(context.lessonId || ''),
+        activeTopicId: String(context.topicId || ''),
         activeBlockId: 'blk_header',
         blockOffsetRatio: 0,
         penStrokes: [],

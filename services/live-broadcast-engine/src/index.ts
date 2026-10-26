@@ -126,9 +126,9 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
   // Socket.io Connection & Event Handling
   io.on('connection', async (socket) => {
     const user = socket.user;
-    const sessionId = socket.sessionId || 'batch_physics_101';
+    const sessionId = socket.sessionId;
 
-    if (!user) {
+    if (!user || !sessionId) {
       socket.disconnect(true);
       return;
     }

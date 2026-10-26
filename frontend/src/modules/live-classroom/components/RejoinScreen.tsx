@@ -25,21 +25,6 @@ export interface BatchItem {
   teacherName: string;
 }
 
-const DEFAULT_AVAILABLE_BATCHES: BatchItem[] = [
-  {
-    sessionId: 'batch_physics_101',
-    name: 'Class 10 Physics — Batch A (Live)',
-    subject: 'Physics',
-    teacherName: 'Dr. H.C. Verma',
-  },
-  {
-    sessionId: 'batch_chemistry_102',
-    name: 'Class 10 Chemistry — Batch B',
-    subject: 'Chemistry',
-    teacherName: 'Prof. R.K. Sharma',
-  },
-];
-
 interface SessionStatusData {
   sessionId: string;
   status: 'LIVE' | 'ENDED' | 'TEACHER_RECONNECTING';
@@ -54,54 +39,95 @@ interface SessionStatusData {
   onlineCount?: number;
 }
 
+function parseUserFromToken(token: string): {
+  name?: string;
+  role?: 'teacher' | 'student';
+  userId?: string;
+  sessionId?: string;
+} {
+  if (!token || token.split('.').length !== 3) return {};
+  try {
+    const parts = token.split('.');
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    const payload = JSON.parse(typeof window !== 'undefined' ? window.atob(padded) : '');
+    return {
+      name: payload.name,
+      role: payload.role === 'student' ? 'student' : payload.role === 'teacher' ? 'teacher' : undefined,
+      userId: payload.userId ? String(payload.userId) : undefined,
+      sessionId: payload.sessionId ? String(payload.sessionId) : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 export default function RejoinScreen() {
   const searchParams = useSearchParams();
 
-  // URL Parameters
-  const initialSessionId = searchParams?.get('sessionId') || 'batch_physics_101';
-  const role = (searchParams?.get('role') as 'teacher' | 'student') || 'student';
-  const studentId = searchParams?.get('studentId') || '101';
-  const teacherId = searchParams?.get('teacherId') || 'teacher_501';
   const token =
     searchParams?.get('token') ||
     (typeof window !== 'undefined' ? sessionStorage.getItem('broadcast_rejoin_token') || '' : '');
+  const tokenClaims = useMemo(() => parseUserFromToken(token), [token]);
+
+  // URL Parameters validated against token claims
+  const initialSessionId =
+    searchParams?.get('sessionId') ||
+    tokenClaims.sessionId ||
+    (typeof window !== 'undefined' ? sessionStorage.getItem('broadcast_rejoin_session_id') || '' : '');
+  const role =
+    tokenClaims.role ||
+    ((searchParams?.get('role') as 'teacher' | 'student') || 'student');
+  const studentId =
+    (role === 'student' ? tokenClaims.userId : undefined) ||
+    searchParams?.get('studentId') ||
+    '';
+  const teacherId =
+    (role === 'teacher' ? tokenClaims.userId : undefined) ||
+    searchParams?.get('teacherId') ||
+    '';
   const wasEnded = searchParams?.get('ended') === 'true';
 
-  const [selectedSessionId, setSelectedSessionId] = useState<string>(initialSessionId);
+  const [selectedSessionId] = useState<string>(initialSessionId);
   const [statusData, setStatusData] = useState<SessionStatusData | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Friendly user name
   const currentUserName = useMemo(() => {
-    if (role === 'teacher') {
-      return teacherId === 'teacher_502' ? 'Dr. Sunita Kulkarni (Co-Host)' : 'Prof. Anand Sharma (Host)';
+    if (tokenClaims.name) {
+      return `${tokenClaims.name} (${role === 'teacher' ? 'Instructor' : 'Student'})`;
     }
-    return studentId === '102' ? 'Pooja Patel (Student)' : 'Rahul Verma (Student)';
-  }, [role, teacherId, studentId]);
+    return role === 'teacher' ? 'Verified Instructor' : 'Verified Student';
+  }, [tokenClaims.name, role]);
 
   // Fetch session status
   const checkStatus = useCallback(
     async (sessId: string, isManual = false) => {
+      if (!sessId || !token) {
+        setIsLoading(false);
+        return;
+      }
       if (isManual) setIsRefreshing(true);
       try {
-        const data = await CurriculumClient.fetchSessionStatus(sessId);
+        const data = await CurriculumClient.fetchSessionStatus(sessId, token);
         setStatusData(data);
         setError(null);
       } catch (err: any) {
-        // Fallback for offline / network blips
-        const fallbackBatch = DEFAULT_AVAILABLE_BATCHES.find((b) => b.sessionId === sessId);
-        setStatusData((prev) => ({
-          sessionId: sessId,
-          status: wasEnded && sessId === initialSessionId ? 'ENDED' : prev?.status || 'LIVE',
-          isActive: wasEnded && sessId === initialSessionId ? false : prev?.isActive ?? true,
-          roomName: fallbackBatch?.name || sessId,
-          title: fallbackBatch?.name || sessId,
-          subjectName: fallbackBatch?.subject || 'Science',
-          teacherName: fallbackBatch?.teacherName || 'Instructor',
-          onlineCount: prev?.onlineCount || 0,
-        }));
+        if (err?.status === 401 || err?.status === 403) {
+          setError('Your classroom session token has expired or is invalid. Please launch the live class from Zerix Academy.');
+        } else {
+          setStatusData((prev) => ({
+            sessionId: sessId,
+            status: wasEnded && sessId === initialSessionId ? 'ENDED' : prev?.status || 'LIVE',
+            isActive: wasEnded && sessId === initialSessionId ? false : prev?.isActive ?? true,
+            roomName: prev?.roomName || sessId,
+            title: prev?.title || sessId,
+            subjectName: prev?.subjectName,
+            teacherName: prev?.teacherName,
+            onlineCount: prev?.onlineCount || 0,
+          }));
+        }
       } finally {
         setIsLoading(false);
         if (isManual) {
@@ -109,7 +135,7 @@ export default function RejoinScreen() {
         }
       }
     },
-    [wasEnded, initialSessionId]
+    [wasEnded, initialSessionId, token]
   );
 
   // Initial load and batch change
@@ -120,22 +146,25 @@ export default function RejoinScreen() {
 
   // Periodic polling every 4 seconds to detect live teacher resumption or end
   useEffect(() => {
+    if (!selectedSessionId || !token) return;
     const timer = setInterval(() => {
       checkStatus(selectedSessionId);
     }, 4000);
     return () => clearInterval(timer);
-  }, [selectedSessionId, checkStatus]);
+  }, [selectedSessionId, token, checkStatus]);
 
   // Navigate back into classroom
   const handleRejoin = () => {
     if (token) {
       sessionStorage.setItem('broadcast_rejoin_token', token);
+      sessionStorage.setItem('broadcast_rejoin_session_id', selectedSessionId);
     }
     const params = new URLSearchParams({
       sessionId: selectedSessionId,
       role,
-      studentId,
-      teacherId,
+      ...(studentId ? { studentId } : {}),
+      ...(teacherId ? { teacherId } : {}),
+      ...(token ? { token } : {}),
     });
     window.location.href = `/?${params.toString()}`;
   };
@@ -144,19 +173,53 @@ export default function RejoinScreen() {
   const handleRestartClass = () => {
     if (token) {
       sessionStorage.setItem('broadcast_rejoin_token', token);
+      sessionStorage.setItem('broadcast_rejoin_session_id', selectedSessionId);
     }
     const params = new URLSearchParams({
       sessionId: selectedSessionId,
       role: 'teacher',
-      teacherId,
+      ...(teacherId ? { teacherId } : {}),
+      ...(token ? { token } : {}),
     });
     window.location.href = `/?${params.toString()}`;
   };
 
+  const academyPortalUrl =
+    process.env.NEXT_PUBLIC_ACADEMY_URL || 'https://academy.zerixtech.com';
+
+  if (!selectedSessionId || !token || error) {
+    return (
+      <div
+        data-testid="rejoin-unauthorized-container"
+        className="min-h-screen w-full bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 text-slate-100 flex items-center justify-center p-4"
+      >
+        <div className="max-w-md w-full rounded-3xl bg-slate-800/90 border border-slate-700/80 shadow-2xl p-6 sm:p-8 text-center space-y-5">
+          <div className="mx-auto w-14 h-14 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400">
+            <AlertCircle className="w-7 h-7" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-xl font-bold text-white">Classroom Authentication Required</h1>
+            <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+              {error ||
+                'Direct access to Zerix Live Broadcast Studio is restricted. Please sign in to Zerix Academy and join your scheduled live classroom.'}
+            </p>
+          </div>
+          <a
+            href={academyPortalUrl}
+            className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white text-sm font-bold shadow-lg shadow-sky-500/20 transition-all"
+          >
+            <span>Return to Zerix Academy</span>
+            <ArrowRight className="w-4 h-4" />
+          </a>
+        </div>
+      </div>
+    );
+  }
+
   const isActive = statusData ? statusData.isActive : !wasEnded;
   const roomTitle =
     statusData?.roomName ||
-    DEFAULT_AVAILABLE_BATCHES.find((b) => b.sessionId === selectedSessionId)?.name ||
+    statusData?.title ||
     selectedSessionId;
 
   return (
@@ -355,41 +418,18 @@ export default function RejoinScreen() {
             </div>
           )}
 
-          {/* 3. Room / Batch Switcher Selector */}
-          <div className="mt-6 pt-5 border-t border-slate-700/60">
-            <div className="flex items-center justify-between mb-3 text-xs text-slate-400">
-              <span className="flex items-center gap-1.5 font-medium">
-                <Layers className="w-3.5 h-3.5 text-sky-400" />
-                Select Classroom / Batch:
-              </span>
-              <span className="text-[11px] text-slate-400">
-                {DEFAULT_AVAILABLE_BATCHES.length} available
-              </span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {DEFAULT_AVAILABLE_BATCHES.map((batch) => {
-                const isSelected = batch.sessionId === selectedSessionId;
-                return (
-                  <button
-                    key={batch.sessionId}
-                    type="button"
-                    data-testid={`select-batch-${batch.sessionId}`}
-                    onClick={() => setSelectedSessionId(batch.sessionId)}
-                    className={`text-left p-3 rounded-xl border text-xs transition-all ${
-                      isSelected
-                        ? 'bg-sky-950/60 border-sky-500/50 text-sky-200 shadow-sm'
-                        : 'bg-slate-800/40 border-slate-700/40 text-slate-400 hover:bg-slate-700/40 hover:text-slate-200'
-                    }`}
-                  >
-                    <div className="font-semibold text-white truncate">{batch.name}</div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 truncate">
-                      {batch.subject} • {batch.teacherName}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+          {/* 3. Return to Zerix Academy Portal */}
+          <div className="mt-6 pt-5 border-t border-slate-700/60 flex items-center justify-between gap-3">
+            <span className="text-xs text-slate-400">
+              Want to return to your course dashboard?
+            </span>
+            <a
+              href={academyPortalUrl}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-700/60 hover:bg-slate-700 text-xs font-semibold text-white border border-slate-600/50 transition-colors"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Zerix Academy</span>
+            </a>
           </div>
         </div>
       </main>

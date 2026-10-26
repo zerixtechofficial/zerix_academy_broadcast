@@ -298,8 +298,8 @@ export function useBroadcastSocket({
   const [whiteboardFiles, setWhiteboardFiles] = useState<Record<string, any>>({});
 
   // Content sync states
-  const [activeLessonId, setActiveLessonId] = useState<string>('les_ohms_law');
-  const [activeTopicId, setActiveTopicId] = useState<string>('top_resistance');
+  const [activeLessonId, setActiveLessonId] = useState<string>('');
+  const [activeTopicId, setActiveTopicId] = useState<string>('');
   const [activeBlockId, setActiveBlockId] = useState<string>('blk_header');
   const [blockOffsetRatio, setBlockOffsetRatio] = useState<number>(0);
   const [scrollAuthorId, setScrollAuthorId] = useState<string | undefined>(undefined);
@@ -308,8 +308,8 @@ export function useBroadcastSocket({
   const [laserPointer, setLaserPointer] = useState<any>({ x: 0, y: 0, active: false });
   const localUserId =
     role === 'teacher'
-      ? `teacher_${String(teacherId || '501').replace(/^teacher_/, '')}`
-      : `student_${String(studentId || '101').replace(/^student_/, '')}`;
+      ? `teacher_${String(teacherId || '').replace(/^teacher_/, '')}`
+      : `student_${String(studentId || '').replace(/^student_/, '')}`;
 
   // Audio Stage & Collaboration Permissions State
   // All microphones are muted by default (teacherMicActive = false)
@@ -353,33 +353,36 @@ export function useBroadcastSocket({
   useEffect(() => {
     seqIdRef.current = 0;
     setSeqId(0);
-    const baseUrl = getApiBaseUrl();
-    const cleanTeacherId = teacherId ? String(teacherId).replace(/^teacher_/, '') : '501';
-    const clientDeviceId = clientDeviceIdRef.current;
-
     const validToken =
       token && token !== 'undefined' && token !== 'null' ? token.trim() : '';
+
+    // Never connect socket without a valid classroom JWT token and sessionId
+    if (!validToken || validToken.startsWith('DEV_TOKEN_') || !sessionId) {
+      setIsConnected(false);
+      setIsReconnecting(false);
+      return;
+    }
+
+    const baseUrl = getApiBaseUrl();
+    const cleanTeacherId = teacherId ? String(teacherId).replace(/^teacher_/, '') : '';
+    const clientDeviceId = clientDeviceIdRef.current;
 
     const socket = io(baseUrl, {
       parser: msgpackParser,
       transports: ['websocket', 'polling'],
       auth: {
-        token:
-          validToken ||
-          (role === 'teacher'
-            ? `DEV_TOKEN_TEACHER_${cleanTeacherId}`
-            : `DEV_TOKEN_STUDENT_${studentId || '101'}`),
+        token: validToken,
         role,
         studentId,
-        teacherId: `teacher_${cleanTeacherId}`,
+        teacherId: cleanTeacherId ? `teacher_${cleanTeacherId}` : '',
         sessionId,
         deviceId: clientDeviceId,
       },
       query: {
         sessionId,
         role,
-        studentId: studentId || '101',
-        teacherId: `teacher_${cleanTeacherId}`,
+        studentId: studentId || '',
+        teacherId: cleanTeacherId ? `teacher_${cleanTeacherId}` : '',
         deviceId: clientDeviceId,
       },
       reconnection: true,
@@ -479,8 +482,18 @@ export function useBroadcastSocket({
       if (snap.excalidrawElements) setIncomingWhiteboardDelta(snap.excalidrawElements);
       if (snap.excalidrawFiles) setWhiteboardFiles(snap.excalidrawFiles);
       if (snap.contentState) {
-        if (snap.contentState.activeLessonId) setActiveLessonId(snap.contentState.activeLessonId);
-        if (snap.contentState.activeTopicId) setActiveTopicId(snap.contentState.activeTopicId);
+        if (
+          snap.contentState.activeLessonId &&
+          snap.contentState.activeLessonId !== 'les_ohms_law'
+        ) {
+          setActiveLessonId(String(snap.contentState.activeLessonId));
+        }
+        if (
+          snap.contentState.activeTopicId &&
+          snap.contentState.activeTopicId !== 'top_resistance'
+        ) {
+          setActiveTopicId(String(snap.contentState.activeTopicId));
+        }
         if (snap.contentState.activeBlockId) setActiveBlockId(snap.contentState.activeBlockId);
         if (snap.contentState.blockOffsetRatio !== undefined) {
           setBlockOffsetRatio(snap.contentState.blockOffsetRatio);
@@ -741,7 +754,7 @@ export function useBroadcastSocket({
       });
       setRaisedHands((prev) => prev.filter((h) => h.userId !== data.studentId));
 
-      const myUserId = role === 'teacher' ? teacherId || 'teacher_501' : `student_${studentId || '101'}`;
+      const myUserId = role === 'teacher' ? teacherId || '' : `student_${studentId || ''}`;
       const isTargetMe =
         data.studentId === myUserId ||
         data.studentId === studentId ||
@@ -794,7 +807,7 @@ export function useBroadcastSocket({
           setMultiDeviceStudents(data.multiDeviceStudents);
         }
         if (role === 'student' && data?.allowMultiDevice && multiDeviceBlockedRef.current) {
-          const normMyId = `student_${String(studentId || '101').replace(/^student_/, '')}`;
+          const normMyId = `student_${String(studentId || '').replace(/^student_/, '')}`;
           if (!data.studentId || data.studentId === normMyId) {
             setMultiDeviceBlocked(null);
             socket.emit('JOIN_ROOM', {
@@ -1407,7 +1420,9 @@ export function useBroadcastSocket({
     incomingWhiteboardDelta,
     whiteboardFiles,
     activeLessonId,
+    setActiveLessonId,
     activeTopicId,
+    setActiveTopicId,
     activeBlockId,
     blockOffsetRatio,
     scrollAuthorId,

@@ -25,64 +25,50 @@ import {
   CurriculumTeachingMode,
 } from './services/curriculumClient';
 
-const DEFAULT_BATCHES: BatchOption[] = [
-  {
-    sessionId: 'batch_physics_101',
-    batchId: 'batch_phys_10_a',
-    name: 'Class 10 Physics — Batch A (Live)',
-    subject: 'Physics',
-    teacherName: 'Dr. H.C. Verma',
-  },
-  {
-    sessionId: 'batch_chemistry_102',
-    batchId: 'batch_chem_10_b',
-    name: 'Class 10 Chemistry — Batch B',
-    subject: 'Chemistry',
-    teacherName: 'Prof. R.K. Sharma',
-  },
-];
+const EMPTY_BATCHES: BatchOption[] = [];
+
+function decodeJwtPayload(jwtToken: string): Record<string, any> | null {
+  if (!jwtToken || typeof window === 'undefined') return null;
+  const parts = jwtToken.trim().split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    return JSON.parse(window.atob(padded));
+  } catch {
+    return null;
+  }
+}
 
 export default function LearningSessionLayout() {
-  // Synchronously read URL parameters on initial client render so a Student or Co-Teacher tab
-  // never momentarily connects to the socket as Host Teacher on first mount.
+  // Synchronously read URL parameters and JWT claims on initial client render
   const initialParams = useMemo(() => {
     if (typeof window === 'undefined') {
       return {
-        role: 'teacher' as 'teacher' | 'student',
-        teacherId: 'teacher_501',
-        studentId: '101',
-        sessionId: 'batch_physics_101',
-        token: 'DEV_TOKEN_TEACHER_501',
+        role: 'student' as 'teacher' | 'student',
+        teacherId: '',
+        studentId: '',
+        userName: '',
+        sessionId: '',
+        token: '',
         isMobileViewport: false,
-        branchId: 4,
-        batchId: 105,
-        boardId: 2,
-        languageId: 1,
-        courseId: 12,
-        linkedVodCourseId: 212,
-        subjectId: 1,
-        academicYear: 2026,
+        branchId: 0,
+        batchId: 0,
+        boardId: null as number | null,
+        languageId: 1 as string | number,
+        courseId: 0 as string | number,
+        linkedVodCourseId: 0,
+        subjectId: 0,
+        chapterId: '' as string | number,
+        lessonId: '' as string | number,
+        topicId: '' as string | number,
+        academicYear: new Date().getFullYear(),
         version: 1,
       };
     }
     const urlParams = new URLSearchParams(window.location.search);
-    const urlRole = urlParams.get('role') === 'student' ? 'student' : 'teacher';
-    const isCohostParam =
-      urlParams.get('cohost') === '1' || urlParams.get('cohost') === 'true';
-    const rawTeacherId =
-      urlParams.get('teacherId') || (isCohostParam ? 'teacher_502' : 'teacher_501');
-    const normTeacherId = rawTeacherId.startsWith('teacher_')
-      ? rawTeacherId
-      : `teacher_${rawTeacherId}`;
-    const rawStId = urlParams.get('studentId') || '101';
-    const stId = rawStId.replace(/^student_/, '');
-    const sessId = urlParams.get('sessionId') || 'batch_physics_101';
-    const teacherTokenMap: Record<string, string> = {
-      teacher_501: 'DEV_TOKEN_TEACHER_501',
-      teacher_502: 'DEV_TOKEN_TEACHER_502',
-      teacher_503: 'DEV_TOKEN_TEACHER_503',
-      teacher_504: 'DEV_TOKEN_TEACHER_504',
-    };
+    const rawSessId = urlParams.get('sessionId') || '';
+
     const isTokenMatchingSession = (
       jwtOrToken: string | null,
       targetSessionId: string
@@ -91,24 +77,18 @@ export default function LearningSessionLayout() {
         return false;
       }
       const trimmed = jwtOrToken.trim();
-      if (!trimmed) return false;
-      const parts = trimmed.split('.');
-      if (parts.length === 3) {
-        try {
-          const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-          const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
-          const payload = JSON.parse(window.atob(padded));
-          if (payload.exp && Math.floor(Date.now() / 1000) >= Number(payload.exp)) {
-            return false;
-          }
-          if (
-            payload.sessionId &&
-            payload.sessionId !== '*' &&
-            payload.sessionId !== targetSessionId
-          ) {
-            return false;
-          }
-        } catch {
+      if (!trimmed || trimmed.startsWith('DEV_TOKEN_')) return false;
+      const payload = decodeJwtPayload(trimmed);
+      if (payload) {
+        if (payload.exp && Math.floor(Date.now() / 1000) >= Number(payload.exp)) {
+          return false;
+        }
+        if (
+          targetSessionId &&
+          payload.sessionId &&
+          payload.sessionId !== '*' &&
+          String(payload.sessionId) !== String(targetSessionId)
+        ) {
           return false;
         }
       }
@@ -116,46 +96,84 @@ export default function LearningSessionLayout() {
     };
 
     const rawUrlToken = urlParams.get('token');
-    const urlToken = isTokenMatchingSession(rawUrlToken, sessId)
+    const urlToken = isTokenMatchingSession(rawUrlToken, rawSessId)
       ? rawUrlToken!.trim()
       : '';
-    if (urlToken) {
-      window.sessionStorage.setItem('broadcast_rejoin_token', urlToken);
-      window.sessionStorage.setItem('broadcast_rejoin_session_id', sessId);
-    }
+
     const rawStoredToken = window.sessionStorage.getItem('broadcast_rejoin_token');
-    const storedSessionId = window.sessionStorage.getItem('broadcast_rejoin_session_id');
+    const storedSessionId = window.sessionStorage.getItem('broadcast_rejoin_session_id') || '';
+    const effectiveSessId = rawSessId || storedSessionId;
+
+    if (urlToken && effectiveSessId) {
+      window.sessionStorage.setItem('broadcast_rejoin_token', urlToken);
+      window.sessionStorage.setItem('broadcast_rejoin_session_id', effectiveSessId);
+    }
+
     const storedToken =
-      (!storedSessionId || storedSessionId === sessId) &&
-      isTokenMatchingSession(rawStoredToken, sessId)
+      (!storedSessionId || !effectiveSessId || storedSessionId === effectiveSessId) &&
+      isTokenMatchingSession(rawStoredToken, effectiveSessId)
         ? rawStoredToken!.trim()
         : '';
+
     if (rawStoredToken && !storedToken) {
       window.sessionStorage.removeItem('broadcast_rejoin_token');
       window.sessionStorage.removeItem('broadcast_rejoin_session_id');
     }
-    const cleanTeacherSuffix = normTeacherId.replace(/^teacher_/, '') || '501';
-    const tok =
-      urlToken ||
-      storedToken ||
-      (urlRole === 'student'
-        ? `DEV_TOKEN_STUDENT_${stId}`
-        : teacherTokenMap[normTeacherId] || `DEV_TOKEN_TEACHER_${cleanTeacherSuffix}`);
+
+    const tok = urlToken || storedToken || '';
+    const claims = decodeJwtPayload(tok) || {};
+
+    const resolvedSessionId =
+      effectiveSessId || (claims.sessionId && claims.sessionId !== '*' ? String(claims.sessionId) : '');
+    const resolvedRole: 'teacher' | 'student' =
+      claims.role === 'teacher' || claims.role === 'student'
+        ? claims.role
+        : urlParams.get('role') === 'teacher'
+        ? 'teacher'
+        : 'student';
+
+    const claimUserId = claims.userId ? String(claims.userId) : '';
+    const rawTeacherId =
+      (resolvedRole === 'teacher' ? claimUserId : '') ||
+      urlParams.get('teacherId') ||
+      '';
+    const normTeacherId = rawTeacherId
+      ? rawTeacherId.startsWith('teacher_')
+        ? rawTeacherId
+        : `teacher_${rawTeacherId}`
+      : '';
+
+    const rawStId =
+      (resolvedRole === 'student' ? claimUserId : '') ||
+      urlParams.get('studentId') ||
+      '';
+    const stId = rawStId.replace(/^student_/, '');
+
+    const rawLang =
+      urlParams.get('languageId') ||
+      urlParams.get('language_id') ||
+      claims.languageId ||
+      1;
+
     return {
-      role: urlRole as 'teacher' | 'student',
+      role: resolvedRole,
       teacherId: normTeacherId,
       studentId: stId,
-      sessionId: sessId,
+      userName: claims.name ? String(claims.name) : '',
+      sessionId: resolvedSessionId,
       token: tok,
       isMobileViewport: window.innerWidth < 768,
-      branchId: Number(urlParams.get('branchId')) || 4,
-      batchId: Number(urlParams.get('batchId')) || 105,
-      boardId: urlParams.get('boardId') ? Number(urlParams.get('boardId')) : 2,
-      languageId: Number(urlParams.get('languageId')) || 1,
-      courseId: Number(urlParams.get('courseId')) || 12,
-      linkedVodCourseId: Number(urlParams.get('linkedVodCourseId')) || 212,
-      subjectId: Number(urlParams.get('subjectId')) || 1,
-      academicYear: Number(urlParams.get('academicYear')) || 2026,
+      branchId: Number(urlParams.get('branchId') || claims.branchId) || 0,
+      batchId: Number(urlParams.get('batchId') || claims.batchId) || 0,
+      boardId: urlParams.get('boardId') ? Number(urlParams.get('boardId')) : null,
+      languageId: rawLang,
+      courseId: urlParams.get('courseId') || claims.courseId || 0,
+      linkedVodCourseId: Number(urlParams.get('linkedVodCourseId')) || 0,
+      subjectId: Number(urlParams.get('subjectId')) || 0,
+      chapterId: urlParams.get('chapterId') || claims.chapterId || '',
+      lessonId: urlParams.get('lessonId') || claims.lessonId || '',
+      topicId: urlParams.get('topicId') || claims.topicId || '',
+      academicYear: Number(urlParams.get('academicYear')) || new Date().getFullYear(),
       version: Number(urlParams.get('version')) || 1,
     };
   }, []);
@@ -164,8 +182,12 @@ export default function LearningSessionLayout() {
   const [role, setRole] = useState<'teacher' | 'student'>(initialParams.role);
   const [teacherId, setTeacherId] = useState<string>(initialParams.teacherId);
   const [studentId, setStudentId] = useState<string>(initialParams.studentId);
+  const [verifiedUserName, setVerifiedUserName] = useState<string>(initialParams.userName);
   const [sessionId, setSessionId] = useState<string>(initialParams.sessionId);
   const [token, setToken] = useState<string>(initialParams.token);
+  const [languageId, setLanguageId] = useState<string | number>(initialParams.languageId);
+  const [isAuthVerifying, setIsAuthVerifying] = useState<boolean>(true);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   // Session & Curriculum Data
   const [sessionMetadata, setSessionMetadata] = useState<any>(null);
@@ -257,7 +279,9 @@ export default function LearningSessionLayout() {
     incomingWhiteboardDelta,
     whiteboardFiles,
     activeLessonId,
+    setActiveLessonId,
     activeTopicId,
+    setActiveTopicId,
     activeBlockId,
     blockOffsetRatio,
     scrollAuthorId,
@@ -347,6 +371,16 @@ export default function LearningSessionLayout() {
     let isMounted = true;
 
     const loadSessionData = async () => {
+      if (!sessionId || !token || token.startsWith('DEV_TOKEN_')) {
+        if (isMounted) {
+          setIsAuthVerifying(false);
+          setAuthError(
+            'Direct access to Zerix Live Broadcast Studio is restricted. Please sign in to Zerix Academy and launch or join your scheduled live classroom session.'
+          );
+        }
+        return;
+      }
+
       try {
         const initData = await CurriculumClient.initSession({
           sessionId,
@@ -359,7 +393,28 @@ export default function LearningSessionLayout() {
 
         if (!isMounted) return;
 
-        setSessionMetadata(initData.sessionContext);
+        if (initData.user) {
+          if (initData.user.role === 'teacher' || initData.user.role === 'student') {
+            setRole(initData.user.role);
+          }
+          if (initData.user.name) {
+            setVerifiedUserName(String(initData.user.name));
+          }
+          if (initData.user.role === 'teacher' && initData.user.userId) {
+            const rawTId = String(initData.user.userId);
+            setTeacherId(rawTId.startsWith('teacher_') ? rawTId : `teacher_${rawTId}`);
+          } else if (initData.user.role === 'student' && initData.user.userId) {
+            setStudentId(String(initData.user.userId).replace(/^student_/, ''));
+          }
+        }
+
+        const ctx = initData.sessionContext || {};
+        setSessionMetadata(ctx);
+        const resolvedLang = ctx.languageId || initialParams.languageId || 1;
+        setLanguageId(resolvedLang);
+        setIsAuthVerifying(false);
+        setAuthError(null);
+
         if (initData.livekit) {
           setLivekitToken(initData.livekit.token);
           if (initData.livekit.url) {
@@ -385,29 +440,77 @@ export default function LearningSessionLayout() {
           }
         }
 
-        const courseId = initData.sessionContext?.courseId || 'course_phys_class10';
-        const curData = await CurriculumClient.fetchCurriculum(courseId);
-        if (isMounted) setCurriculum(curData);
+        const courseId = ctx.courseId || initialParams.courseId;
+        let curData: any = null;
+        if (courseId) {
+          curData = await CurriculumClient.fetchCurriculum(String(courseId), resolvedLang, token);
+          if (isMounted) setCurriculum(curData);
+        }
 
-        const currentLesId = initData.sessionContext?.lessonId || 'les_ohms_law';
-        const contentData = await CurriculumClient.fetchLessonContent(currentLesId);
-        if (isMounted) setLessonContent(contentData);
+        const chaptersList = Array.isArray(curData?.chapters) ? curData.chapters : [];
+        const firstChapter = chaptersList[0];
+        const firstLesson = firstChapter?.lessons?.[0];
+        const firstTopic = firstLesson?.topics?.[0];
+
+        let targetLessonId = String(
+          ctx.lessonId || initialParams.lessonId || firstLesson?.lessonId || ''
+        );
+        let targetTopicId = String(
+          ctx.topicId || initialParams.topicId || firstTopic?.topicId || ''
+        );
+
+        // Verify targetLessonId exists in curriculum if curriculum has chapters
+        if (chaptersList.length > 0) {
+          let matchedLesson: any = null;
+          for (const ch of chaptersList) {
+            for (const les of ch.lessons || []) {
+              if (String(les.lessonId) === targetLessonId) {
+                matchedLesson = les;
+                break;
+              }
+            }
+            if (matchedLesson) break;
+          }
+          if (!matchedLesson && firstLesson) {
+            matchedLesson = firstLesson;
+            targetLessonId = String(firstLesson.lessonId);
+          }
+          if (matchedLesson) {
+            const topicExists = (matchedLesson.topics || []).some(
+              (t: any) => String(t.topicId) === targetTopicId
+            );
+            if (!topicExists && matchedLesson.topics?.[0]?.topicId) {
+              targetTopicId = String(matchedLesson.topics[0].topicId);
+            }
+          }
+        }
+
+        if (isMounted) {
+          if (targetLessonId) setActiveLessonId(targetLessonId);
+          if (targetTopicId) setActiveTopicId(targetTopicId);
+        }
+
+        if (targetLessonId) {
+          const contentData = await CurriculumClient.fetchLessonContent(
+            targetLessonId,
+            resolvedLang,
+            undefined,
+            token
+          );
+          if (isMounted) setLessonContent(contentData);
+        }
       } catch (err: any) {
         console.error('[LearningSessionLayout] Init error:', err.message);
-        if (
-          isMounted &&
-          token &&
-          !token.startsWith('DEV_TOKEN_') &&
-          typeof window !== 'undefined'
-        ) {
-          window.sessionStorage.removeItem('broadcast_rejoin_token');
-          window.sessionStorage.removeItem('broadcast_rejoin_session_id');
-          const cleanTId = String(teacherId || '501').replace(/^teacher_/, '') || '501';
-          const fallbackTok =
-            role === 'student'
-              ? `DEV_TOKEN_STUDENT_${studentId || '101'}`
-              : `DEV_TOKEN_TEACHER_${cleanTId}`;
-          setToken(fallbackTok);
+        if (isMounted) {
+          if (typeof window !== 'undefined') {
+            window.sessionStorage.removeItem('broadcast_rejoin_token');
+            window.sessionStorage.removeItem('broadcast_rejoin_session_id');
+          }
+          setIsAuthVerifying(false);
+          setAuthError(
+            err?.message ||
+              'Invalid or expired classroom credentials. Please launch the live class from Zerix Academy.'
+          );
         }
       }
     };
@@ -422,6 +525,9 @@ export default function LearningSessionLayout() {
     teacherId,
     studentId,
     token,
+    initialParams,
+    setActiveLessonId,
+    setActiveTopicId,
     setAttendanceList,
     setTeacherMicActive,
     setInvitedTeachers,
@@ -430,20 +536,62 @@ export default function LearningSessionLayout() {
     clientDeviceId,
   ]);
 
-  // Reload lesson content when activeLessonId changes
+  // Reload lesson content when activeLessonId or languageId changes
   useEffect(() => {
     let isMounted = true;
-    if (activeLessonId) {
-      CurriculumClient.fetchLessonContent(activeLessonId)
+    if (
+      activeLessonId &&
+      activeLessonId !== 'les_ohms_law' &&
+      token &&
+      !token.startsWith('DEV_TOKEN_')
+    ) {
+      CurriculumClient.fetchLessonContent(activeLessonId, languageId, undefined, token)
         .then((data) => {
-          if (isMounted && data) setLessonContent(data);
+          if (isMounted && data) {
+            setLessonContent(data);
+          }
         })
         .catch((err) => console.error('[Content] Error loading lesson content:', err));
     }
     return () => {
       isMounted = false;
     };
-  }, [activeLessonId]);
+  }, [activeLessonId, languageId, token]);
+
+  // Ensure activeLessonId and activeTopicId match a valid lesson/topic when curriculum loads or socket updates activeLessonId
+  useEffect(() => {
+    if (!curriculum?.chapters || curriculum.chapters.length === 0) return;
+    const chaptersList = curriculum.chapters;
+    let foundLesson: any = null;
+    for (const ch of chaptersList) {
+      for (const les of ch.lessons || []) {
+        if (String(les.lessonId) === String(activeLessonId)) {
+          foundLesson = les;
+          break;
+        }
+      }
+      if (foundLesson) break;
+    }
+
+    if (!foundLesson) {
+      const firstLesson = chaptersList[0]?.lessons?.[0];
+      if (firstLesson?.lessonId) {
+        setActiveLessonId(String(firstLesson.lessonId));
+        if (firstLesson.topics?.[0]?.topicId) {
+          setActiveTopicId(String(firstLesson.topics[0].topicId));
+        }
+      }
+      return;
+    }
+
+    if (
+      Array.isArray(foundLesson.topics) &&
+      foundLesson.topics.length > 0 &&
+      !foundLesson.topics.some((t: any) => String(t.topicId) === String(activeTopicId))
+    ) {
+      setActiveTopicId(String(foundLesson.topics[0].topicId));
+    }
+  }, [curriculum, activeLessonId, activeTopicId, setActiveLessonId, setActiveTopicId]);
 
   // Compute current user ID, Host/Co-Teacher status, Whiteboard edit permission & Mic permissions
   const currentUserId = role === 'teacher' ? teacherId : `student_${studentId}`;
@@ -612,10 +760,10 @@ export default function LearningSessionLayout() {
   const normalizedChapters: ChapterItem[] = useMemo(() => {
     if (!curriculum?.chapters) return [];
     return curriculum.chapters.map((ch: any) => ({
-      chapterId: ch.chapterId,
+      chapterId: String(ch.chapterId),
       title: ch.title,
       lessons: (ch.lessons || []).map((les: any) => ({
-        lessonId: les.lessonId,
+        lessonId: String(les.lessonId),
         title: les.title,
         duration:
           les.duration ||
@@ -624,7 +772,7 @@ export default function LearningSessionLayout() {
             0
           )}m`,
         topics: (les.topics || []).map((top: any) => ({
-          topicId: top.topicId,
+          topicId: String(top.topicId),
           title: top.title,
         })),
       })),
@@ -633,25 +781,44 @@ export default function LearningSessionLayout() {
 
   // Determine current Chapter, Lesson, and Topic titles for the Top Header Breadcrumb
   const { activeChapterId, chapterTitle, lessonTitle, topicTitle } = useMemo(() => {
-    let chapId = sessionMetadata?.chapterId || 'chap_electricity';
-    let chapTitle = sessionMetadata?.chapterTitle || 'Chapter 1: Electricity';
+    const firstChapter = normalizedChapters[0];
+    const firstLesson = firstChapter?.lessons?.[0];
+    const firstTopic = firstLesson?.topics?.[0];
+
+    let chapId = String(
+      sessionMetadata?.chapterId || firstChapter?.chapterId || initialParams.chapterId || ''
+    );
+    let chapTitle =
+      sessionMetadata?.chapterTitle ||
+      firstChapter?.title ||
+      curriculum?.courseName ||
+      sessionMetadata?.courseName ||
+      'Course Curriculum';
     let lesTitle =
       lessonContent?.lessonTitle ||
       sessionMetadata?.lessonTitle ||
-      "Ohm's Law & Resistance";
-    let topTitle = sessionMetadata?.topicTitle || "Ohm's Law & Circuit Analysis";
+      firstLesson?.title ||
+      'Live Classroom Lesson';
+    let topTitle =
+      sessionMetadata?.topicTitle ||
+      firstTopic?.title ||
+      lesTitle;
 
     for (const ch of normalizedChapters) {
       for (const les of ch.lessons) {
-        if (les.lessonId === activeLessonId) {
-          chapId = ch.chapterId;
+        if (String(les.lessonId) === String(activeLessonId)) {
+          chapId = String(ch.chapterId);
           chapTitle = ch.title;
           lesTitle = les.title;
-          const matchedTopic = les.topics.find((t) => t.topicId === activeTopicId);
+          const matchedTopic = les.topics.find(
+            (t) => String(t.topicId) === String(activeTopicId)
+          );
           if (matchedTopic) {
             topTitle = matchedTopic.title;
           } else if (les.topics[0]) {
             topTitle = les.topics[0].title;
+          } else {
+            topTitle = les.title;
           }
         }
       }
@@ -663,13 +830,38 @@ export default function LearningSessionLayout() {
       lessonTitle: lesTitle,
       topicTitle: topTitle,
     };
-  }, [normalizedChapters, activeLessonId, activeTopicId, sessionMetadata, lessonContent]);
+  }, [
+    normalizedChapters,
+    activeLessonId,
+    activeTopicId,
+    sessionMetadata,
+    lessonContent,
+    curriculum,
+    initialParams.chapterId,
+  ]);
 
   // Normalize Lesson Blocks for VirtualContentStage (800px Virtual Page)
+  // Filter by activeTopicId when blocks are tagged with topicId so clicking any topic shows its content
   const normalizedBlocks: LessonBlock[] = useMemo(() => {
-    const rawBlocks = lessonContent?.blocks || [];
-    return rawBlocks.map((b: any) => ({
-      blockId: b.blockId,
+    const rawBlocks: any[] = Array.isArray(lessonContent?.blocks)
+      ? lessonContent.blocks
+      : [];
+
+    const filteredBlocks =
+      activeTopicId &&
+      rawBlocks.some(
+        (b: any) =>
+          b.topicId !== undefined &&
+          b.topicId !== null &&
+          String(b.topicId) === String(activeTopicId)
+      )
+        ? rawBlocks.filter(
+            (b: any) => String(b.topicId) === String(activeTopicId)
+          )
+        : rawBlocks;
+
+    return filteredBlocks.map((b: any) => ({
+      blockId: String(b.blockId),
       type:
         b.type === 'callout'
           ? 'problem'
@@ -680,8 +872,10 @@ export default function LearningSessionLayout() {
       content: b.content || '',
       formulaLatex: b.formulaLatex,
       svgDiagram: b.svgDiagram,
+      topicId: b.topicId ? String(b.topicId) : undefined,
+      topicTitle: b.topicTitle,
     }));
-  }, [lessonContent]);
+  }, [lessonContent, activeTopicId]);
 
   // Map Socket Mode to Top Header ActiveMode (Student Rough Pad removed)
   const activeMode: ActiveMode = mode === 'WHITEBOARD' ? 'whiteboard' : 'content';
@@ -692,13 +886,15 @@ export default function LearningSessionLayout() {
     () => ({
       sessionId,
       contextType: 'course_lesson',
-      branchId: initialParams.branchId,
-      batchId: initialParams.batchId,
-      boardId: initialParams.boardId,
-      languageId: initialParams.languageId,
-      courseId: initialParams.courseId,
-      linkedVodCourseId: initialParams.linkedVodCourseId,
-      subjectId: initialParams.subjectId,
+      branchId: Number(sessionMetadata?.branchId || initialParams.branchId) || 0,
+      batchId: Number(sessionMetadata?.batchId || initialParams.batchId) || 0,
+      boardId: sessionMetadata?.boardId ?? initialParams.boardId,
+      languageId: Number(languageId) || 1,
+      courseId: Number(sessionMetadata?.courseId || initialParams.courseId) || 0,
+      linkedVodCourseId: Number(
+        sessionMetadata?.linkedVodCourseId || initialParams.linkedVodCourseId
+      ) || 0,
+      subjectId: Number(sessionMetadata?.subjectId || initialParams.subjectId) || 0,
       chapterId: activeChapterId,
       chapterNumber: 1,
       chapterTitle,
@@ -714,7 +910,9 @@ export default function LearningSessionLayout() {
     }),
     [
       sessionId,
+      sessionMetadata,
       initialParams,
+      languageId,
       activeChapterId,
       chapterTitle,
       activeLessonId,
@@ -803,7 +1001,7 @@ export default function LearningSessionLayout() {
   const normalizedAttendanceList: StudentAttendanceSummary[] = useMemo(
     () =>
       (attendanceList || []).map((s: any) => {
-        const resolvedId = s.studentId || s.userId || 'student_101';
+        const resolvedId = s.studentId || s.userId || '';
         const resolvedName =
           s.studentName ||
           s.name ||
@@ -1012,51 +1210,25 @@ export default function LearningSessionLayout() {
     ]
   );
 
-  // Role & Session Switch Handlers
-  const handleSwitchRole = (newRole: 'teacher' | 'student', nextTeacherId?: string) => {
-    setRole(newRole);
-    setFollowTeacher(true);
-    setStudentZoomMultiplier(1.0);
-    if (newRole === 'teacher') {
-      const resolvedTId = (nextTeacherId || '501').replace(/^teacher_/, '');
-      setTeacherId(`teacher_${resolvedTId}`);
-      setToken(`DEV_TOKEN_TEACHER_${resolvedTId}`);
-      const query =
-        resolvedTId === '501'
-          ? `?role=teacher&sessionId=${sessionId}`
-          : `?role=teacher&teacherId=${resolvedTId}&sessionId=${sessionId}`;
-      window.history.replaceState(null, '', query);
-    } else {
-      const stId = studentId || '101';
-      setStudentId(stId);
-      setToken(`DEV_TOKEN_STUDENT_${stId}`);
-      window.history.replaceState(
-        null,
-        '',
-        `?role=student&studentId=${stId}&sessionId=${sessionId}`
-      );
-    }
+  // Role & Session Switch Handlers (Disabled in production token-authenticated mode)
+  const handleSwitchRole = (_newRole: 'teacher' | 'student', _nextTeacherId?: string) => {
+    // Role switching is governed strictly by the signed classroom token from Zerix Academy
   };
 
-  const handleSelectBatch = (newSessionId: string) => {
-    setSessionId(newSessionId);
-    window.history.replaceState(
-      null,
-      '',
-      role === 'teacher'
-        ? teacherId !== '501'
-          ? `?role=teacher&teacherId=${teacherId}&sessionId=${newSessionId}`
-          : `?role=teacher&sessionId=${newSessionId}`
-        : `?role=student&studentId=${studentId}&sessionId=${newSessionId}`
-    );
+  const handleSelectBatch = (_newSessionId: string) => {
+    // Session selection is governed strictly by the signed classroom token from Zerix Academy
   };
 
   const currentTeacherDisplayName = useMemo(() => {
-    if (teacherId === '502' || teacherId === 'teacher_502') return 'Prof. R.K. Verma';
-    if (teacherId === '503' || teacherId === 'teacher_503') return 'Dr. Neha Kulkarni';
-    if (teacherId === '504' || teacherId === 'teacher_504') return 'Prof. S.K. Iyer';
-    return sessionMetadata?.teacherName || 'Dr. H.C. Verma';
-  }, [teacherId, sessionMetadata]);
+    if (role === 'teacher' && verifiedUserName) return verifiedUserName;
+    return sessionMetadata?.teacherName || verifiedUserName || 'Instructor';
+  }, [role, verifiedUserName, sessionMetadata]);
+
+  const currentUserDisplayName = useMemo(() => {
+    if (verifiedUserName) return verifiedUserName;
+    if (role === 'teacher') return currentTeacherDisplayName;
+    return studentId ? `Student #${studentId}` : 'Student';
+  }, [verifiedUserName, role, currentTeacherDisplayName, studentId]);
 
   // Disconnect LiveKit audio automatically when the broadcast ends
   useEffect(() => {
@@ -1074,12 +1246,13 @@ export default function LearningSessionLayout() {
     if (teacherStatus === 'ENDED') {
       if (token) {
         sessionStorage.setItem('broadcast_rejoin_token', token);
+        sessionStorage.setItem('broadcast_rejoin_session_id', sessionId);
       }
       const queryParams = new URLSearchParams({
         sessionId,
         role,
-        studentId: studentId || '101',
-        teacherId: teacherId || 'teacher_501',
+        ...(studentId ? { studentId } : {}),
+        ...(teacherId ? { teacherId } : {}),
         ended: 'true',
       });
       const timer = setTimeout(() => {
@@ -1099,13 +1272,14 @@ export default function LearningSessionLayout() {
 
     if (token) {
       sessionStorage.setItem('broadcast_rejoin_token', token);
+      sessionStorage.setItem('broadcast_rejoin_session_id', sessionId);
     }
     // Redirect to room-based Rejoin Page
     const queryParams = new URLSearchParams({
       sessionId,
       role,
-      studentId: studentId || '101',
-      teacherId: teacherId || 'teacher_501',
+      ...(studentId ? { studentId } : {}),
+      ...(teacherId ? { teacherId } : {}),
       left: 'true',
     });
     window.location.href = `/rejoin?${queryParams.toString()}`;
@@ -1132,13 +1306,14 @@ export default function LearningSessionLayout() {
 
     if (token) {
       sessionStorage.setItem('broadcast_rejoin_token', token);
+      sessionStorage.setItem('broadcast_rejoin_session_id', sessionId);
     }
     // Redirect host/cohost to room-based Rejoin Page with ended=true
     const queryParams = new URLSearchParams({
       sessionId,
       role,
-      studentId: studentId || '101',
-      teacherId: teacherId || 'teacher_501',
+      ...(studentId ? { studentId } : {}),
+      ...(teacherId ? { teacherId } : {}),
       ended: 'true',
     });
     setTimeout(() => {
@@ -1176,6 +1351,58 @@ export default function LearningSessionLayout() {
     }
   }, [rejoinSession, sessionId, role, teacherId, studentId, token, clientDeviceId]);
 
+  const academyPortalUrl =
+    process.env.NEXT_PUBLIC_ACADEMY_URL || 'https://academy.zerixtech.com';
+
+  // Strict Classroom Authentication Gate: Block direct unauthenticated access to studio.zerixtech.com
+  if (authError || (!isAuthVerifying && (!sessionId || !token))) {
+    return (
+      <div
+        data-testid="studio-auth-required-screen"
+        className="fixed inset-0 flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 text-slate-100 p-4"
+      >
+        <div className="max-w-md w-full rounded-3xl bg-slate-800/95 border border-slate-700/80 shadow-2xl p-6 sm:p-8 text-center space-y-5">
+          <div className="mx-auto w-14 h-14 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 text-2xl font-bold">
+            🔒
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-xl font-bold text-white">
+              Classroom Authentication Required
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+              {authError ||
+                'Direct access to Zerix Live Broadcast Studio is restricted. Both instructors and students must launch or join the live class from Zerix Academy with a valid classroom token.'}
+            </p>
+          </div>
+          <div className="pt-2">
+            <a
+              href={academyPortalUrl}
+              className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white text-sm font-bold shadow-lg shadow-sky-500/20 transition-all"
+            >
+              <span>Go to Zerix Academy</span>
+            </a>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isAuthVerifying && !sessionMetadata) {
+    return (
+      <div
+        data-testid="studio-auth-verifying-screen"
+        className="fixed inset-0 flex items-center justify-center bg-slate-900 text-slate-100 p-4"
+      >
+        <div className="text-center space-y-3">
+          <div className="mx-auto w-10 h-10 rounded-full border-2 border-sky-400 border-t-transparent animate-spin" />
+          <p className="text-sm font-semibold text-slate-200">
+            Verifying classroom identity &amp; session token...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       ref={workspaceContainerRef}
@@ -1188,12 +1415,8 @@ export default function LearningSessionLayout() {
       <TopModeNavbar
         role={role}
         userId={currentUserId}
-        userName={
-          role === 'teacher'
-            ? currentTeacherDisplayName
-            : `Aarav Sharma (#${studentId})`
-        }
-        teacherName={sessionMetadata?.teacherName || 'Dr. H.C. Verma'}
+        userName={currentUserDisplayName}
+        teacherName={currentTeacherDisplayName}
         isHostTeacher={isHostTeacher}
         canEditWhiteboard={canEditWhiteboard}
         chapterTitle={chapterTitle}
@@ -1211,7 +1434,7 @@ export default function LearningSessionLayout() {
         isNoiseCancellationEnabled={isNoiseCancellationEnabled}
         hasRaisedHand={hasRaisedHand}
         hasStudentMicGrant={hasStudentMicGrant}
-        batches={DEFAULT_BATCHES}
+        batches={EMPTY_BATCHES}
         selectedSessionId={sessionId}
         isTopNavVisible={isTopNavVisible}
         isFullscreen={isFullscreen}
@@ -1544,8 +1767,8 @@ export default function LearningSessionLayout() {
                   const queryParams = new URLSearchParams({
                     sessionId,
                     role,
-                    studentId: studentId || '101',
-                    teacherId: teacherId || 'teacher_501',
+                    ...(studentId ? { studentId } : {}),
+                    ...(teacherId ? { teacherId } : {}),
                     ...(teacherStatus === 'ENDED' ? { ended: 'true' } : { left: 'true' }),
                   });
                   window.location.href = `/rejoin?${queryParams.toString()}`;
