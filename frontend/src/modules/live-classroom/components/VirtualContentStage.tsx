@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import '../styles/learning-content.css';
 import {
   ContentModeState,
   ContentStroke,
@@ -12,7 +13,6 @@ import {
   Eraser,
   Sparkles,
   Trash2,
-  Send,
   MousePointer,
   Compass,
   BookOpen,
@@ -36,6 +36,7 @@ export interface LessonBlock {
   type: 'heading' | 'concept' | 'formula' | 'problem' | 'diagram';
   title?: string;
   content: string;
+  contentHtml?: string;
   formulaLatex?: string;
   svgDiagram?: string;
   topicId?: string;
@@ -60,7 +61,7 @@ interface VirtualContentStageProps {
   onDeleteStroke: (strokeId: string) => void;
   onClearStrokes: () => void;
   onLaserMove: (laser: LaserPointerState) => void;
-  onSendBlockToWhiteboard: (block: LessonBlock) => void;
+  onSendBlockToWhiteboard?: (block: LessonBlock) => void;
 }
 
 interface TokenAnnotationInfo {
@@ -1001,11 +1002,56 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     });
   };
 
+  // Interactive MCQ radio button grading matching /learn page behavior
+  useEffect(() => {
+    const sheetEl = pageSheetRef.current;
+    if (!sheetEl) return;
+
+    const handleMcqChange = (e: Event) => {
+      const target = e.target as HTMLInputElement;
+      if (target && target.type === 'radio') {
+        const questionEl = target.closest('.mcq-question') as HTMLElement | null;
+        if (!questionEl) return;
+
+        const correctOption = questionEl.getAttribute('data-correct')?.trim().toLowerCase();
+        const selectedOption = target.value?.trim().toLowerCase();
+
+        const labels = questionEl.querySelectorAll('.mcq-options label');
+        labels.forEach((lbl) => {
+          lbl.classList.remove('correct-selected', 'wrong-selected');
+        });
+
+        const selectedLabel = target.closest('label');
+        if (selectedLabel && correctOption) {
+          if (selectedOption === correctOption) {
+            selectedLabel.classList.add('correct-selected');
+          } else {
+            selectedLabel.classList.add('wrong-selected');
+          }
+        }
+
+        const answerBox = questionEl.querySelector('.answer-box') as HTMLElement | null;
+        if (answerBox) {
+          answerBox.style.display = 'block';
+        }
+      }
+    };
+
+    sheetEl.addEventListener('change', handleMcqChange);
+    return () => {
+      sheetEl.removeEventListener('change', handleMcqChange);
+    };
+  }, [blocks]);
+
+  const isSelectionEnabled = !canAnnotate || activeTool === 'cursor';
+
   return (
     <div
       ref={outerContainerRef}
       data-active-content-tool={canAnnotate ? activeTool : 'cursor'}
-      className="relative flex-1 h-full flex flex-col bg-slate-50 overflow-hidden select-none"
+      className={`relative flex-1 h-full flex flex-col bg-[#f8fafc] overflow-hidden ${
+        isSelectionEnabled ? 'select-text' : 'select-none'
+      }`}
     >
       {/* Floating Teacher / Collaborator Annotation Pill — Mobile Bottom Thumb-Zone & Desktop Top Bar (Toggled via Top Bar Icon or Ctrl+T) */}
       {canAnnotate && isToolboxVisible && (
@@ -1026,7 +1072,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                   ? 'bg-[#12a3ff] text-white shadow-sm'
                   : 'text-slate-600 hover:bg-slate-100'
               }`}
-              title="Pointer / Scroll"
+              title="Select / Copy Text & Scroll"
             >
               <MousePointer className="w-3 sm:w-3.5 h-3 sm:h-3.5 shrink-0" />
               <span>Select</span>
@@ -1146,7 +1192,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         </div>
       )}
 
-      {/* Main Scrollable Viewport: Full-bleed on mobile (px-0 py-0), centered card on desktop */}
+      {/* Main Scrollable Viewport matching /learn page layout */}
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
@@ -1159,9 +1205,9 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           }
         }}
         data-testid="content-scroll-container"
-        className="flex-1 overflow-y-auto overflow-x-hidden px-0 py-0 sm:py-6 sm:px-4 flex justify-center items-start"
+        className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 sm:py-6 sm:px-6 flex justify-center items-start"
       >
-        {/* Full-Width Responsive Content Sheet (100% width on mobile, max 820px on desktop) */}
+        {/* Full-Width Responsive Content Sheet matching /learn page container */}
         <div
           ref={pageSheetRef}
           data-testid="virtual-content-sheet"
@@ -1169,9 +1215,9 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           onPointerDown={handleSheetPointerMove}
           onPointerUp={handleSheetPointerUp}
           onPointerLeave={handleSheetPointerLeave}
-          className="relative w-full max-w-[820px] bg-white sm:border border-slate-200 sm:rounded-2xl shadow-xs px-2.5 pt-3.5 pb-16 sm:p-7 min-h-full sm:min-h-[900px]"
+          className="relative w-full max-w-4xl space-y-5 pb-16 min-h-full"
         >
-          {/* Clean Lesson Header with Full Freehand Pen, Marking, Eraser & Laser Support */}
+          {/* Topic / Lesson Title Header matching /learn page */}
           {(() => {
             const headerBlockId = 'blk_header';
             const headerStrokes = contentState.penStrokes.filter(
@@ -1218,8 +1264,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
             const headerSvgWidth = Math.max(100, Number((headerLayoutCache?.blockRect.width || 760).toFixed(2)));
             const headerSvgHeight = Math.max(40, Number((headerLayoutCache?.blockRect.height || 80).toFixed(2)));
 
-            const lessonTitleSegments = tokenizeText(lessonTitle, 'title');
-            const topicTitleSegments = tokenizeText(topicTitle, 'content');
+            const displayTitle = topicTitle || lessonTitle;
+            const topicTitleSegments = tokenizeText(displayTitle, 'content');
             const isLaserOnHeader =
               laserPointer.active && laserPointer.blockId === headerBlockId;
 
@@ -1232,29 +1278,18 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                 onPointerDown={(e) => handleBlockPointerDown(e, headerBlockId)}
                 onPointerMove={(e) => handleBlockPointerMove(e, headerBlockId)}
                 onPointerUp={(e) => handleBlockPointerUp(e, headerBlockId)}
-                className={`relative pb-3.5 mb-3.5 sm:pb-5 sm:mb-6 border-b border-slate-200 flex items-start sm:items-center justify-between gap-2 select-none ${
+                className={`relative space-y-2 ${
+                  isSelectionEnabled ? 'select-text' : 'select-none'
+                } ${
                   canAnnotate && activeTool !== 'cursor' && activeTool !== 'laser'
                     ? 'cursor-crosshair touch-none'
                     : 'cursor-default'
                 }`}
               >
-                <div className="min-w-0 flex-1 relative z-1">
-                  <div
-                    data-region-id="header"
-                    className="flex items-center gap-1.5 text-[11px] sm:text-xs font-semibold uppercase tracking-wider text-[#12a3ff] mb-1"
-                  >
-                    <BookOpen className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate">
-                      {renderTokenizedText(
-                        lessonTitleSegments,
-                        headerTokenAnnotationMap,
-                        isLaserOnHeader ? laserPointer.tokenId : undefined
-                      )}
-                    </span>
-                  </div>
+                <div className="min-w-0 flex-1 relative z-1 space-y-2">
                   <h1
                     data-region-id="content"
-                    className="text-lg sm:text-2xl font-bold text-slate-900 tracking-tight leading-snug break-words"
+                    className="text-xl md:text-2xl font-extrabold text-slate-900 tracking-tight leading-snug break-words"
                   >
                     {renderTokenizedText(
                       topicTitleSegments,
@@ -1262,12 +1297,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                       isLaserOnHeader ? laserPointer.tokenId : undefined
                     )}
                   </h1>
-                </div>
-
-                <div className="text-right shrink-0 hidden sm:block">
-                  <span className="inline-flex items-center px-2.5 py-1 rounded-md bg-slate-100 text-slate-600 text-xs font-medium">
-                    Word-Synced Responsive Stage
-                  </span>
+                  <div className="h-[2.5px] w-12 bg-[#22c55e] rounded-full" />
                 </div>
 
                 {/* SVG Vector Drawing Overlay for Header */}
@@ -1298,243 +1328,198 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
             );
           })()}
 
-          {/* Structured Lesson Blocks with Block-ID & Word-Token Anchoring */}
-          <div className="space-y-3 sm:space-y-5">
+          {/* Main Content Card matching /learn page (.content-main-container) */}
+          <div className="bg-white rounded-2xl p-4 sm:p-6 space-y-4 shadow-xs border border-slate-200/80">
+            <div className="flex items-center gap-2 text-[#2563eb] font-extrabold text-base">
+              <BookOpen className="w-5 h-5 shrink-0" />
+              <span>{topicTitle || lessonTitle}</span>
+            </div>
+
             {blocks.length === 0 ? (
-              <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">
+              <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-8 text-center text-sm text-slate-500">
                 No content available for this topic.
               </div>
-            ) : null}
-            {blocks.map((block) => {
-              const blockStrokes = contentState.penStrokes.filter(
-                (s) => s.blockId === block.blockId
-              );
-              const isDrawingHere =
-                activeDrawingBlockId === block.blockId && currentPoints.length > 0;
-
-              const allBlockStrokes: ContentStroke[] = isDrawingHere
-                ? [
-                    ...blockStrokes,
-                    {
-                      id: 'temp-active-stroke',
-                      blockId: block.blockId,
-                      color: penColor,
-                      width: 3,
-                      tool: 'pen',
-                      opacity: 1,
-                      anchorTokens: currentAnchorTokens,
-                      points: currentPoints,
-                    },
-                  ]
-                : blockStrokes;
-
-              // Build per-word token annotation map for deterministic word-level highlight/mark sync
-              const tokenAnnotationMap = new Map<string, TokenAnnotationInfo>();
-              for (const s of allBlockStrokes) {
-                const isHighlighter = s.tool === 'highlighter';
-                const touchedTokens = new Set<string>();
-
-                if (Array.isArray(s.anchorTokens)) {
-                  for (const tid of s.anchorTokens) {
-                    if (tid) touchedTokens.add(tid);
-                  }
-                }
-                if (Array.isArray(s.points)) {
-                  for (const pt of s.points) {
-                    if (pt?.tokenId) touchedTokens.add(pt.tokenId);
-                  }
-                }
-
-                touchedTokens.forEach((tid) => {
-                  const existing = tokenAnnotationMap.get(tid) || { strokeIds: [] };
-                  if (isHighlighter) {
-                    existing.highlightedColor = s.color || '#facc15';
-                  } else {
-                    existing.markedColor = s.color || '#ef4444';
-                  }
-                  if (s.id && s.id !== 'temp-active-stroke' && !existing.strokeIds.includes(s.id)) {
-                    existing.strokeIds.push(s.id);
-                  }
-                  tokenAnnotationMap.set(tid, existing);
-                });
-              }
-
-              const layoutCache = getFreshBlockLayout(block.blockId);
-              const svgWidth = Math.max(100, Number((layoutCache?.blockRect.width || 760).toFixed(2)));
-              const svgHeight = Math.max(60, Number((layoutCache?.blockRect.height || 180).toFixed(2)));
-
-              const titleSegments = tokenizeText(block.title, 'title');
-              const contentSegments = tokenizeText(block.content, 'content');
-              const formulaSegments = tokenizeText(block.formulaLatex, 'formula');
-
-              const isLaserOnBlock =
-                laserPointer.active && laserPointer.blockId === block.blockId;
-              const isTeacherAnchor =
-                contentState.scrollAnchor.blockId === block.blockId;
-
-              // Compute laser pointer position (word-token anchored if pointing at a word)
-              let laserPositionStyle: React.CSSProperties | null = null;
-              if (isLaserOnBlock) {
-                if (layoutCache && layoutCache.blockRect.width > 0) {
-                  const projected = projectPointToDevicePixels(
-                    {
-                      x: laserPointer.x,
-                      y: laserPointer.y,
-                      tokenId: laserPointer.tokenId,
-                      rx: laserPointer.rx,
-                      ry: laserPointer.ry,
-                      regionId: laserPointer.regionId,
-                      regionRx: laserPointer.regionRx,
-                      regionRy: laserPointer.regionRy,
-                    },
-                    layoutCache
+            ) : (
+              <div
+                className={`content-main-container text-slate-800 space-y-3 ${
+                  isSelectionEnabled ? 'select-text' : 'select-none'
+                }`}
+              >
+                {blocks.map((block) => {
+                  const blockStrokes = contentState.penStrokes.filter(
+                    (s) => s.blockId === block.blockId
                   );
-                  laserPositionStyle = {
-                    left: `${projected.px}px`,
-                    top: `${projected.py}px`,
-                  };
-                } else {
-                  laserPositionStyle = {
-                    left: `${laserPointer.x}%`,
-                    top: `${laserPointer.y}%`,
-                  };
-                }
-              }
+                  const isDrawingHere =
+                    activeDrawingBlockId === block.blockId && currentPoints.length > 0;
 
-              return (
-                <div
-                  key={block.blockId}
-                  data-block-id={block.blockId}
-                  ref={(el) => {
-                    blockRefs.current[block.blockId] = el;
-                  }}
-                  onPointerDown={(e) => handleBlockPointerDown(e, block.blockId)}
-                  onPointerMove={(e) => handleBlockPointerMove(e, block.blockId)}
-                  onPointerUp={(e) => handleBlockPointerUp(e, block.blockId)}
-                  className={`group relative rounded-xl p-3 sm:p-5 border transition-all ${
-                    isTeacherAnchor
-                      ? 'bg-white border-[#12a3ff]/40 ring-1 ring-[#12a3ff]/15 shadow-xs'
-                      : 'bg-white border-slate-200 hover:border-slate-300'
-                  } ${
-                    canAnnotate && activeTool !== 'cursor'
-                      ? 'cursor-crosshair touch-none'
-                      : 'cursor-default'
-                  }`}
-                >
-                  {/* Block Header & Teacher "Send to Whiteboard" Action */}
-                  <div
-                    data-region-id="header"
-                    className="flex items-start sm:items-center justify-between gap-2 mb-2.5"
-                  >
-                    <div className="flex items-center gap-2 min-w-0 flex-1 flex-wrap">
-                      <span
-                        className={`px-2 py-0.5 text-[10px] sm:text-[11px] font-semibold uppercase tracking-wider rounded-md border shrink-0 ${getBlockBadgeStyle(
-                          block.type
-                        )}`}
-                      >
-                        {block.type}
-                      </span>
-                      {block.title && (
-                        <h3 className="text-[15px] sm:text-base font-bold text-slate-900 leading-snug break-words">
-                          {renderTokenizedText(
-                            titleSegments,
-                            tokenAnnotationMap,
-                            isLaserOnBlock ? laserPointer.tokenId : undefined
-                          )}
-                        </h3>
-                      )}
-                    </div>
+                  const allBlockStrokes: ContentStroke[] = isDrawingHere
+                    ? [
+                        ...blockStrokes,
+                        {
+                          id: 'temp-active-stroke',
+                          blockId: block.blockId,
+                          color: penColor,
+                          width: 3,
+                          tool: 'pen',
+                          opacity: 1,
+                          anchorTokens: currentAnchorTokens,
+                          points: currentPoints,
+                        },
+                      ]
+                    : blockStrokes;
 
-                    {role === 'teacher' && (
-                      <button
-                        type="button"
-                        data-testid={`send-to-wb-${block.blockId}`}
-                        onPointerDown={(e) => e.stopPropagation()}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSendBlockToWhiteboard(block);
-                        }}
-                        className="opacity-95 group-hover:opacity-100 flex items-center gap-1.5 px-2.5 sm:px-3 py-1 rounded-lg bg-sky-50 hover:bg-[#12a3ff] text-[#12a3ff] hover:text-white border border-sky-200 hover:border-[#12a3ff] text-xs font-semibold transition-all shadow-2xs shrink-0"
-                      >
-                        <Send className="w-3 h-3 shrink-0" />
-                        <span>Send to Whiteboard</span>
-                      </button>
-                    )}
-                  </div>
+                  // Build per-word token annotation map for deterministic word-level highlight/mark sync
+                  const tokenAnnotationMap = new Map<string, TokenAnnotationInfo>();
+                  for (const s of allBlockStrokes) {
+                    const isHighlighter = s.tool === 'highlighter';
+                    const touchedTokens = new Set<string>();
 
-                  {/* Block Body Text with Deterministic Word Spans */}
-                  {block.content && (
-                    <p
-                      data-region-id="content"
-                      className="text-slate-700 text-[15px] sm:text-[15.5px] leading-[1.7] whitespace-pre-line break-words"
-                    >
-                      {renderTokenizedText(
-                        contentSegments,
-                        tokenAnnotationMap,
-                        isLaserOnBlock ? laserPointer.tokenId : undefined
-                      )}
-                    </p>
-                  )}
+                    if (Array.isArray(s.anchorTokens)) {
+                      for (const tid of s.anchorTokens) {
+                        if (tid) touchedTokens.add(tid);
+                      }
+                    }
+                    if (Array.isArray(s.points)) {
+                      for (const pt of s.points) {
+                        if (pt?.tokenId) touchedTokens.add(pt.tokenId);
+                      }
+                    }
 
-                  {/* Formula Box */}
-                  {block.formulaLatex && (
+                    touchedTokens.forEach((tid) => {
+                      const existing = tokenAnnotationMap.get(tid) || { strokeIds: [] };
+                      if (isHighlighter) {
+                        existing.highlightedColor = s.color || '#facc15';
+                      } else {
+                        existing.markedColor = s.color || '#ef4444';
+                      }
+                      if (s.id && s.id !== 'temp-active-stroke' && !existing.strokeIds.includes(s.id)) {
+                        existing.strokeIds.push(s.id);
+                      }
+                      tokenAnnotationMap.set(tid, existing);
+                    });
+                  }
+
+                  const layoutCache = getFreshBlockLayout(block.blockId);
+                  const svgWidth = Math.max(100, Number((layoutCache?.blockRect.width || 760).toFixed(2)));
+                  const svgHeight = Math.max(40, Number((layoutCache?.blockRect.height || 120).toFixed(2)));
+
+                  const titleSegments = tokenizeText(block.title, 'title');
+                  const contentSegments = tokenizeText(block.content, 'content');
+                  const formulaSegments = tokenizeText(block.formulaLatex, 'formula');
+
+                  const isLaserOnBlock =
+                    laserPointer.active && laserPointer.blockId === block.blockId;
+                  const isTeacherAnchor =
+                    contentState.scrollAnchor.blockId === block.blockId;
+
+                  return (
                     <div
-                      data-region-id="formula"
-                      className="mt-3 sm:mt-4 p-3 sm:p-4 rounded-xl bg-slate-50 border border-slate-200 font-mono text-sm sm:text-base text-slate-900 text-center tracking-wide shadow-2xs overflow-x-auto"
+                      key={block.blockId}
+                      data-block-id={block.blockId}
+                      data-testid={`content-block-${block.blockId}`}
+                      ref={(el) => {
+                        blockRefs.current[block.blockId] = el;
+                      }}
+                      onPointerDown={(e) => handleBlockPointerDown(e, block.blockId)}
+                      onPointerMove={(e) => handleBlockPointerMove(e, block.blockId)}
+                      onPointerUp={(e) => handleBlockPointerUp(e, block.blockId)}
+                      className={`section-block relative transition-all rounded-lg ${
+                        isTeacherAnchor ? 'ring-1 ring-[#12a3ff]/20' : ''
+                      } ${isSelectionEnabled ? 'select-text' : 'select-none'} ${
+                        canAnnotate && activeTool !== 'cursor'
+                          ? 'cursor-crosshair touch-none'
+                          : 'cursor-auto'
+                      }`}
                     >
-                      {renderTokenizedText(
-                        formulaSegments,
-                        tokenAnnotationMap,
-                        isLaserOnBlock ? laserPointer.tokenId : undefined
-                      )}
-                    </div>
-                  )}
-
-                  {/* SVG Diagram Box (Full-Width Aspect-Preserving on Mobile & Desktop) */}
-                  {block.svgDiagram && (
-                    <div
-                      data-region-id="diagram"
-                      className="mt-3 sm:mt-4 p-2 sm:p-4 rounded-xl bg-slate-50 border border-slate-200 flex justify-center items-center overflow-hidden [&>svg]:w-full [&>svg]:h-auto [&>svg]:max-h-[260px] [&>svg]:block"
-                      dangerouslySetInnerHTML={{ __html: sanitizeSvgMarkup(block.svgDiagram) }}
-                    />
-                  )}
-
-                  {/* Word-Anchored & Region-Anchored SVG Vector Overlay */}
-                  <svg
-                    viewBox={`0 0 ${svgWidth} ${svgHeight}`}
-                    preserveAspectRatio="none"
-                    className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-10"
-                  >
-                    {allBlockStrokes.map((stroke) => {
-                      const isHighlighter = stroke.tool === 'highlighter';
-                      const dPath = buildResponsiveSvgPath(stroke.points || [], layoutCache, stroke.tool === 'pen');
-                      if (!dPath) return null;
-
-                      return (
-                        <path
-                          key={stroke.id}
-                          data-stroke-id={stroke.id}
-                          d={dPath}
-                          fill="none"
-                          stroke={stroke.color}
-                          strokeOpacity={
-                            stroke.opacity ?? (isHighlighter ? 0.32 : 0.92)
-                          }
-                          strokeWidth={
-                            isHighlighter ? 16 : stroke.width || 3
-                          }
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          style={{
-                            mixBlendMode: isHighlighter ? 'multiply' : 'normal',
-                          }}
+                      {block.contentHtml ? (
+                        <div
+                          data-region-id="content"
+                          className="content-html-fragment"
+                          dangerouslySetInnerHTML={{ __html: block.contentHtml }}
                         />
-                      );
-                    })}
-                  </svg>
-                </div>
-              );
-            })}
+                      ) : (
+                        <section data-region-id="content">
+                          {block.title && (
+                            <h3 data-region-id="header">
+                              {renderTokenizedText(
+                                titleSegments,
+                                tokenAnnotationMap,
+                                isLaserOnBlock ? laserPointer.tokenId : undefined
+                              )}
+                            </h3>
+                          )}
+
+                          {block.content && (
+                            <p className="whitespace-pre-line break-words">
+                              {renderTokenizedText(
+                                contentSegments,
+                                tokenAnnotationMap,
+                                isLaserOnBlock ? laserPointer.tokenId : undefined
+                              )}
+                            </p>
+                          )}
+
+                          {block.formulaLatex && (
+                            <div
+                              data-region-id="formula"
+                              className="formula-box font-mono text-sm sm:text-base overflow-x-auto"
+                            >
+                              {renderTokenizedText(
+                                formulaSegments,
+                                tokenAnnotationMap,
+                                isLaserOnBlock ? laserPointer.tokenId : undefined
+                              )}
+                            </div>
+                          )}
+
+                          {block.svgDiagram && (
+                            <div
+                              data-region-id="diagram"
+                              className="diagram-box flex justify-center items-center overflow-hidden [&>svg]:w-full [&>svg]:h-auto [&>svg]:max-h-[260px] [&>svg]:block"
+                              dangerouslySetInnerHTML={{ __html: sanitizeSvgMarkup(block.svgDiagram) }}
+                            />
+                          )}
+                        </section>
+                      )}
+
+                      {/* Word-Anchored & Region-Anchored SVG Vector Overlay */}
+                      <svg
+                        viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+                        preserveAspectRatio="none"
+                        className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-10"
+                      >
+                        {allBlockStrokes.map((stroke) => {
+                          const isHighlighter = stroke.tool === 'highlighter';
+                          const dPath = buildResponsiveSvgPath(stroke.points || [], layoutCache, stroke.tool === 'pen');
+                          if (!dPath) return null;
+
+                          return (
+                            <path
+                              key={stroke.id}
+                              data-stroke-id={stroke.id}
+                              d={dPath}
+                              fill="none"
+                              stroke={stroke.color}
+                              strokeOpacity={
+                                stroke.opacity ?? (isHighlighter ? 0.32 : 0.92)
+                              }
+                              strokeWidth={
+                                isHighlighter ? 16 : stroke.width || 3
+                              }
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              style={{
+                                mixBlendMode: isHighlighter ? 'multiply' : 'normal',
+                              }}
+                            />
+                          );
+                        })}
+                      </svg>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Excalidraw-Style Decaying Laser Trail Across the Entire Content Stage */}

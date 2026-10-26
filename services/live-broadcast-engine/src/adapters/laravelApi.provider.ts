@@ -230,6 +230,8 @@ export class LaravelApiDataProvider implements IDataProvider {
               lessonId: String(les.lessonId ?? les.id ?? lesIdx + 1),
               lessonNumber: String(les.lessonNumber ?? lesIdx + 1),
               title: String(les.title || les.lessonTitle || `Lesson ${lesIdx + 1}`),
+              hasContent: Boolean(les.hasContent || (les.description && String(les.description).trim() !== '')),
+              description: les.description ? String(les.description) : undefined,
               topics: (Array.isArray(les.topics) ? les.topics : []).map(
                 (top: any, topIdx: number) => ({
                   topicId: String(top.topicId ?? top.id ?? topIdx + 1),
@@ -270,6 +272,41 @@ export class LaravelApiDataProvider implements IDataProvider {
       const resolvedLessonId = String(raw.lessonId ?? lessonId);
       const resolvedChapterId = String(raw.chapterId ?? '1');
       const resolvedLessonTitle = String(raw.lessonTitle || raw.title || 'Lesson');
+      const resolvedLessonHtml = raw.contentHtml || raw.description ? String(raw.contentHtml || raw.description) : undefined;
+
+      const lessonBlocks = Array.isArray(raw.lessonBlocks)
+        ? raw.lessonBlocks.map((b: any, idx: number) => ({
+            blockId: String(b.blockId || `blk_les_${resolvedLessonId}_${idx + 1}`),
+            topicId: undefined,
+            topicTitle: undefined,
+            type: b.type || 'paragraph',
+            title: String(b.title || resolvedLessonTitle),
+            order: Number(b.order ?? idx + 1),
+            content: String(b.content ?? ''),
+            contentHtml: b.contentHtml ? String(b.contentHtml) : undefined,
+            formulaLatex: b.formulaLatex,
+            svgDiagram: b.svgDiagram,
+            calloutType: b.calloutType,
+            supportsSendToBoard: b.supportsSendToBoard ?? true,
+          }))
+        : resolvedLessonHtml
+        ? [
+            {
+              blockId: `blk_les_${resolvedLessonId}_intro`,
+              topicId: undefined,
+              topicTitle: undefined,
+              type: 'paragraph' as const,
+              title: resolvedLessonTitle,
+              order: 1,
+              content: resolvedLessonHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+              contentHtml: resolvedLessonHtml,
+              formulaLatex: undefined,
+              svgDiagram: undefined,
+              calloutType: undefined,
+              supportsSendToBoard: true,
+            },
+          ]
+        : [];
 
       const rawTopics = Array.isArray(raw.topics) ? raw.topics : [];
       const topics = rawTopics.map((top: any, topIdx: number) => ({
@@ -375,6 +412,9 @@ export class LaravelApiDataProvider implements IDataProvider {
         lessonTitle: resolvedLessonTitle,
         chapterId: resolvedChapterId,
         languageId: String(raw.languageId ?? languageId ?? '1'),
+        description: resolvedLessonHtml,
+        contentHtml: resolvedLessonHtml,
+        lessonBlocks,
         topics,
         blocks,
       };

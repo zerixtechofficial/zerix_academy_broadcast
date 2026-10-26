@@ -124,14 +124,20 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
   };
 
   // Socket.io Connection & Event Handling
-  io.on('connection', async (socket) => {
+  io.on('connection', (socket) => {
     const user = socket.user;
-    const sessionId = socket.sessionId;
+    const initialSessionId = socket.sessionId;
 
-    if (!user || !sessionId) {
+    if (!user || !initialSessionId) {
       socket.disconnect(true);
       return;
     }
+
+    let sessionId: string = initialSessionId;
+
+    // Start joining the initial room immediately and register all socket.on listeners synchronously
+    // on the first tick, while ensuring each listener awaits initialRoomJoinPromise before running.
+    const initialRoomJoinPromise = Promise.resolve(socket.join(sessionId));
 
     // Wrap socket.on handlers with non-blocking Telegram error boundary so unexpected handler errors
     // never crash the engine or block other sockets
@@ -139,6 +145,7 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
     socket.on = ((eventName: string, listener: (...args: any[]) => any) => {
       return rawSocketOn(eventName, async (...args: any[]) => {
         try {
+          await initialRoomJoinPromise;
           await listener(...args);
         } catch (err: any) {
           console.error(`[Socket.IO:${eventName}] Unhandled handler error:`, err?.message || err);
@@ -154,9 +161,6 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
         }
       });
     }) as any;
-
-    // Join room channel
-    await socket.join(sessionId);
 
     const getSocketDeviceId = (payloadDeviceId?: string): string => {
       return (
@@ -193,8 +197,10 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
         }
 
         // Ensure socket is joined to targetSessionId if authorized
+        await socket.join(targetSessionId);
         if (targetSessionId !== sessionId) {
-          await socket.join(targetSessionId);
+          sessionId = targetSessionId;
+          socket.sessionId = targetSessionId;
         }
 
         // Handle Teacher / Co-Host Join & Reconnection
@@ -775,11 +781,16 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
         // Students must either have an active mic grant or allowStudentUnmute enabled.
         if (user.role !== 'teacher') {
           const normStudentId = AudioStageController.normalizeStudentId(user.userId);
-          const [allowAll, hasGrant] = await Promise.all([
+          const rawCleanId = String(user.userId || '').replace(/^student_/, '');
+          const [allowAll, hasGrantNorm, hasGrantRaw, hasGrantClean] = await Promise.all([
             AudioStageController.getAllowStudentUnmute(sessionId),
             redis.sismember(AudioStageController.activeMicsKey(sessionId), normStudentId),
+            redis.sismember(AudioStageController.activeMicsKey(sessionId), user.userId),
+            rawCleanId
+              ? redis.sismember(AudioStageController.activeMicsKey(sessionId), rawCleanId)
+              : Promise.resolve(0),
           ]);
-          if (!allowAll && hasGrant !== 1) return;
+          if (!allowAll && hasGrantNorm !== 1 && hasGrantRaw !== 1 && hasGrantClean !== 1) return;
         }
 
         const relayPayload = {
@@ -794,8 +805,7 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
           ts: Date.now(),
         };
 
-        const target = socket.volatile ? socket.volatile.to(sessionId) : socket.to(sessionId);
-        target.emit('AUDIO_VOICE_FRAME', relayPayload);
+        socket.to(sessionId).emit('AUDIO_VOICE_FRAME', relayPayload);
       }
     );
 

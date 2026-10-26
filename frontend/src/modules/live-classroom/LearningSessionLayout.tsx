@@ -291,6 +291,8 @@ export default function LearningSessionLayout() {
     Promise.resolve(false)
   );
   const playIncomingVoiceFrameRef = useRef<(packet: any) => void>(() => {});
+  const recoverAudioStageRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const isMicrophoneEnabledRef = useRef<boolean>(false);
 
   // Real-time Socket.io + MsgPack Broadcast Hook
   const {
@@ -388,6 +390,9 @@ export default function LearningSessionLayout() {
     },
     onIncomingVoiceFrame: (packet) => {
       playIncomingVoiceFrameRef.current(packet);
+    },
+    onSocketReconnected: () => {
+      void recoverAudioStageRef.current();
     },
   });
 
@@ -675,14 +680,22 @@ export default function LearningSessionLayout() {
       return;
     }
 
+    const lessonHasOwnContent = Boolean(
+      foundLesson.hasContent ||
+        (foundLesson.description && String(foundLesson.description).trim() !== '') ||
+        (Array.isArray(lessonContent?.lessonBlocks) && lessonContent.lessonBlocks.length > 0) ||
+        (lessonContent?.contentHtml && String(lessonContent.contentHtml).trim() !== '')
+    );
+
     if (
       Array.isArray(foundLesson.topics) &&
       foundLesson.topics.length > 0 &&
+      !(activeTopicId === '' && lessonHasOwnContent) &&
       !foundLesson.topics.some((t: any) => String(t.topicId) === String(activeTopicId))
     ) {
       setActiveTopicId(String(foundLesson.topics[0].topicId));
     }
-  }, [curriculum, activeLessonId, activeTopicId, setActiveLessonId, setActiveTopicId]);
+  }, [curriculum, lessonContent, activeLessonId, activeTopicId, setActiveLessonId, setActiveTopicId]);
 
   // Compute current user ID, Host/Co-Teacher status, Whiteboard edit permission & Mic permissions
   const currentUserId = role === 'teacher' ? teacherId : `student_${studentId}`;
@@ -764,11 +777,14 @@ export default function LearningSessionLayout() {
     toggleMicrophone,
     toggleNoiseCancellation,
     unlockAudioPlayback,
+    recoverAudioStage,
   } = useLiveKitStage({
     livekitUrl,
     token: livekitToken,
     canPublishAudio: hasStudentMicGrant,
     autoActivateMic: pendingMicAutoActivate,
+    localUserId: currentUserId,
+    clientDeviceId,
     onMicStateChange: (enabled) => {
       if (role === 'teacher') {
         broadcastTeacherMicState(enabled);
@@ -786,6 +802,23 @@ export default function LearningSessionLayout() {
   useEffect(() => {
     playIncomingVoiceFrameRef.current = playIncomingVoiceFrame;
   }, [playIncomingVoiceFrame]);
+
+  useEffect(() => {
+    isMicrophoneEnabledRef.current = isMicrophoneEnabled;
+  }, [isMicrophoneEnabled]);
+
+  useEffect(() => {
+    recoverAudioStageRef.current = async () => {
+      await recoverAudioStage();
+      if (isMicrophoneEnabledRef.current) {
+        if (role === 'teacher') {
+          broadcastTeacherMicState(true);
+        } else if (role === 'student') {
+          notifyDeviceMicActive(true);
+        }
+      }
+    };
+  }, [recoverAudioStage, role, broadcastTeacherMicState, notifyDeviceMicActive]);
 
   // Auto-activate student microphone when host grants mic access
   useEffect(() => {
@@ -866,9 +899,14 @@ export default function LearningSessionLayout() {
             (acc: number, t: any) => acc + (t.durationMinutes || 15),
             0
           )}m`,
+        hasContent: Boolean(
+          les.hasContent || (les.description && String(les.description).trim() !== '')
+        ),
+        description: les.description || undefined,
         topics: (les.topics || []).map((top: any) => ({
           topicId: String(top.topicId),
           title: top.title,
+          durationMinutes: top.durationMinutes,
         })),
       })),
     }));
@@ -895,9 +933,9 @@ export default function LearningSessionLayout() {
       firstLesson?.title ||
       'Live Classroom Lesson';
     let topTitle =
-      sessionMetadata?.topicTitle ||
-      firstTopic?.title ||
-      lesTitle;
+      activeTopicId === ''
+        ? lesTitle
+        : sessionMetadata?.topicTitle || firstTopic?.title || lesTitle;
 
     for (const ch of normalizedChapters) {
       for (const les of ch.lessons) {
@@ -905,15 +943,19 @@ export default function LearningSessionLayout() {
           chapId = String(ch.chapterId);
           chapTitle = ch.title;
           lesTitle = les.title;
-          const matchedTopic = les.topics.find(
-            (t) => String(t.topicId) === String(activeTopicId)
-          );
-          if (matchedTopic) {
-            topTitle = matchedTopic.title;
-          } else if (les.topics[0]) {
-            topTitle = les.topics[0].title;
-          } else {
+          if (activeTopicId === '') {
             topTitle = les.title;
+          } else {
+            const matchedTopic = les.topics.find(
+              (t) => String(t.topicId) === String(activeTopicId)
+            );
+            if (matchedTopic) {
+              topTitle = matchedTopic.title;
+            } else if (les.topics[0]) {
+              topTitle = les.topics[0].title;
+            } else {
+              topTitle = les.title;
+            }
           }
         }
       }
@@ -935,8 +977,8 @@ export default function LearningSessionLayout() {
     initialParams.chapterId,
   ]);
 
-  // Normalize Lesson Blocks for VirtualContentStage (800px Virtual Page)
-  // Filter strictly by activeTopicId when topics/blocks are loaded so /learn and Broadcast Studio match 100%
+  // Normalize Lesson Blocks for VirtualContentStage
+  // Supports both Lesson-level HTML content (activeTopicId === '') and Topic-level HTML content
   const normalizedBlocks: LessonBlock[] = useMemo(() => {
     const topicsArray: any[] = Array.isArray(lessonContent?.topics)
       ? lessonContent.topics
@@ -944,15 +986,62 @@ export default function LearningSessionLayout() {
     const rawBlocks: any[] = Array.isArray(lessonContent?.blocks)
       ? lessonContent.blocks
       : [];
+    const lessonBlocksArray: any[] = Array.isArray(lessonContent?.lessonBlocks)
+      ? lessonContent.lessonBlocks
+      : [];
 
     let filteredBlocks: any[] = rawBlocks;
 
-    if (activeTopicId) {
+    if (!activeTopicId) {
+      if (lessonBlocksArray.length > 0) {
+        filteredBlocks = lessonBlocksArray;
+      } else if (
+        lessonContent?.contentHtml &&
+        String(lessonContent.contentHtml).trim() !== ''
+      ) {
+        filteredBlocks = [
+          {
+            blockId: 'blk_lesson_html',
+            type: 'concept',
+            content: '',
+            contentHtml: String(lessonContent.contentHtml),
+          },
+        ];
+      } else if (
+        lessonContent?.description &&
+        String(lessonContent.description).trim() !== ''
+      ) {
+        filteredBlocks = [
+          {
+            blockId: 'blk_lesson_desc',
+            type: 'concept',
+            content: '',
+            contentHtml: String(lessonContent.description),
+          },
+        ];
+      } else if (rawBlocks.some((b: any) => !b.topicId)) {
+        filteredBlocks = rawBlocks.filter((b: any) => !b.topicId);
+      }
+    } else {
       const matchedTopic = topicsArray.find(
         (t: any) => String(t.topicId) === String(activeTopicId)
       );
-      if (matchedTopic && Array.isArray(matchedTopic.blocks)) {
+      if (matchedTopic && Array.isArray(matchedTopic.blocks) && matchedTopic.blocks.length > 0) {
         filteredBlocks = matchedTopic.blocks;
+      } else if (
+        matchedTopic?.contentHtml &&
+        String(matchedTopic.contentHtml).trim() !== ''
+      ) {
+        filteredBlocks = [
+          {
+            blockId: `blk_topic_${activeTopicId}`,
+            type: 'concept',
+            content: '',
+            contentHtml: String(matchedTopic.contentHtml),
+            topicId: String(activeTopicId),
+            topicTitle: matchedTopic.title,
+          },
+        ];
       } else if (
         topicsArray.length > 0 ||
         rawBlocks.some((b: any) => b.topicId !== undefined && b.topicId !== null)
@@ -973,6 +1062,7 @@ export default function LearningSessionLayout() {
           : b.type || 'concept',
       title: b.title,
       content: b.content || '',
+      contentHtml: b.contentHtml || undefined,
       formulaLatex: b.formulaLatex,
       svgDiagram: b.svgDiagram,
       topicId: b.topicId ? String(b.topicId) : undefined,
@@ -1937,7 +2027,10 @@ export default function LearningSessionLayout() {
             'The teacher experienced a temporary network drop. The classroom state is preserved in Redis and waiting for the teacher to rejoin (5-minute grace window)...',
         }}
         lastSeqId={seqId}
-        onManualReconnect={manualReconnect}
+        onManualReconnect={() => {
+          manualReconnect();
+          void recoverAudioStageRef.current();
+        }}
       />
     </div>
   );

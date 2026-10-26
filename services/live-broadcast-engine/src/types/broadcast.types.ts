@@ -63,6 +63,8 @@ export interface LessonItem {
   lessonId: string;
   lessonNumber: string;
   title: string;
+  hasContent?: boolean;
+  description?: string;
   topics: TopicItem[];
 }
 
@@ -104,6 +106,9 @@ export interface LessonContent {
   lessonTitle: string;
   chapterId: string;
   languageId?: string;
+  description?: string;
+  contentHtml?: string;
+  lessonBlocks?: ContentBlock[];
   topics?: Array<{
     topicId: string;
     title: string;

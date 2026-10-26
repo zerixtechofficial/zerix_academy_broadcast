@@ -1071,4 +1071,147 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
       );
     });
   });
+
+  describe('11. Incoming Voice Playback Recovery After Network Disconnect / Auto-Rejoin & Reload', () => {
+    it('ensures useLiveKitStage unlocks playback AudioContext on user gesture, avoids false-positive WebRTC deduplication, and recovers audio stage on reconnect', () => {
+      const livekitStageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/hooks/useLiveKitStage.ts'),
+        'utf8'
+      );
+      const socketHookSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/hooks/useBroadcastSocket.ts'),
+        'utf8'
+      );
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+      const engineSource = fs.readFileSync(
+        path.resolve(__dirname, '../../services/live-broadcast-engine/src/index.ts'),
+        'utf8'
+      );
+
+      // 1. Eager playback AudioContext creation & warmup inside user gesture
+      assert.equal(
+        livekitStageSource.includes("if (!playbackCtxRef.current || playbackCtxRef.current.state === 'closed') {"),
+        true,
+        'unlockAudioPlayback must eagerly instantiate playbackCtxRef.current during user gestures so incoming voice after reload/rejoin is never suspended'
+      );
+
+      // 2. Active RTP audio energy check before suppressing Port-443 PCM voice relay frames
+      assert.equal(
+        livekitStageSource.includes('isActivelySpeakingWebRtc'),
+        true,
+        'playIncomingVoiceFrame must verify active WebRTC RTP speech energy before suppressing Port-443 PCM voice relay frames'
+      );
+
+      // 3. recoverAudioStage resets jitter playhead and restarts local/remote audio on rejoin
+      assert.equal(
+        livekitStageSource.includes('const recoverAudioStage = useCallback('),
+        true,
+        'useLiveKitStage must expose recoverAudioStage for socket/network reconnection recovery'
+      );
+      assert.equal(
+        livekitStageSource.includes('nextPlayTimeBySenderRef.current = {};'),
+        true,
+        'recoverAudioStage must reset per-sender jitter buffer playheads so rejoined speakers are scheduled immediately'
+      );
+
+      // 4. Socket reconnect triggers audio stage recovery and hydrates audioStage on ROOM_JOINED
+      assert.equal(
+        socketHookSource.includes('onSocketReconnectedRef.current?.()'),
+        true,
+        'useBroadcastSocket must invoke onSocketReconnected when socket reconnects after disconnect'
+      );
+      assert.equal(
+        layoutSource.includes('onSocketReconnected: () => {'),
+        true,
+        'LearningSessionLayout must wire onSocketReconnected to recoverAudioStage'
+      );
+
+      // 5. Server registers socket handlers synchronously on first tick and checks normalized/raw student IDs for AUDIO_VOICE_FRAME
+      assert.equal(
+        engineSource.includes('const initialRoomJoinPromise = Promise.resolve(socket.join(sessionId));'),
+        true,
+        'Broadcast engine must join initial room without blocking synchronous event handler registration on reconnect'
+      );
+      assert.equal(
+        engineSource.includes("socket.to(sessionId).emit('AUDIO_VOICE_FRAME', relayPayload);"),
+        true,
+        'Broadcast engine must reliably broadcast AUDIO_VOICE_FRAME to all participants in the session room'
+      );
+    });
+  });
+
+  describe('12. /learn Matched Sidebar & HTML Content Rendering with Text Selection in Broadcast Content Tab', () => {
+    it('renders Chapter -> Lesson -> Topic sidebar with Lesson Article support matching /learn layout', () => {
+      const sidebarSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/ChapterLessonSidebar.tsx'),
+        'utf8'
+      );
+
+      assert.equal(
+        sidebarSource.includes('Course Syllabus'),
+        true,
+        'ChapterLessonSidebar must render Course Syllabus header matching /learn sidebar'
+      );
+      assert.equal(
+        sidebarSource.includes("const targetTopicId = hasContent ? '' : firstTopicId;"),
+        true,
+        'ChapterLessonSidebar must allow clicking a Lesson with content to view Lesson-level HTML content (topicId = "")'
+      );
+      assert.equal(
+        sidebarSource.includes('String(topic.topicId)'),
+        true,
+        'ChapterLessonSidebar must allow clicking any Topic inside a Lesson to view Topic-level HTML content'
+      );
+    });
+
+    it('renders stored HTML content directly with .content-main-container, enables text selection (select-text), and removes Send to Whiteboard button', () => {
+      const stageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/VirtualContentStage.tsx'),
+        'utf8'
+      );
+      const cssSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/styles/learning-content.css'),
+        'utf8'
+      );
+
+      assert.equal(
+        stageSource.includes("import '../styles/learning-content.css';"),
+        true,
+        'VirtualContentStage must import learning-content.css matching /learn page'
+      );
+      assert.equal(
+        stageSource.includes('content-main-container'),
+        true,
+        'VirtualContentStage must wrap lesson/topic HTML inside .content-main-container'
+      );
+      assert.equal(
+        stageSource.includes('dangerouslySetInnerHTML={{ __html: block.contentHtml }}'),
+        true,
+        'VirtualContentStage must render stored block.contentHtml directly as HTML'
+      );
+      assert.equal(
+        stageSource.includes("isSelectionEnabled ? 'select-text' : 'select-none'"),
+        true,
+        'VirtualContentStage must enable text selection (select-text) when in Select mode so teacher can copy and paste content to Whiteboard'
+      );
+      assert.equal(
+        stageSource.includes('Send to Whiteboard'),
+        false,
+        'VirtualContentStage must not render the Send to Whiteboard button on content blocks'
+      );
+      assert.equal(
+        cssSource.includes('.content-main-container'),
+        true,
+        'learning-content.css must define .content-main-container styles matching /learn'
+      );
+      assert.equal(
+        cssSource.includes('user-select: text;'),
+        true,
+        'learning-content.css must allow text selection inside .content-main-container'
+      );
+    });
+  });
 });

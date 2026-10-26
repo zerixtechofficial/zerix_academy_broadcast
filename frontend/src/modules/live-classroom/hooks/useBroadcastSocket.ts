@@ -235,6 +235,7 @@ export interface UseBroadcastSocketParams {
   onStudentTokenRefresh?: (token: string, autoActivate?: boolean) => void;
   onStudentMicRevoked?: () => void;
   onIncomingVoiceFrame?: (packet: any) => void;
+  onSocketReconnected?: () => void;
 }
 
 export function useBroadcastSocket({
@@ -247,9 +248,11 @@ export function useBroadcastSocket({
   onStudentTokenRefresh,
   onStudentMicRevoked,
   onIncomingVoiceFrame,
+  onSocketReconnected,
 }: UseBroadcastSocketParams) {
   const socketRef = useRef<Socket | null>(null);
   const seqIdRef = useRef<number>(0);
+  const hasConnectedOnceRef = useRef<boolean>(false);
   const clientDeviceIdRef = useRef<string>(propDeviceId || getOrCreateClientDeviceId());
   if (propDeviceId && clientDeviceIdRef.current !== propDeviceId) {
     clientDeviceIdRef.current = propDeviceId;
@@ -269,6 +272,11 @@ export function useBroadcastSocket({
   useEffect(() => {
     onIncomingVoiceFrameRef.current = onIncomingVoiceFrame;
   }, [onIncomingVoiceFrame]);
+
+  const onSocketReconnectedRef = useRef(onSocketReconnected);
+  useEffect(() => {
+    onSocketReconnectedRef.current = onSocketReconnected;
+  }, [onSocketReconnected]);
 
   const [isConnected, setIsConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
@@ -395,6 +403,8 @@ export function useBroadcastSocket({
     socketRef.current = socket;
 
     socket.on('connect', () => {
+      const isReconnect = hasConnectedOnceRef.current;
+      hasConnectedOnceRef.current = true;
       setIsConnected(true);
       setIsReconnecting(false);
       setReconnectAttempt(0);
@@ -405,6 +415,10 @@ export function useBroadcastSocket({
         lastSeqId: seqIdRef.current,
         deviceId: clientDeviceId,
       });
+
+      if (isReconnect) {
+        onSocketReconnectedRef.current?.();
+      }
     });
 
     socket.on('connect_error', (err) => {
@@ -450,6 +464,12 @@ export function useBroadcastSocket({
         setAttendanceList(data.students);
       }
       if (data.audioStage) {
+        if (Array.isArray(data.audioStage.activeStudentMics)) {
+          setActiveStudentMics(data.audioStage.activeStudentMics);
+        }
+        if (Array.isArray(data.audioStage.raisedHands)) {
+          setRaisedHands(data.audioStage.raisedHands);
+        }
         if (typeof data.audioStage.teacherMicActive === 'boolean') {
           setTeacherMicActive(data.audioStage.teacherMicActive);
         }

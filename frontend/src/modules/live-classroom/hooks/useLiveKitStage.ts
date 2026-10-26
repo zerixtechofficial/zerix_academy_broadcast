@@ -33,6 +33,8 @@ export interface UseLiveKitStageParams {
   token?: string;
   canPublishAudio?: boolean;
   autoActivateMic?: boolean;
+  localUserId?: string;
+  clientDeviceId?: string;
   onMicStateChange?: (enabled: boolean) => void;
   onEmitVoiceFrame?: (frame: {
     pcm: string;
@@ -268,12 +270,30 @@ export function useLiveKitStage({
   token,
   canPublishAudio = false,
   autoActivateMic = false,
+  localUserId,
+  clientDeviceId,
   onMicStateChange,
   onEmitVoiceFrame,
 }: UseLiveKitStageParams) {
   const roomRef = useRef<Room | null>(null);
   const dspNodesRef = useRef<NoiseCancellationNodes | null>(null);
+  const captureCtxRef = useRef<AudioContext | null>(null);
   const desiredMicEnabledRef = useRef<boolean>(false);
+  const canPublishAudioRef = useRef<boolean>(canPublishAudio);
+  useEffect(() => {
+    canPublishAudioRef.current = canPublishAudio;
+  }, [canPublishAudio]);
+
+  const localUserIdRef = useRef<string | undefined>(localUserId);
+  useEffect(() => {
+    localUserIdRef.current = localUserId;
+  }, [localUserId]);
+
+  const clientDeviceIdRef = useRef<string | undefined>(clientDeviceId);
+  useEffect(() => {
+    clientDeviceIdRef.current = clientDeviceId;
+  }, [clientDeviceId]);
+
   const onMicStateChangeRef = useRef(onMicStateChange);
   useEffect(() => {
     onMicStateChangeRef.current = onMicStateChange;
@@ -289,15 +309,23 @@ export function useLiveKitStage({
   const [isMicrophoneEnabled, setIsMicrophoneEnabled] = useState(false);
   // Real-time Noise Cancellation is enabled by default for all audio publishers
   const [isNoiseCancellationEnabled, setIsNoiseCancellationEnabled] = useState(true);
+  const isNoiseCancellationEnabledRef = useRef<boolean>(true);
+  useEffect(() => {
+    isNoiseCancellationEnabledRef.current = isNoiseCancellationEnabled;
+  }, [isNoiseCancellationEnabled]);
+
   const [activeSpeakers, setActiveSpeakers] = useState<string[]>([]);
   const [remoteParticipants, setRemoteParticipants] = useState<string[]>([]);
   const [audioPlaybackBlocked, setAudioPlaybackBlocked] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
+  const [voiceRelayRestartTick, setVoiceRelayRestartTick] = useState(0);
 
   // Playback AudioContext & per-sender jitter buffer schedule for Port-443 WebAudio Voice Relay
   const playbackCtxRef = useRef<AudioContext | null>(null);
+  const playbackWarmedUpRef = useRef<boolean>(false);
   const nextPlayTimeBySenderRef = useRef<Record<string, number>>({});
   const fallbackSpeakerTimeoutBySenderRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const lastWebRtcActiveAtByIdentityRef = useRef<Record<string, number>>({});
 
   const getSfuUrl = useCallback(() => {
     if (
@@ -471,22 +499,59 @@ export function useLiveKitStage({
   const unlockAudioPlayback = useCallback(async () => {
     if (
       dspNodesRef.current?.audioContext &&
-      dspNodesRef.current.audioContext.state === 'suspended' &&
+      dspNodesRef.current.audioContext.state !== 'running' &&
+      dspNodesRef.current.audioContext.state !== 'closed' &&
       typeof dspNodesRef.current.audioContext.resume === 'function'
     ) {
       dspNodesRef.current.audioContext.resume().catch(() => {});
     }
-    if (playbackCtxRef.current && playbackCtxRef.current.state === 'suspended') {
+    if (
+      captureCtxRef.current &&
+      captureCtxRef.current.state !== 'running' &&
+      captureCtxRef.current.state !== 'closed' &&
+      typeof captureCtxRef.current.resume === 'function'
+    ) {
+      captureCtxRef.current.resume().catch(() => {});
+    }
+
+    if (typeof window !== 'undefined') {
       try {
-        await playbackCtxRef.current.resume();
-        setAudioPlaybackBlocked(false);
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          if (!playbackCtxRef.current || playbackCtxRef.current.state === 'closed') {
+            playbackCtxRef.current = new AudioCtx();
+            playbackWarmedUpRef.current = false;
+          }
+          const ctx = playbackCtxRef.current;
+          if (ctx.state !== 'running' && typeof ctx.resume === 'function') {
+            await ctx.resume().catch(() => {});
+          }
+          if (ctx.state === 'running') {
+            setAudioPlaybackBlocked(false);
+            if (!playbackWarmedUpRef.current) {
+              playbackWarmedUpRef.current = true;
+              try {
+                const silentBuf = ctx.createBuffer(1, 1, 22050);
+                const src = ctx.createBufferSource();
+                src.buffer = silentBuf;
+                src.connect(ctx.destination);
+                src.start(0);
+              } catch {
+                // ignore warmup errors
+              }
+            }
+          }
+        }
       } catch {
         // ignore
       }
     }
+
     if (typeof document !== 'undefined') {
       const audioEls = document.querySelectorAll<HTMLAudioElement>('audio[id^="audio_"]');
       audioEls.forEach((el) => {
+        el.muted = false;
+        el.volume = 1.0;
         if (el.paused) {
           el.play().catch(() => {});
         }
@@ -504,9 +569,10 @@ export function useLiveKitStage({
 
   /**
    * Plays an incoming Port-443 Socket.IO WebAudio PCM Voice Frame from a remote speaker.
-   * Automatically deduplicates against LiveKit WebRTC so if LiveKit SFU is actively playing
-   * audio for that speaker, the fallback frame is skipped; if WebRTC ICE is blocked/disconnected
-   * (e.g. UDP/7881 blocked by firewall), the fallback frame plays seamlessly!
+   * Automatically deduplicates against LiveKit WebRTC ONLY when LiveKit SFU is genuinely
+   * delivering active decoded RTP audio energy for that speaker. If WebRTC ICE is blocked,
+   * disconnected, or silent after an internet drop/reconnect, the Port-443 PCM voice relay
+   * plays seamlessly!
    */
   const playIncomingVoiceFrame = useCallback(
     (packet: VoiceRelayFramePacket) => {
@@ -514,15 +580,38 @@ export function useLiveKitStage({
 
       const senderId = packet.senderId || 'remote_speaker';
 
-      // Check if LiveKit WebRTC is currently connected and actively playing this participant's audio track
+      // Prevent self-echo if the packet originated from the local user's own device
+      const myUserId = localUserIdRef.current;
+      if (myUserId) {
+        const cleanSender = String(senderId).replace(/^(teacher_|student_)/, '');
+        const cleanMine = String(myUserId).replace(/^(teacher_|student_)/, '');
+        const isSameUser = senderId === myUserId || (cleanSender.length > 0 && cleanSender === cleanMine);
+        if (isSameUser) {
+          const myDevice = clientDeviceIdRef.current;
+          if (!packet.deviceId || !myDevice || packet.deviceId === myDevice) {
+            return;
+          }
+        }
+      }
+
+      // Only skip the Port-443 PCM frame if LiveKit WebRTC is connected, unlocked, AND actively
+      // producing decoded RTP audio energy for this participant right now.
       const room = roomRef.current;
-      if (room && room.state === 'connected') {
+      if (room && room.state === 'connected' && room.canPlaybackAudio) {
         let hasLiveWebRtcAudio = false;
+        const nowMs = Date.now();
         room.remoteParticipants.forEach((p) => {
           if (
             p.identity === senderId ||
             p.identity.startsWith(`${senderId}__`)
           ) {
+            const isActivelySpeakingWebRtc =
+              Boolean((p as any).isSpeaking) ||
+              (typeof (p as any).audioLevel === 'number' && (p as any).audioLevel > 0.005) ||
+              nowMs - (lastWebRtcActiveAtByIdentityRef.current[p.identity] || 0) < 1200;
+
+            if (!isActivelySpeakingWebRtc) return;
+
             p.audioTrackPublications.forEach((pub) => {
               const mediaTrack = pub.track?.mediaStreamTrack;
               const domEl =
@@ -534,8 +623,10 @@ export function useLiveKitStage({
                 !pub.isMuted &&
                 mediaTrack &&
                 mediaTrack.readyState === 'live' &&
+                !mediaTrack.muted &&
                 domEl &&
-                !domEl.paused
+                !domEl.paused &&
+                !domEl.muted
               ) {
                 hasLiveWebRtcAudio = true;
               }
@@ -567,12 +658,35 @@ export function useLiveKitStage({
 
         if (!playbackCtxRef.current || playbackCtxRef.current.state === 'closed') {
           playbackCtxRef.current = new AudioCtx();
+          playbackWarmedUpRef.current = false;
         }
         const ctx = playbackCtxRef.current;
-        if (ctx.state === 'suspended') {
-          ctx.resume().catch(() => {
-            setAudioPlaybackBlocked(true);
-          });
+        if (ctx.state !== 'running') {
+          if (typeof ctx.resume === 'function') {
+            ctx
+              .resume()
+              .then(() => {
+                if (ctx.state === 'running') {
+                  setAudioPlaybackBlocked(false);
+                } else {
+                  setAudioPlaybackBlocked(true);
+                }
+              })
+              .catch(() => {
+                setAudioPlaybackBlocked(true);
+              });
+          }
+          // In Chromium/Safari, ctx.resume() outside a user gesture stays pending while state remains 'suspended'.
+          // Surface the audio unlock prompt immediately if not running, and avoid piling up buffers while time is frozen.
+          setTimeout(() => {
+            if (playbackCtxRef.current && playbackCtxRef.current.state !== 'running') {
+              setAudioPlaybackBlocked(true);
+            }
+          }, 60);
+          const pendingLead = (nextPlayTimeBySenderRef.current[senderId] || 0) - ctx.currentTime;
+          if (pendingLead > 0.3) {
+            return;
+          }
         }
 
         const sampleRate = Number(packet.sampleRate) || VOICE_RELAY_SAMPLE_RATE;
@@ -585,7 +699,7 @@ export function useLiveKitStage({
 
         const now = ctx.currentTime;
         const prevEnd = nextPlayTimeBySenderRef.current[senderId] || 0;
-        // Maintain a smooth 50ms jitter buffer window and reset if lag exceeds 450ms
+        // Maintain a smooth 40ms jitter buffer window and reset if lag exceeds 450ms
         const startAt =
           prevEnd < now || prevEnd - now > 0.45 ? now + 0.04 : prevEnd;
         source.start(startAt);
@@ -634,6 +748,12 @@ export function useLiveKitStage({
 
     room.on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
       if (!isMounted) return;
+      const nowMs = Date.now();
+      speakers.forEach((s) => {
+        if (s?.identity) {
+          lastWebRtcActiveAtByIdentityRef.current[s.identity] = nowMs;
+        }
+      });
       setActiveSpeakers(speakers.map((s) => s.identity));
     });
 
@@ -649,6 +769,7 @@ export function useLiveKitStage({
         const el = document.getElementById(`audio_${participant.identity}`);
         if (el) el.remove();
         track.detach().forEach((item) => item.remove());
+        delete lastWebRtcActiveAtByIdentityRef.current[participant.identity];
       }
     });
 
@@ -661,24 +782,27 @@ export function useLiveKitStage({
       if (!isMounted) return;
       const el = document.getElementById(`audio_${p.identity}`);
       if (el) el.remove();
+      delete lastWebRtcActiveAtByIdentityRef.current[p.identity];
       setRemoteParticipants((prev) => prev.filter((id) => id !== p.identity));
     });
 
     room.on(RoomEvent.Reconnecting, () => {
       if (!isMounted) return;
       setIsAudioConnected(false);
+      lastWebRtcActiveAtByIdentityRef.current = {};
     });
 
     room.on(RoomEvent.Reconnected, () => {
       if (!isMounted) return;
       setIsAudioConnected(true);
+      nextPlayTimeBySenderRef.current = {};
       attachAllRemoteAudioTracks(room);
       unlockAudioPlayback();
       // Restore local microphone publishing automatically after network reconnect if user was unmuted
-      if (desiredMicEnabledRef.current && canPublishAudio) {
+      if (desiredMicEnabledRef.current && canPublishAudioRef.current) {
         room.localParticipant
           .setMicrophoneEnabled(true, {
-            noiseSuppression: isNoiseCancellationEnabled,
+            noiseSuppression: isNoiseCancellationEnabledRef.current,
             echoCancellation: true,
             autoGainControl: true,
           })
@@ -689,26 +813,34 @@ export function useLiveKitStage({
     room.on(RoomEvent.Disconnected, () => {
       if (!isMounted) return;
       setIsAudioConnected(false);
+      lastWebRtcActiveAtByIdentityRef.current = {};
+      // Automatically attempt to reconnect LiveKit room if unexpected disconnect occurred while mounted
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        if (isMounted && roomRef.current === room && room.state === 'disconnected') {
+          connectWithRetry(1);
+        }
+      }, 2500);
     });
 
     const syncLocalMicWithRoom = async () => {
       if (!isMounted) return;
       const shouldEnableMic =
-        (autoActivateMic || desiredMicEnabledRef.current) && canPublishAudio;
+        (autoActivateMic || desiredMicEnabledRef.current) && canPublishAudioRef.current;
       if (shouldEnableMic) {
         desiredMicEnabledRef.current = true;
         setIsMicrophoneEnabled(true);
         onMicStateChangeRef.current?.(true);
         try {
           await room.localParticipant.setMicrophoneEnabled(true, {
-            noiseSuppression: isNoiseCancellationEnabled,
+            noiseSuppression: isNoiseCancellationEnabledRef.current,
             echoCancellation: true,
             autoGainControl: true,
           });
           const micPub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
           const rawTrack = micPub?.audioTrack?.mediaStreamTrack;
           if (rawTrack) {
-            applyWebAudioNoiseCancellation(rawTrack, isNoiseCancellationEnabled);
+            applyWebAudioNoiseCancellation(rawTrack, isNoiseCancellationEnabledRef.current);
           }
         } catch (err: any) {
           console.warn('[LiveKit] Microphone publish notice:', err?.message || err);
@@ -745,6 +877,7 @@ export function useLiveKitStage({
       unlockAudioPlayback();
     };
     window.addEventListener('pointerdown', handleGesture, { passive: true });
+    window.addEventListener('click', handleGesture, { passive: true });
     window.addEventListener('touchstart', handleGesture, { passive: true });
     window.addEventListener('keydown', handleGesture, { passive: true });
 
@@ -752,6 +885,7 @@ export function useLiveKitStage({
       isMounted = false;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       window.removeEventListener('pointerdown', handleGesture);
+      window.removeEventListener('click', handleGesture);
       window.removeEventListener('touchstart', handleGesture);
       window.removeEventListener('keydown', handleGesture);
       if (dspNodesRef.current) {
@@ -812,7 +946,8 @@ export function useLiveKitStage({
         if (!AudioCtx) return;
 
         captureCtx = new AudioCtx();
-        if (captureCtx.state === 'suspended') {
+        captureCtxRef.current = captureCtx;
+        if (captureCtx.state !== 'running' && typeof captureCtx.resume === 'function') {
           captureCtx.resume().catch(() => {});
         }
 
@@ -876,6 +1011,9 @@ export function useLiveKitStage({
       } catch {
         // ignore
       }
+      if (captureCtxRef.current === captureCtx) {
+        captureCtxRef.current = null;
+      }
       if (captureCtx && captureCtx.state !== 'closed') {
         captureCtx.close().catch(() => {});
       }
@@ -889,7 +1027,80 @@ export function useLiveKitStage({
         });
       }
     };
-  }, [isMicrophoneEnabled, canPublishAudio, isNoiseCancellationEnabled]);
+  }, [isMicrophoneEnabled, canPublishAudio, isNoiseCancellationEnabled, voiceRelayRestartTick]);
+
+  /**
+   * Recovers classroom audio playback and microphone streaming after an internet disconnect,
+   * Socket.IO auto-rejoin, manual reconnect, or browser tab wake.
+   */
+  const recoverAudioStage = useCallback(async () => {
+    nextPlayTimeBySenderRef.current = {};
+    lastWebRtcActiveAtByIdentityRef.current = {};
+
+    await unlockAudioPlayback();
+
+    const room = roomRef.current;
+    if (room) {
+      if (room.state === 'connected') {
+        attachAllRemoteAudioTracks(room);
+        if (desiredMicEnabledRef.current && canPublishAudioRef.current) {
+          room.localParticipant
+            .setMicrophoneEnabled(true, {
+              noiseSuppression: isNoiseCancellationEnabledRef.current,
+              echoCancellation: true,
+              autoGainControl: true,
+            })
+            .catch(() => {});
+        }
+      } else if (room.state === 'disconnected' && token) {
+        try {
+          await room.connect(getSfuUrl(), token);
+          setIsAudioConnected(true);
+          attachAllRemoteAudioTracks(room);
+          await unlockAudioPlayback();
+          if (desiredMicEnabledRef.current && canPublishAudioRef.current) {
+            await room.localParticipant.setMicrophoneEnabled(true, {
+              noiseSuppression: isNoiseCancellationEnabledRef.current,
+              echoCancellation: true,
+              autoGainControl: true,
+            });
+          }
+        } catch {
+          // Port-443 WebAudio Voice Relay continues handling audio seamlessly
+        }
+      }
+    }
+
+    if (desiredMicEnabledRef.current && canPublishAudioRef.current) {
+      const capCtx = captureCtxRef.current;
+      if (!capCtx || capCtx.state === 'closed') {
+        setVoiceRelayRestartTick((t) => t + 1);
+      } else if (capCtx.state !== 'running' && typeof capCtx.resume === 'function') {
+        capCtx.resume().catch(() => {
+          setVoiceRelayRestartTick((t) => t + 1);
+        });
+      }
+    }
+  }, [token, getSfuUrl, attachAllRemoteAudioTracks, unlockAudioPlayback]);
+
+  // Automatically recover audio playback & capture whenever browser network comes back online or tab becomes visible
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => {
+      void recoverAudioStage();
+    };
+    const handleVisibility = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        void recoverAudioStage();
+      }
+    };
+    window.addEventListener('online', handleOnline);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [recoverAudioStage]);
 
   // When canPublishAudio is revoked (e.g. teacher mutes student): force mute immediately
   useEffect(() => {
@@ -1046,5 +1257,6 @@ export function useLiveKitStage({
     setMicrophoneActive,
     toggleNoiseCancellation,
     unlockAudioPlayback,
+    recoverAudioStage,
   };
 }

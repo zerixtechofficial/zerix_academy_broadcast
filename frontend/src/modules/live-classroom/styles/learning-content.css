@@ -1,0 +1,534 @@
+/* Stylesheet for learning page content elements (Shared between /learn and Broadcast Studio Content Stage) */
+
+.content-main-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  width: 100%;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+.content-main-container * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Sections rendered as cards */
+.content-main-container section,
+.content-main-container .section-block section {
+  background-color: var(--surface, #ffffff);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 1.5rem; /* 24px */
+  padding: 2rem;
+  box-shadow: var(--shadow-sm, 0 4px 12px -2px rgba(17, 24, 39, 0.04));
+  margin-bottom: 1.5rem;
+  transition: box-shadow 0.25s ease, border-color 0.25s ease;
+  word-break: break-word;
+}
+
+.content-main-container section:hover,
+.content-main-container .section-block section:hover {
+  border-color: rgba(37, 99, 235, 0.3);
+  box-shadow: var(--shadow-md, 0 10px 15px -3px rgba(0, 0, 0, 0.06));
+}
+
+/* Typography styles for all possible tags inside the container */
+
+.content-main-container h1 {
+  font-size: 1.75rem; /* 28px */
+  font-weight: 800;
+  color: var(--text-heading, #111827);
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  border-bottom: 1.5px solid var(--border, #e5e7eb);
+  padding-bottom: 0.5rem;
+}
+
+.content-main-container h2 {
+  font-size: 1.6rem;
+  font-weight: 750;
+  color: var(--text-heading, #111827);
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+  line-height: 1.3;
+  letter-spacing: -0.015em;
+}
+
+.content-main-container h3 {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text-heading, #111827);
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+  line-height: 1.35;
+}
+
+.content-main-container h4 {
+  font-size: 1.2rem;
+  font-weight: 650;
+  color: var(--text-heading, #111827);
+  margin-top: 0.75rem;
+  margin-bottom: 0.35rem;
+}
+
+.content-main-container p {
+  font-size: 1.05rem;
+  line-height: 1.65;
+  color: var(--text-body, #374151);
+  margin-bottom: 1rem;
+}
+
+.content-main-container p:last-child {
+  margin-bottom: 0;
+}
+
+.content-main-container strong {
+  font-weight: 705;
+  color: var(--text-heading, #111827);
+}
+
+.content-main-container em {
+  font-style: italic;
+}
+
+.content-main-container u {
+  text-decoration: underline;
+  text-decoration-color: var(--border, #e5e7eb);
+}
+
+/* Links */
+.content-main-container a {
+  color: var(--primary, #2563eb);
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 2px;
+  font-weight: 605;
+  transition: color 0.15s ease;
+}
+
+.content-main-container a:hover {
+  color: var(--primary-hover, #1d4ed8);
+}
+
+/* Unordered Lists */
+.content-main-container ul {
+  list-style-type: disc;
+  padding-left: 1.5rem;
+  margin-bottom: 1rem;
+  color: var(--text-body, #374151);
+}
+
+.content-main-container ul li {
+  font-size: 1.05rem;
+  margin-bottom: 0.35rem;
+  line-height: 1.6;
+}
+
+/* Ordered Lists */
+.content-main-container ol {
+  list-style-type: decimal;
+  padding-left: 1.5rem;
+  margin-bottom: 1rem;
+  color: var(--text-body, #374151);
+}
+
+.content-main-container ol li {
+  font-size: 1.05rem;
+  margin-bottom: 0.35rem;
+  line-height: 1.6;
+}
+
+/* Code Blocks */
+.content-main-container code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.85em;
+  background-color: var(--background, #f8fafc);
+  color: var(--danger-solid, #dc2626);
+  padding: 0.15rem 0.35rem;
+  border-radius: 0.375rem;
+  font-weight: 500;
+}
+
+.content-main-container pre {
+  background-color: #0f172a;
+  color: #e2e8f0;
+  padding: 1.25rem;
+  border-radius: 0.75rem;
+  overflow-x: auto;
+  margin-bottom: 1.25rem;
+  border: 1px solid #1e293b;
+}
+
+.content-main-container pre code {
+  background-color: transparent;
+  color: inherit;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.875rem;
+  font-weight: 400;
+}
+
+/* Blockquotes */
+.content-main-container blockquote {
+  border-left: 4px solid var(--primary, #2563eb);
+  padding-left: 1.25rem;
+  font-style: italic;
+  color: var(--text-body, #374151);
+  font-size: 1.05rem;
+  margin-left: 0;
+  margin-right: 0;
+  margin-bottom: 1rem;
+  background-color: var(--primary-tint, #eff6ff);
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-radius: 0 0.75rem 0.75rem 0;
+}
+
+/* Images */
+.content-main-container img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.75rem;
+  margin-top: 1.25rem;
+  margin-bottom: 1.25rem;
+  box-shadow: var(--shadow-sm, 0 4px 12px -2px rgba(17, 24, 39, 0.04));
+}
+
+/* Tables */
+.content-main-container table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1.5rem;
+  font-size: 1rem;
+  text-align: left;
+}
+
+.content-main-container th {
+  background-color: var(--background, #f8fafc);
+  color: var(--text-heading, #111827);
+  font-weight: 700;
+  padding: 0.85rem 1rem;
+  border-bottom: 2px solid var(--border, #e5e7eb);
+}
+
+.content-main-container td {
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+  color: var(--text-body, #374151);
+}
+
+.content-main-container tr:hover td {
+  background-color: var(--background, #f8fafc);
+}
+
+/* Divider */
+.content-main-container hr {
+  border: 0;
+  border-top: 1.5px solid var(--border, #e5e7eb);
+  margin-top: 1.75rem;
+  margin-bottom: 1.75rem;
+}
+
+/* ==========================================================================
+   Professional LMS Styling Additions (Quiz, Cards, Details/Summary, Callouts)
+   ========================================================================== */
+
+/* 1. Styled Aside Blocks (Alerts & Tips) */
+.content-main-container aside {
+  padding: 1.25rem 1.5rem;
+  border-radius: 1rem;
+  font-size: 1.05rem;
+  line-height: 1.65;
+  margin: 1.5rem 0;
+  font-weight: 500;
+  border-left-width: 4px;
+  border-left-style: solid;
+}
+
+.content-main-container aside strong {
+  display: inline-block;
+  margin-bottom: 0.25rem;
+  font-weight: 750;
+}
+
+/* Aside Themes */
+.content-main-container aside.think-box {
+  background-color: var(--info-tint, #f0f9ff);
+  border-left-color: var(--info, #0ea5e9);
+  color: var(--info-solid, #0369a1);
+}
+.content-main-container aside.think-box strong {
+  color: var(--info-solid, #0369a1);
+}
+
+.content-main-container aside.important-note {
+  background-color: var(--warning-tint, #fffbeb);
+  border-left-color: var(--warning, #f59e0b);
+  color: var(--warning-solid, #b45309);
+}
+.content-main-container aside.important-note strong {
+  color: var(--warning-solid, #b45309);
+}
+
+.content-main-container aside.key-point,
+.content-main-container aside.final-takeaway,
+.content-main-container aside.tip-box {
+  background-color: var(--growth-tint, #f0fdf4);
+  border-left-color: var(--growth, #22c55e);
+  color: var(--growth-solid, #15803d);
+}
+.content-main-container aside.key-point strong,
+.content-main-container aside.final-takeaway strong,
+.content-main-container aside.tip-box strong {
+  color: var(--growth-solid, #15803d);
+}
+
+.content-main-container aside.ai-literacy-note {
+  background-color: var(--primary-tint, #eff6ff);
+  border-left-color: var(--primary, #2563eb);
+  color: var(--primary-active, #1e40af);
+}
+.content-main-container aside.ai-literacy-note strong {
+  color: var(--primary-active, #1e40af);
+}
+
+/* 2. Interactive Details Summary (Accordions) */
+.content-main-container details {
+  border: 1.5px solid var(--border, #e5e7eb);
+  border-radius: 1rem;
+  background-color: var(--background, #f8fafc);
+  margin: 1.25rem 0;
+  overflow: hidden;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.content-main-container details[open] {
+  border-color: var(--border-strong, #9ca3af);
+  background-color: var(--surface, #ffffff);
+  box-shadow: var(--shadow-sm, 0 4px 12px -2px rgba(17, 24, 39, 0.04));
+}
+
+.content-main-container summary {
+  padding: 1rem 1.25rem;
+  font-weight: 750;
+  font-size: 1.05rem;
+  color: var(--text-heading, #111827);
+  cursor: pointer;
+  outline: none;
+  display: flex;
+  align-items: center;
+  list-style: none;
+}
+
+.content-main-container summary::-webkit-details-marker {
+  display: none;
+}
+
+.content-main-container summary::before {
+  content: "→";
+  display: inline-block;
+  margin-right: 0.75rem;
+  font-size: 1.1em;
+  font-weight: 900;
+  color: var(--text-muted, #6b7280);
+  transition: transform 0.2s ease, color 0.2s ease;
+}
+
+.content-main-container details[open] summary::before {
+  transform: rotate(90deg);
+  color: var(--primary, #2563eb);
+}
+
+.content-main-container summary:hover {
+  background-color: var(--background, #f8fafc);
+}
+
+.content-main-container .solution {
+  padding: 1.5rem;
+  border-top: 1.5px solid var(--border, #e5e7eb);
+  background-color: var(--surface, #ffffff);
+  font-size: 1.05rem;
+  line-height: 1.65;
+}
+
+/* 3. Description Lists (Key Definitions) */
+.content-main-container dl {
+  margin: 1.5rem 0;
+  background-color: var(--background, #f8fafc);
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 1rem;
+  padding: 1.5rem;
+}
+
+.content-main-container dt {
+  font-weight: 800;
+  color: var(--text-heading, #111827);
+  margin-top: 1rem;
+  font-size: 1.15rem;
+}
+
+.content-main-container dt:first-child {
+  margin-top: 0;
+}
+
+.content-main-container dd {
+  margin-left: 0;
+  margin-bottom: 0.75rem;
+  color: var(--text-body, #374151);
+  font-size: 1.05rem;
+  line-height: 1.65;
+}
+
+.content-main-container dd:last-child {
+  margin-bottom: 0;
+}
+
+/* 4. Styled MCQ/Quiz Interactive Elements */
+.content-main-container .mcq-question {
+  background-color: var(--surface, #ffffff);
+  border: 1.5px solid var(--border, #e5e7eb);
+  border-radius: 1.25rem;
+  padding: 1.75rem;
+  margin-bottom: 1.5rem;
+  box-shadow: var(--shadow-sm, 0 4px 12px -2px rgba(17, 24, 39, 0.04));
+}
+
+.content-main-container .mcq-question h3 {
+  margin-top: 0;
+  margin-bottom: 1.25rem;
+  font-size: 1.2rem;
+  font-weight: 750;
+  color: var(--text-heading, #111827);
+  line-height: 1.4;
+}
+
+.content-main-container .mcq-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.content-main-container .mcq-option {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 1rem 1.25rem;
+  border: 1.5px solid var(--border, #e5e7eb);
+  border-radius: 0.875rem;
+  background-color: var(--surface, #ffffff);
+  cursor: pointer;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-body, #374151);
+  transition: all 0.2s ease;
+}
+
+.content-main-container .mcq-option:hover {
+  border-color: var(--border-strong, #9ca3af);
+  background-color: var(--background, #f8fafc);
+  color: var(--text-heading, #111827);
+}
+
+/* Custom Radio Styling inside Options */
+.content-main-container .mcq-option input[type="radio"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border-strong, #9ca3af);
+  border-radius: 50%;
+  outline: none;
+  margin: 0;
+  display: grid;
+  place-content: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s;
+  flex-shrink: 0;
+}
+
+.content-main-container .mcq-option input[type="radio"]::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transform: scale(0);
+  transition: 120ms transform ease-in-out;
+  background-color: #ffffff;
+}
+
+.content-main-container .mcq-option input[type="radio"]:checked {
+  border-color: var(--growth, #22c55e);
+  background-color: var(--growth, #22c55e);
+}
+
+.content-main-container .mcq-option input[type="radio"]:checked::before {
+  transform: scale(1);
+}
+
+.content-main-container .mcq-option:has(input[type="radio"]:checked) {
+  border-color: var(--growth, #22c55e);
+  background-color: var(--growth-tint, #f0fdf4);
+  color: var(--growth-solid, #15803d);
+}
+
+/* MCQ feedback display space */
+.content-main-container .mcq-feedback {
+  font-size: 0.95rem;
+  font-weight: 700;
+  border-radius: 0.75rem;
+  transition: all 0.25s ease;
+}
+
+.content-main-container .mcq-feedback.show-correct {
+  padding: 0.75rem 1rem;
+  background-color: var(--growth-tint, #f0fdf4);
+  color: var(--growth-solid, #15803d);
+  border: 1px solid var(--growth, #22c55e);
+}
+
+.content-main-container .mcq-feedback.show-incorrect {
+  padding: 0.75rem 1rem;
+  background-color: var(--danger-tint, #fef2f2);
+  color: var(--danger-solid, #dc2626);
+  border: 1px solid var(--danger, #ef4444);
+}
+
+/* 5. Custom Grid Article blocks and Practice Questions */
+.content-main-container article {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.content-main-container article:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md, 0 10px 15px -3px rgba(0, 0, 0, 0.06));
+}
+
+.content-main-container .practice-question {
+  background-color: var(--surface, #ffffff);
+  border: 1.5px solid var(--border, #e5e7eb);
+  border-radius: 1rem;
+  padding: 1.5rem;
+  margin-bottom: 1.25rem;
+  box-shadow: var(--shadow-sm, 0 4px 12px -2px rgba(17, 24, 39, 0.04));
+}
+
+.content-main-container .practice-question h3 {
+  margin-top: 0;
+  margin-bottom: 0.75rem;
+  font-size: 1.15rem;
+  font-weight: 750;
+  color: var(--text-heading, #111827);
+}
+
+/* 6. Soft highlight markers */
+.content-main-container mark {
+  background-color: var(--warning-tint, #fffbeb);
+  color: var(--warning-solid, #b45309);
+  padding: 0.15rem 0.35rem;
+  border-radius: 0.375rem;
+  font-weight: 650;
+}
