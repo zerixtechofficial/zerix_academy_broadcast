@@ -9,6 +9,7 @@ import { ContentEngine } from '../modules/content-sync/content.engine';
 import { AutoSaveService } from '../modules/autosave/autosave.worker';
 import { getSessionTimelineTracker } from '../modules/session-timeline/sessionTimeline.tracker';
 import { authenticateFastify, requireTeacherFastify } from '../middlewares/jwtAuth';
+import { JwtVerifier } from '../utils/jwtVerifier';
 import { FileCache } from '../utils/fileCache';
 import { RelationalLessonContext } from '../types/broadcast.types';
 import {
@@ -17,9 +18,36 @@ import {
   sendTelegramMessageAsync,
 } from '../modules/monitoring/telegram.service';
 import * as path from 'path';
+import * as crypto from 'crypto';
 
 export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
   const provider = getDataProvider();
+
+  const mintCoHostInviteToken = (
+    sessionId: string,
+    sessionContext: any,
+    options?: { canUseWhiteboard?: boolean; label?: string }
+  ): string => {
+    const canUseWb = Boolean(options?.canUseWhiteboard);
+    return JwtVerifier.sign({
+      sub: 'cohost_invite',
+      userId: 'cohost_invite',
+      name: options?.label || 'Co-Host Teacher',
+      role: 'teacher',
+      sessionId,
+      courseId: Number(sessionContext?.courseId || 1),
+      batchId: sessionContext?.batchId || 1,
+      branchId: Number(sessionContext?.branchId || 1),
+      languageId: String(sessionContext?.languageId || '1'),
+      chapterId: String(sessionContext?.chapterId || '1'),
+      lessonId: String(sessionContext?.lessonId || '1'),
+      topicId: String(sessionContext?.topicId || ''),
+      isCoTeacher: true,
+      isCoHostInvite: true,
+      canUseWhiteboard: canUseWb,
+      exp: Math.floor(Date.now() / 1000) + 6 * 3600,
+    });
+  };
 
   // Register binary body parsers so 720p video chunks can be uploaded as raw binary
   // (`application/octet-stream`, `video/webm`, `video/mp4`) in addition to JSON base64
@@ -142,6 +170,8 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           teacherId: Type.Optional(Type.String()),
           languageId: Type.Optional(Type.String()),
           deviceId: Type.Optional(Type.String()),
+          cohost: Type.Optional(Type.Boolean()),
+          cohostName: Type.Optional(Type.String()),
         }),
       },
     },
@@ -154,6 +184,8 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         teacherId?: string;
         languageId?: string;
         deviceId?: string;
+        cohost?: boolean;
+        cohostName?: string;
       };
 
       const headerAuth = request.headers.authorization;
@@ -174,6 +206,9 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         });
       }
 
+      const verified = JwtVerifier.verify(authToken);
+      const verifiedClaims = verified.valid ? verified.claims : undefined;
+
       const user = await provider.validateToken(authToken, body.sessionId);
       if (!user) {
         return reply.status(401).send({
@@ -192,15 +227,149 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         await RoomManager.setTeacherStatus(body.sessionId, 'LIVE');
         room = await RoomManager.getOrInitRoom(body.sessionId, resolvedLanguageId);
       }
+
+      const isCoHostJoin = Boolean(
+        body.cohost ||
+          user.isCoTeacher ||
+          verifiedClaims?.isCoTeacher ||
+          verifiedClaims?.isCoHostInvite ||
+          user.userId === 'cohost_invite' ||
+          user.userId === 'teacher_cohost_invite'
+      );
+
+      let issuedSessionToken: string = authToken;
+
+      if (isCoHostJoin && user.role === 'teacher') {
+        const isGenericInvite = Boolean(
+          verifiedClaims?.isCoHostInvite ||
+            user.userId === 'cohost_invite' ||
+            user.userId === 'teacher_cohost_invite' ||
+            user.userId === String(room.sessionContext?.teacherId || '') ||
+            user.userId === `teacher_${room.sessionContext?.teacherId || ''}`
+        );
+
+        let uniqueCoHostId = user.userId;
+        if (isGenericInvite) {
+          const rawDevSeed = String(
+            body.deviceId || body.teacherId || request.ip || Date.now()
+          ).trim();
+          const devHash = crypto
+            .createHash('sha1')
+            .update(`${body.sessionId}:${rawDevSeed}`)
+            .digest('hex')
+            .slice(0, 6);
+          uniqueCoHostId = `teacher_cohost_${devHash}`;
+        } else if (!uniqueCoHostId.startsWith('teacher_')) {
+          uniqueCoHostId = `teacher_${uniqueCoHostId}`;
+        }
+
+        const existingCoTeachers = await AudioStageController.getInvitedTeachers(body.sessionId);
+        const existingEntry = existingCoTeachers.find(
+          (t) =>
+            t.teacherId === uniqueCoHostId ||
+            String(t.teacherId).replace(/^teacher_/, '') ===
+              uniqueCoHostId.replace(/^teacher_/, '')
+        );
+
+        const coHostNumber = existingEntry
+          ? existingCoTeachers.indexOf(existingEntry) + 1
+          : existingCoTeachers.length + 1;
+
+        const resolvedCoHostName =
+          body.cohostName && body.cohostName.trim()
+            ? body.cohostName.trim()
+            : existingEntry?.name
+            ? existingEntry.name
+            : user.name &&
+              user.name !== 'Co-Host Teacher' &&
+              user.name !== 'Co-Host Invite' &&
+              !isGenericInvite
+            ? user.name
+            : `Co-Host #${coHostNumber}`;
+
+        const effectiveCanUseWb = existingEntry
+          ? Boolean(existingEntry.canUseWhiteboard)
+          : Boolean(verifiedClaims?.canUseWhiteboard);
+
+        const updatedInvitedTeachers = await AudioStageController.inviteCoTeacher(body.sessionId, {
+          teacherId: uniqueCoHostId,
+          name: resolvedCoHostName,
+          subject: existingEntry?.subject || room.sessionContext?.subjectName || 'Co-Instructor',
+          canUseWhiteboard: effectiveCanUseWb,
+          invitedAt: existingEntry?.invitedAt || Date.now(),
+        });
+        const updatedWbEditors = await AudioStageController.getWhiteboardEditors(body.sessionId);
+
+        const ioInstance = (fastify as any).io;
+        if (ioInstance) {
+          ioInstance.to(body.sessionId).emit('CO_TEACHERS_UPDATED', {
+            invitedTeachers: updatedInvitedTeachers,
+            whiteboardEditors: updatedWbEditors,
+          });
+          ioInstance.to(body.sessionId).emit('WHITEBOARD_ACCESS_UPDATED', {
+            whiteboardEditors: updatedWbEditors,
+            invitedTeachers: updatedInvitedTeachers,
+            targetUserId: uniqueCoHostId,
+            canEdit: effectiveCanUseWb,
+          });
+        }
+
+        user.userId = uniqueCoHostId;
+        user.name = resolvedCoHostName;
+        user.isCoTeacher = true;
+
+        issuedSessionToken = JwtVerifier.sign({
+          sub: uniqueCoHostId,
+          userId: uniqueCoHostId,
+          name: resolvedCoHostName,
+          role: 'teacher',
+          sessionId: body.sessionId,
+          courseId: Number(room.sessionContext?.courseId || user.courseId || 1),
+          batchId: room.sessionContext?.batchId || user.batchId || 1,
+          branchId: Number(room.sessionContext?.branchId || user.branchId || 1),
+          languageId: String(
+            resolvedLanguageId || room.sessionContext?.languageId || '1'
+          ),
+          chapterId: String(room.sessionContext?.chapterId || user.chapterId || '1'),
+          lessonId: String(room.sessionContext?.lessonId || user.lessonId || '1'),
+          topicId: String(room.sessionContext?.topicId || user.topicId || ''),
+          isCoTeacher: true,
+          isCoHostInvite: false,
+          canUseWhiteboard: effectiveCanUseWb,
+          exp: Math.floor(Date.now() / 1000) + 6 * 3600,
+        });
+      }
+
+      // If the Host Teacher launches from a specific lesson/topic on /learn, sync the active lesson/topic
+      if (user.role === 'teacher' && !isCoHostJoin && (user.lessonId || user.topicId)) {
+        const currentContent = await ContentEngine.getState(body.sessionId);
+        const nextLessonId = String(user.lessonId || currentContent.activeLessonId || room.sessionContext?.lessonId || '');
+        const nextTopicId = String(user.topicId || currentContent.activeTopicId || room.sessionContext?.topicId || '');
+        if (
+          nextLessonId &&
+          (currentContent.activeLessonId !== nextLessonId ||
+            (nextTopicId && currentContent.activeTopicId !== nextTopicId))
+        ) {
+          await ContentEngine.updateNavigation(body.sessionId, nextLessonId, nextTopicId);
+          room.sessionContext = {
+            ...room.sessionContext,
+            chapterId: String(user.chapterId || room.sessionContext?.chapterId || ''),
+            lessonId: nextLessonId,
+            topicId: nextTopicId,
+          };
+          await RoomManager.updateSnapshot(body.sessionId, {
+            sessionContext: room.sessionContext,
+          });
+        }
+      }
+
       const [elements, files, cam, cursor, contentState, audioStage, liveAttendance] =
         await Promise.all([
           WhiteboardEngine.getAllElements(body.sessionId),
           WhiteboardEngine.getAllFiles(body.sessionId),
           WhiteboardEngine.getTeacherCam(body.sessionId),
           WhiteboardEngine.getTeacherCursor(body.sessionId),
-          (await import('../modules/content-sync/content.engine')).ContentEngine.getState(
-            body.sessionId
-          ),
+          ContentEngine.getState(body.sessionId),
           AudioStageController.getStageState(body.sessionId),
           AttendanceEngine.getLiveAttendanceList(body.sessionId),
         ]);
@@ -228,10 +397,19 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
       // Schedule auto-save checkpoint if starting live session
       await AutoSaveService.scheduleNextCheckpoint(body.sessionId);
 
+      const coHostInviteToken =
+        user.role === 'teacher'
+          ? mintCoHostInviteToken(body.sessionId, room.sessionContext, {
+              canUseWhiteboard: false,
+            })
+          : undefined;
+
       return {
         success: true,
         data: {
           user,
+          token: issuedSessionToken,
+          coHostInviteToken,
           sessionContext: room.sessionContext,
           mode: room.mode,
           status: room.status,
@@ -248,6 +426,46 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
             url: livekit.url,
             canPublishAudio: livekit.canPublishAudio,
           },
+        },
+      };
+    }
+  );
+
+  // 5b. Mint / Refresh Signed Co-Host Invite Token (Supports Multiple Co-Hosts Simultaneously)
+  fastify.post(
+    '/api/v1/sessions/:sessionId/cohost-invite',
+    {
+      preHandler: [requireTeacherFastify],
+      schema: {
+        params: Type.Object({
+          sessionId: Type.String({ minLength: 1 }),
+        }),
+        body: Type.Optional(
+          Type.Object({
+            canUseWhiteboard: Type.Optional(Type.Boolean()),
+            label: Type.Optional(Type.String()),
+          })
+        ),
+      },
+    },
+    async (request) => {
+      const { sessionId } = request.params as { sessionId: string };
+      const body = (request.body || {}) as {
+        canUseWhiteboard?: boolean;
+        label?: string;
+      };
+      const room = await RoomManager.getOrInitRoom(sessionId);
+      const inviteToken = mintCoHostInviteToken(sessionId, room.sessionContext, {
+        canUseWhiteboard: Boolean(body.canUseWhiteboard),
+        label: body.label,
+      });
+
+      return {
+        success: true,
+        data: {
+          sessionId,
+          coHostInviteToken: inviteToken,
+          canUseWhiteboard: Boolean(body.canUseWhiteboard),
         },
       };
     }

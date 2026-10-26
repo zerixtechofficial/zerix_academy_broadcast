@@ -225,6 +225,7 @@ export default function LearningSessionLayout() {
   const [livekitToken, setLivekitToken] = useState<string>('');
   const [livekitUrl, setLivekitUrl] = useState<string | undefined>(undefined);
   const [canPublishAudio, setCanPublishAudio] = useState<boolean>(false);
+  const [coHostInviteToken, setCoHostInviteToken] = useState<string>('');
   const [pendingMicAutoActivate, setPendingMicAutoActivate] = useState<boolean>(false);
 
   // Workspace Layout & Sync Controls
@@ -411,6 +412,12 @@ export default function LearningSessionLayout() {
       }
 
       try {
+        const isCoHostUrlParam =
+          typeof window !== 'undefined' &&
+          ['1', 'true'].includes(
+            new URLSearchParams(window.location.search).get('cohost') || ''
+          );
+
         const initData = await CurriculumClient.initSession({
           sessionId,
           role,
@@ -418,9 +425,24 @@ export default function LearningSessionLayout() {
           studentId,
           token,
           deviceId: clientDeviceId,
+          cohost: isCoHostUrlParam,
         });
 
         if (!isMounted) return;
+
+        let activeSessionToken = token;
+        if (initData.token && typeof initData.token === 'string') {
+          activeSessionToken = initData.token;
+          if (activeSessionToken !== token) {
+            setToken(activeSessionToken);
+          }
+          if (typeof window !== 'undefined') {
+            window.sessionStorage.setItem('broadcast_rejoin_token', activeSessionToken);
+          }
+        }
+        if (initData.coHostInviteToken && typeof initData.coHostInviteToken === 'string') {
+          setCoHostInviteToken(initData.coHostInviteToken);
+        }
 
         if (initData.user) {
           if (initData.user.role === 'teacher' || initData.user.role === 'student') {
@@ -439,7 +461,7 @@ export default function LearningSessionLayout() {
 
         const ctx = initData.sessionContext || {};
         setSessionMetadata(ctx);
-        const resolvedLang = ctx.languageId || initialParams.languageId || 1;
+        const resolvedLang = initialParams.languageId || ctx.languageId || 1;
         setLanguageId(resolvedLang);
         setIsAuthVerifying(false);
         setAuthError(null);
@@ -469,10 +491,14 @@ export default function LearningSessionLayout() {
           }
         }
 
-        const courseId = ctx.courseId || initialParams.courseId;
+        const courseId = initialParams.courseId || ctx.courseId;
         let curData: any = null;
         if (courseId) {
-          curData = await CurriculumClient.fetchCurriculum(String(courseId), resolvedLang, token);
+          curData = await CurriculumClient.fetchCurriculum(
+            String(courseId),
+            resolvedLang,
+            activeSessionToken
+          );
           if (isMounted) setCurriculum(curData);
         }
 
@@ -481,24 +507,42 @@ export default function LearningSessionLayout() {
         const firstLesson = firstChapter?.lessons?.[0];
         const firstTopic = firstLesson?.topics?.[0];
 
-        let targetLessonId = String(
-          ctx.lessonId || initialParams.lessonId || firstLesson?.lessonId || ''
-        );
         let targetTopicId = String(
-          ctx.topicId || initialParams.topicId || firstTopic?.topicId || ''
+          initialParams.topicId || ctx.topicId || firstTopic?.topicId || ''
+        );
+        let targetLessonId = String(
+          initialParams.lessonId || ctx.lessonId || firstLesson?.lessonId || ''
         );
 
-        // Verify targetLessonId exists in curriculum if curriculum has chapters
+        // Verify targetTopicId and targetLessonId exist in curriculum if curriculum has chapters
         if (chaptersList.length > 0) {
           let matchedLesson: any = null;
-          for (const ch of chaptersList) {
-            for (const les of ch.lessons || []) {
-              if (String(les.lessonId) === targetLessonId) {
-                matchedLesson = les;
-                break;
+          if (targetTopicId) {
+            for (const ch of chaptersList) {
+              for (const les of ch.lessons || []) {
+                if (
+                  (les.topics || []).some(
+                    (t: any) => String(t.topicId) === targetTopicId
+                  )
+                ) {
+                  matchedLesson = les;
+                  targetLessonId = String(les.lessonId);
+                  break;
+                }
               }
+              if (matchedLesson) break;
             }
-            if (matchedLesson) break;
+          }
+          if (!matchedLesson) {
+            for (const ch of chaptersList) {
+              for (const les of ch.lessons || []) {
+                if (String(les.lessonId) === targetLessonId) {
+                  matchedLesson = les;
+                  break;
+                }
+              }
+              if (matchedLesson) break;
+            }
           }
           if (!matchedLesson && firstLesson) {
             matchedLesson = firstLesson;
@@ -524,7 +568,7 @@ export default function LearningSessionLayout() {
             targetLessonId,
             resolvedLang,
             undefined,
-            token
+            activeSessionToken
           );
           if (isMounted) setLessonContent(contentData);
         }
@@ -591,6 +635,24 @@ export default function LearningSessionLayout() {
   useEffect(() => {
     if (!curriculum?.chapters || curriculum.chapters.length === 0) return;
     const chaptersList = curriculum.chapters;
+
+    // First check if activeTopicId belongs to a lesson in the curriculum
+    if (activeTopicId) {
+      for (const ch of chaptersList) {
+        for (const les of ch.lessons || []) {
+          if (
+            Array.isArray(les.topics) &&
+            les.topics.some((t: any) => String(t.topicId) === String(activeTopicId))
+          ) {
+            if (String(les.lessonId) !== String(activeLessonId)) {
+              setActiveLessonId(String(les.lessonId));
+            }
+            return;
+          }
+        }
+      }
+    }
+
     let foundLesson: any = null;
     for (const ch of chaptersList) {
       for (const les of ch.lessons || []) {
@@ -632,7 +694,11 @@ export default function LearningSessionLayout() {
         return true;
       }
     }
-    if (['teacher_502', 'teacher_503', 'teacher_504'].includes(teacherId)) {
+    if (
+      ['teacher_502', 'teacher_503', 'teacher_504'].includes(teacherId) ||
+      teacherId.startsWith('teacher_cohost') ||
+      teacherId.startsWith('cohost')
+    ) {
       return true;
     }
     const cleanCurrentId = String(teacherId).replace(/^teacher_/, '');
@@ -870,24 +936,32 @@ export default function LearningSessionLayout() {
   ]);
 
   // Normalize Lesson Blocks for VirtualContentStage (800px Virtual Page)
-  // Filter by activeTopicId when blocks are tagged with topicId so clicking any topic shows its content
+  // Filter strictly by activeTopicId when topics/blocks are loaded so /learn and Broadcast Studio match 100%
   const normalizedBlocks: LessonBlock[] = useMemo(() => {
+    const topicsArray: any[] = Array.isArray(lessonContent?.topics)
+      ? lessonContent.topics
+      : [];
     const rawBlocks: any[] = Array.isArray(lessonContent?.blocks)
       ? lessonContent.blocks
       : [];
 
-    const filteredBlocks =
-      activeTopicId &&
-      rawBlocks.some(
-        (b: any) =>
-          b.topicId !== undefined &&
-          b.topicId !== null &&
-          String(b.topicId) === String(activeTopicId)
-      )
-        ? rawBlocks.filter(
-            (b: any) => String(b.topicId) === String(activeTopicId)
-          )
-        : rawBlocks;
+    let filteredBlocks: any[] = rawBlocks;
+
+    if (activeTopicId) {
+      const matchedTopic = topicsArray.find(
+        (t: any) => String(t.topicId) === String(activeTopicId)
+      );
+      if (matchedTopic && Array.isArray(matchedTopic.blocks)) {
+        filteredBlocks = matchedTopic.blocks;
+      } else if (
+        topicsArray.length > 0 ||
+        rawBlocks.some((b: any) => b.topicId !== undefined && b.topicId !== null)
+      ) {
+        filteredBlocks = rawBlocks.filter(
+          (b: any) => String(b.topicId) === String(activeTopicId)
+        );
+      }
+    }
 
     return filteredBlocks.map((b: any) => ({
       blockId: String(b.blockId),
@@ -1529,6 +1603,23 @@ export default function LearningSessionLayout() {
         onSimulateDisconnect={simulateDisconnect}
         onLeaveMeeting={handleLeaveMeeting}
         onEndClass={handleEndClass}
+        coHostInviteToken={coHostInviteToken}
+        onRefreshCoHostInviteToken={async (canUseWhiteboard) => {
+          try {
+            const res = await CurriculumClient.mintCoHostInviteToken(
+              sessionId,
+              { canUseWhiteboard },
+              token
+            );
+            if (res?.coHostInviteToken) {
+              setCoHostInviteToken(res.coHostInviteToken);
+              return res.coHostInviteToken;
+            }
+          } catch (err) {
+            console.warn('[LearningSessionLayout] Failed to refresh co-host invite token:', err);
+          }
+          return coHostInviteToken;
+        }}
       />
 
       {/* 1b. Real-Time Microphone Permission Alert & Autoplay Audio Unlock Banners */}

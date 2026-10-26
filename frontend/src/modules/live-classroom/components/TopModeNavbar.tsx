@@ -112,6 +112,8 @@ interface TopModeNavbarProps {
   recordingDurationSec?: number;
   chunksUploaded?: number;
   onToggleRecording?: () => void;
+  coHostInviteToken?: string;
+  onRefreshCoHostInviteToken?: (canUseWhiteboard: boolean) => Promise<string | undefined>;
 }
 
 export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
@@ -170,6 +172,8 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
   recordingDurationSec = 0,
   chunksUploaded = 0,
   onToggleRecording,
+  coHostInviteToken = '',
+  onRefreshCoHostInviteToken,
 }: TopModeNavbarProps) => {
   const [isUsersDrawerOpen, setIsUsersDrawerOpen] = useState(false);
   const [isLeaveModalOpen, setIsLeaveModalOpen] = useState(false);
@@ -178,18 +182,38 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
   const [inviteWithWhiteboard, setInviteWithWhiteboard] = useState<boolean>(true);
   const [isCoHostLinkCopied, setIsCoHostLinkCopied] = useState<boolean>(false);
 
-  const coHostInviteUrl =
-    typeof window !== 'undefined'
-      ? `${window.location.origin}${window.location.pathname}?role=teacher&cohost=1&sessionId=${selectedSessionId}`
-      : `https://studio.zerixtech.com/?role=teacher&cohost=1&sessionId=${selectedSessionId}`;
+  const buildCoHostInviteUrl = (inviteToken?: string) => {
+    const baseUrl =
+      typeof window !== 'undefined'
+        ? `${window.location.origin}${window.location.pathname}`
+        : 'https://studio.zerixtech.com/';
+    const tok = inviteToken || coHostInviteToken;
+    return `${baseUrl}?role=teacher&cohost=1&sessionId=${encodeURIComponent(selectedSessionId)}${
+      tok ? `&token=${encodeURIComponent(tok)}` : ''
+    }`;
+  };
+
+  const coHostInviteUrl = buildCoHostInviteUrl(coHostInviteToken);
 
   const handleCopyCoHostLink = async () => {
+    let latestToken = coHostInviteToken;
+    if (onRefreshCoHostInviteToken) {
+      try {
+        const refreshed = await onRefreshCoHostInviteToken(inviteWithWhiteboard);
+        if (refreshed) {
+          latestToken = refreshed;
+        }
+      } catch {
+        // Fallback to existing coHostInviteToken
+      }
+    }
+    const urlToCopy = buildCoHostInviteUrl(latestToken);
     try {
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(coHostInviteUrl);
+        await navigator.clipboard.writeText(urlToCopy);
       } else {
         const tempInput = document.createElement('textarea');
-        tempInput.value = coHostInviteUrl;
+        tempInput.value = urlToCopy;
         tempInput.style.position = 'fixed';
         tempInput.style.opacity = '0';
         document.body.appendChild(tempInput);
@@ -201,7 +225,6 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
       // Clipboard fallback in headless/non-secure contexts
     }
     setIsCoHostLinkCopied(true);
-    onInviteCoTeacher('cohost', 'Co-Host Instructor', inviteWithWhiteboard);
     window.setTimeout(() => {
       setIsCoHostLinkCopied(false);
     }, 2000);
@@ -1334,9 +1357,18 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                           onChange={(e) => {
                             const nextVal = e.target.checked;
                             setInviteWithWhiteboard(nextVal);
-                            if (invitedTeachers.some((t) => t.teacherId === 'teacher_502')) {
-                              onToggleCoTeacherWhiteboard('teacher_502', nextVal);
+                            if (onRefreshCoHostInviteToken) {
+                              onRefreshCoHostInviteToken(nextVal).catch(() => {});
                             }
+                            invitedTeachers.forEach((t) => {
+                              if (
+                                t.teacherId.startsWith('teacher_cohost') ||
+                                t.teacherId === 'cohost' ||
+                                t.teacherId === 'teacher_502'
+                              ) {
+                                onToggleCoTeacherWhiteboard(t.teacherId, nextVal);
+                              }
+                            });
                           }}
                           className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                         />

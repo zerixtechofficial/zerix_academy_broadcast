@@ -196,10 +196,29 @@ export class CurriculumClient {
     studentId?: string;
     teacherId?: string;
     deviceId?: string;
+    cohost?: boolean;
+    cohostName?: string;
   }) {
     const res = await this.request<{ success: boolean; data: any }>('/api/v1/sessions/init', {
       method: 'POST',
       body: JSON.stringify(params),
+    });
+    return res.data;
+  }
+
+  public static async mintCoHostInviteToken(
+    sessionId: string,
+    options: { canUseWhiteboard?: boolean; label?: string } = {},
+    token?: string
+  ): Promise<{ coHostInviteToken: string; canUseWhiteboard: boolean; expiresInSeconds: number }> {
+    const authToken = getStoredAuthToken(token);
+    const res = await this.request<{
+      success: boolean;
+      data: { coHostInviteToken: string; canUseWhiteboard: boolean; expiresInSeconds: number };
+    }>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/cohost-invite`, {
+      method: 'POST',
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+      body: JSON.stringify(options),
     });
     return res.data;
   }

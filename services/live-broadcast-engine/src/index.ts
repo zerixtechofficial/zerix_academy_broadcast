@@ -214,7 +214,22 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
             user,
             currentRoom?.sessionContext?.teacherId
           );
-          if (!isHost) {
+          if (isHost && !user.isCoTeacher && lastSeqId === 0 && (user.lessonId || user.topicId)) {
+            const currentContent = await ContentEngine.getState(targetSessionId);
+            const nextLessonId = String(
+              user.lessonId || currentContent.activeLessonId || currentRoom.sessionContext?.lessonId || ''
+            );
+            const nextTopicId = String(
+              user.topicId || currentContent.activeTopicId || currentRoom.sessionContext?.topicId || ''
+            );
+            if (
+              nextLessonId &&
+              (currentContent.activeLessonId !== nextLessonId ||
+                (nextTopicId && currentContent.activeTopicId !== nextTopicId))
+            ) {
+              await ContentEngine.updateNavigation(targetSessionId, nextLessonId, nextTopicId);
+            }
+          } else if (!isHost) {
             const currentCoTeachers = await AudioStageController.getInvitedTeachers(targetSessionId);
             const cleanCoId = user.userId.startsWith('teacher_')
               ? user.userId

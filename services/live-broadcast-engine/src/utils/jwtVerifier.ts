@@ -19,7 +19,12 @@ export interface BroadcastJwtClaims {
   enrollmentId?: number | string;
   avatarUrl?: string;
   isCoTeacher?: boolean;
+  isCoHostInvite?: boolean;
   canUseWhiteboard?: boolean;
+  languageId?: number | string;
+  chapterId?: number | string;
+  lessonId?: number | string;
+  topicId?: number | string;
   /** Issued-at timestamp in Unix seconds */
   iat?: number;
   /** Expiration timestamp in Unix seconds */

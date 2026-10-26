@@ -155,6 +155,20 @@ export async function authenticateSocket(
       return next(new Error('Authentication failed: Invalid token credentials.'));
     }
 
+    if (user.userId === 'cohost_invite' || user.userId === 'teacher_cohost_invite') {
+      const rawDevId = String(auth.deviceId || query.deviceId || socket.id || 'default').trim();
+      const cleanSuffix = rawDevId
+        .replace(/^dev_/, '')
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .slice(-8)
+        .toLowerCase();
+      user.userId = `teacher_cohost_${cleanSuffix || '1'}`;
+      if (!user.name || user.name === 'Co-Host Invite') {
+        user.name = `Co-Host (${cleanSuffix.slice(0, 4).toUpperCase() || '1'})`;
+      }
+      user.isCoTeacher = true;
+    }
+
     socket.user = user;
     socket.sessionId = user.sessionId || sessionId;
     next();

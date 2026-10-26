@@ -5,6 +5,7 @@ export interface UserAuthPayload {
   name: string;
   role: UserRole;
   batchId: string;
+  branchId?: string;
   sessionId: string;
   courseId?: string;
   languageId?: string;
@@ -15,6 +16,7 @@ export interface UserAuthPayload {
   avatar?: string;
   rollNumber?: string;
   isCoTeacher?: boolean;
+  isCoHostInvite?: boolean;
   canUseWhiteboard?: boolean;
 }
 

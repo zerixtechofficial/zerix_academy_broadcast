@@ -1302,7 +1302,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           <div className="space-y-3 sm:space-y-5">
             {blocks.length === 0 ? (
               <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-sm text-slate-500">
-                Select a topic from the Course Curriculum sidebar to display its lesson notes and interactive content.
+                No content available for this topic.
               </div>
             ) : null}
             {blocks.map((block) => {
