@@ -16,6 +16,42 @@ html, body {
   overflow: hidden;
   overscroll-behavior: none;
   -webkit-overscroll-behavior: none;
+  height: 100vh;
+  height: 100dvh;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* Default Comic Sans Font Stack for Excalidraw Whiteboard Text & Editor */
+@font-face {
+  font-family: "ComicShanns";
+  src: local("Comic Sans MS"), local("Comic Sans"), local("Chalkboard SE"), local("Comic Neue");
+  font-display: swap;
+}
+
+.excalidraw-wrapper .excalidraw .excalidraw-wysiwyg {
+  font-family: "Comic Sans MS", "Comic Sans", "Chalkboard SE", "Comic Neue", cursive, sans-serif !important;
+}
+
+/* Strictly hide Clear Whiteboard button for Students in Excalidraw toolbar */
+.excalidraw-wrapper[data-role="student"] .wb-toolbar-clear-slot,
+.excalidraw-wrapper[data-role="student"] [data-testid="whiteboard-clear-btn"],
+.excalidraw-wrapper[data-role="student"] [data-testid="clear-canvas-button"] {
+  display: none !important;
+}
+
+/* Cross-Browser Compatibility Rules (Chrome, Safari, Firefox, Edge, iOS/Android) */
+.backdrop-blur,
+.backdrop-blur-sm,
+.backdrop-blur-md {
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+
+.select-none {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  user-select: none;
 }
 
 /* Clean Light Theme scrollbars */

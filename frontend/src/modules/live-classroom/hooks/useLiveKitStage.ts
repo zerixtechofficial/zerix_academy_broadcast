@@ -113,6 +113,9 @@ export function useLiveKitStage({
         if (!AudioCtx) return;
 
         const audioContext: AudioContext = new AudioCtx();
+        if (audioContext.state === 'suspended' && typeof audioContext.resume === 'function') {
+          audioContext.resume().catch(() => {});
+        }
         const stream = new MediaStream([rawTrack]);
         const sourceNode = audioContext.createMediaStreamSource(stream);
 
@@ -166,8 +169,15 @@ export function useLiveKitStage({
     []
   );
 
-  // Unlock Audio on Any User Gesture (Autoplay Policy Helper)
+  // Unlock Audio on Any User Gesture (Autoplay Policy Helper for Chrome, Safari, Firefox, Edge)
   const unlockAudioPlayback = useCallback(async () => {
+    if (
+      dspNodesRef.current?.audioContext &&
+      dspNodesRef.current.audioContext.state === 'suspended' &&
+      typeof dspNodesRef.current.audioContext.resume === 'function'
+    ) {
+      dspNodesRef.current.audioContext.resume().catch(() => {});
+    }
     if (roomRef.current) {
       try {
         await roomRef.current.startAudio();
@@ -289,15 +299,19 @@ export function useLiveKitStage({
 
     setupRoom();
 
-    // Pointer listener to unlock audio on first interaction (no keydown listener so Excalidraw shortcuts stay untouched)
+    // Pointer/touch/click listener to unlock audio on first interaction across Chrome, Safari, Firefox, Edge
     const handleGesture = () => {
       unlockAudioPlayback();
     };
     window.addEventListener('pointerdown', handleGesture, { once: true });
+    window.addEventListener('touchstart', handleGesture, { once: true, passive: true });
+    window.addEventListener('click', handleGesture, { once: true });
 
     return () => {
       isMounted = false;
       window.removeEventListener('pointerdown', handleGesture);
+      window.removeEventListener('touchstart', handleGesture);
+      window.removeEventListener('click', handleGesture);
       if (dspNodesRef.current) {
         try {
           dspNodesRef.current.sourceNode.disconnect();

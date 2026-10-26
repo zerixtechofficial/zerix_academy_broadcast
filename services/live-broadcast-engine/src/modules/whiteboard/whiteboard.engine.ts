@@ -501,7 +501,7 @@ export class WhiteboardEngine {
       locked: false,
       text: displayText,
       fontSize: 16,
-      fontFamily: 1,
+      fontFamily: 5,
       textAlign: 'left',
       verticalAlign: 'top',
       containerId: null,

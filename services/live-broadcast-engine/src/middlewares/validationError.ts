@@ -1,4 +1,5 @@
 import { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
+import { notifyTelegramErrorAsync } from '../modules/monitoring/telegram.service';
 
 export interface ValidationErrorResponse {
   statusCode: number;
@@ -58,6 +59,20 @@ export function validationErrorHandler(
 
   // Handle custom application errors with human-readable message
   const statusCode = error.statusCode || 500;
+  if (statusCode >= 500) {
+    // Non-blocking background alert to Telegram group for unhandled 5xx HTTP errors
+    notifyTelegramErrorAsync({
+      source: 'Fastify HTTP Server',
+      error,
+      context: {
+        method: request.method,
+        url: request.url,
+        statusCode,
+        ip: request.ip,
+      },
+    });
+  }
+
   reply.status(statusCode).send({
     statusCode,
     error: error.name || 'InternalServerError',

@@ -11,6 +11,11 @@ import { getSessionTimelineTracker } from '../modules/session-timeline/sessionTi
 import { authenticateFastify, requireTeacherFastify } from '../middlewares/jwtAuth';
 import { FileCache } from '../utils/fileCache';
 import { RelationalLessonContext } from '../types/broadcast.types';
+import {
+  TelegramMonitorService,
+  notifyTelegramErrorAsync,
+  sendTelegramMessageAsync,
+} from '../modules/monitoring/telegram.service';
 import * as path from 'path';
 
 export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
@@ -138,6 +143,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           role: Type.Optional(Type.Union([Type.Literal('teacher'), Type.Literal('student')])),
           studentId: Type.Optional(Type.String()),
           teacherId: Type.Optional(Type.String()),
+          deviceId: Type.Optional(Type.String()),
         }),
       },
     },
@@ -148,6 +154,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         role?: 'teacher' | 'student';
         studentId?: string;
         teacherId?: string;
+        deviceId?: string;
       };
 
       let authToken = body.token;
@@ -190,12 +197,13 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           AttendanceEngine.getLiveAttendanceList(body.sessionId),
         ]);
 
-      // Generate LiveKit SFU Token
+      // Generate LiveKit SFU Token (with per-device identity when deviceId is provided)
       const livekit = await AudioStageController.getJoinToken(
         body.sessionId,
         user.userId,
         user.name,
-        user.role
+        user.role,
+        body.deviceId
       );
 
       // Schedule auto-save checkpoint if starting live session
@@ -1069,4 +1077,92 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
 
   fastify.get('/api/v1/artifacts/whiteboard/*', handleGetWhiteboardArtifact);
   fastify.get('/api/v1/stream/whiteboard/*', handleGetWhiteboardArtifact);
+
+  // ============================================================================
+  // 22. SERVER HEALTH MONITORING & NON-BLOCKING TELEGRAM ALERT ENDPOINTS
+  // ============================================================================
+
+  // 22a. Detailed Server & Service Health Metrics
+  fastify.get('/api/v1/monitoring/health', async () => {
+    const report = await TelegramMonitorService.collectServerHealthMetrics();
+    return {
+      success: true,
+      data: report,
+    };
+  });
+
+  // 22b. Trigger Server Health Report or Custom Alert to Telegram Group (Non-Blocking by default)
+  fastify.post('/api/v1/monitoring/health-report', async (request, reply) => {
+    const body = (request.body || {}) as {
+      title?: string;
+      message?: string;
+      WaitForDelivery?: boolean;
+    };
+
+    if (body.WaitForDelivery) {
+      if (body.message) {
+        const res = await TelegramMonitorService.sendTelegramMessage(body.message, {
+          parseMode: 'HTML',
+        });
+        return { success: res.ok, data: res };
+      }
+      const { report, telegramResult } = await TelegramMonitorService.sendServerHealthReport({
+        title: body.title,
+      });
+      return {
+        success: telegramResult.ok,
+        data: { telegramResult, report },
+      };
+    }
+
+    // Default: dispatch asynchronously in the background so the HTTP request never blocks
+    if (body.message) {
+      sendTelegramMessageAsync(body.message, { parseMode: 'HTML' });
+    } else {
+      setImmediate(() => {
+        void TelegramMonitorService.sendServerHealthReport({ title: body.title }).catch(() => {});
+      });
+    }
+
+    return reply.status(202).send({
+      success: true,
+      queued: true,
+      message: 'Telegram health report dispatched asynchronously in the background.',
+    });
+  });
+
+  // 22c. Non-Blocking Client / Frontend Error Alert Endpoint
+  fastify.post('/api/v1/monitoring/client-error', async (request, reply) => {
+    const body = (request.body || {}) as {
+      source?: string;
+      message?: string;
+      stack?: string;
+      sessionId?: string;
+      userId?: string;
+      role?: string;
+      url?: string;
+    };
+
+    const err = new Error(body.message || 'Unknown client runtime error');
+    if (body.stack) {
+      err.stack = body.stack;
+    }
+
+    notifyTelegramErrorAsync({
+      source: body.source || 'Broadcast Frontend (Browser)',
+      error: err,
+      context: {
+        sessionId: body.sessionId,
+        userId: body.userId,
+        role: body.role,
+        url: body.url,
+        ip: request.ip,
+      },
+    });
+
+    return reply.status(202).send({
+      success: true,
+      queued: true,
+    });
+  });
 };

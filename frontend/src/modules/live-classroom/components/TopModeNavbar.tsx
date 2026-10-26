@@ -94,6 +94,7 @@ interface TopModeNavbarProps {
   onRemoveCoTeacher: (teacherId: string) => void;
   onGrantWhiteboardAccess: (targetUserId: string) => void;
   onRevokeWhiteboardAccess: (targetUserId: string) => void;
+  onToggleStudentMultiDevice?: (studentId: string, allow: boolean) => void;
   onSwitchRole: (role: 'teacher' | 'student', teacherId?: string) => void;
   onSelectBatch: (sessionId: string) => void;
   onSimulateDisconnect: () => void;
@@ -155,6 +156,7 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
   onRemoveCoTeacher,
   onGrantWhiteboardAccess,
   onRevokeWhiteboardAccess,
+  onToggleStudentMultiDevice,
   isTopNavVisible = true,
   isFullscreen = false,
   onToggleFullscreen,
@@ -210,6 +212,7 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
   const raisedHandsCount = audioStage.raisedHands.length;
   const invitedTeachers = audioStage.invitedTeachers || [];
   const whiteboardEditors = audioStage.whiteboardEditors || [];
+  const multiDeviceStudents = audioStage.multiDeviceStudents || [];
 
   const handleApproveMic = (studentId: string, studentName: string) => {
     setMicValidationError(null);
@@ -1030,6 +1033,9 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                           const hasStudentWbAccess =
                             whiteboardEditors.includes(student.studentId) ||
                             whiteboardEditors.includes(normStId);
+                          const isMultiDeviceAllowed =
+                            multiDeviceStudents.includes(student.studentId) ||
+                            multiDeviceStudents.includes(normStId);
 
                           return (
                             <div
@@ -1075,6 +1081,14 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                                           Board Editor
                                         </span>
                                       )}
+                                      {isMultiDeviceAllowed && (
+                                        <span
+                                          data-testid={`student-multidevice-tag-${student.studentId}`}
+                                          className="px-1.5 py-0.2 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-semibold"
+                                        >
+                                          Multi-Device
+                                        </span>
+                                      )}
                                     </div>
                                     <div className="text-[11px] text-slate-500 flex items-center gap-2">
                                       <span>In: {formatClockTime(student.firstJoinedAt)}</span>
@@ -1085,9 +1099,37 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                                   </div>
                                 </div>
 
-                                {/* Teacher 1-click Whiteboard Edit Access + Mic Allow/Mute buttons */}
+                                {/* Teacher 1-click Whiteboard Edit Access + Multi-Device Toggle + Mic Allow/Mute buttons */}
                                 {role === 'teacher' && (
-                                  <div className="flex items-center gap-1.5 shrink-0">
+                                  <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+                                    {isHostTeacher && onToggleStudentMultiDevice && (
+                                      <button
+                                        type="button"
+                                        data-testid={`multi-device-btn-${normStId}`}
+                                        onClick={() =>
+                                          onToggleStudentMultiDevice(
+                                            normStId,
+                                            !isMultiDeviceAllowed
+                                          )
+                                        }
+                                        className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                                          isMultiDeviceAllowed
+                                            ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs'
+                                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200'
+                                        }`}
+                                        title={
+                                          isMultiDeviceAllowed
+                                            ? 'Multi-Device Join Allowed for this student (Click to restrict to 1 device)'
+                                            : 'Restricted to 1 Device only (Click to allow this student to join from multiple devices)'
+                                        }
+                                      >
+                                        <span>
+                                          {isMultiDeviceAllowed
+                                            ? 'Multi-Device: ON'
+                                            : '1 Device Only'}
+                                        </span>
+                                      </button>
+                                    )}
                                     <button
                                       type="button"
                                       data-testid={`wb-access-btn-${normStId}`}

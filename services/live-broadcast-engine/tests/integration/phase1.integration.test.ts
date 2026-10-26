@@ -671,4 +671,393 @@ describe('Phase 1 Integration Tests: End-to-End Fastify REST & Streaming Pipelin
     );
     assert.equal(teacherAttRes.json().success, true);
   });
+
+  it('9. Goal Deliverables: blocks student WHITEBOARD_CLEAR, enforces single-device JOIN_ROOM unless host enables multi-device, and isolates per-device self-mute', async () => {
+    const { EventEmitter } = await import('node:events');
+    const { AudioStageController } = await import('../../src/modules/audio-stage/audio.controller');
+    const { WhiteboardEngine } = await import('../../src/modules/whiteboard/whiteboard.engine');
+
+    const connectionListeners = server.io.listeners('connection') as Array<(socket: any) => Promise<void>>;
+    const handleConnection = connectionListeners[0];
+
+    const createTestSocket = (user: any, boundSessionId: string, deviceId?: string) => {
+      const emitter = new EventEmitter();
+      const emittedEvents: Array<{ event: string; payload: any }> = [];
+      const joinedRooms = new Set<string>();
+      const registeredHandlers = new Map<string, (...args: any[]) => Promise<void>>();
+
+      const fakeSocket: any = {
+        id: `sock_${user.userId}_${deviceId || 'default'}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        user,
+        sessionId: boundSessionId,
+        deviceId,
+        handshake: {
+          auth: { deviceId },
+          query: { sessionId: boundSessionId, deviceId },
+        },
+        data: {},
+        joinedRooms,
+        emittedEvents,
+        join: async (room: string) => {
+          joinedRooms.add(room);
+        },
+        leave: async (room: string) => {
+          joinedRooms.delete(room);
+        },
+        emit: (event: string, payload: any) => {
+          emittedEvents.push({ event, payload });
+          emitter.emit(event, payload);
+        },
+        on: (event: string, handler: (...args: any[]) => Promise<void>) => {
+          registeredHandlers.set(event, handler);
+        },
+        to: () => ({ emit: () => {} }),
+        volatile: { to: () => ({ emit: () => {} }) },
+        disconnect: () => {},
+        triggerClientEvent: async (event: string, payload?: any, ack?: any) => {
+          const handler = registeredHandlers.get(event);
+          assert.ok(handler, `Handler for ${event} must be registered`);
+          await handler(payload, ack);
+        },
+      };
+      return fakeSocket;
+    };
+
+    const roomGoal = `sess_goal_${Date.now()}`;
+
+    const teacherSocket = createTestSocket(
+      {
+        userId: 'teacher_501',
+        name: 'Dr. H.C. Verma',
+        role: 'teacher',
+        batchId: roomGoal,
+        sessionId: roomGoal,
+      },
+      roomGoal,
+      'dev_teacher_1'
+    );
+    await handleConnection(teacherSocket);
+    await teacherSocket.triggerClientEvent('JOIN_ROOM', { sessionId: roomGoal, lastSeqId: 0 });
+
+    const studentDev1Socket = createTestSocket(
+      {
+        userId: 'student_101',
+        name: 'Rahul Verma',
+        role: 'student',
+        batchId: roomGoal,
+        sessionId: roomGoal,
+      },
+      roomGoal,
+      'dev_student_phone'
+    );
+    await handleConnection(studentDev1Socket);
+    await studentDev1Socket.triggerClientEvent('JOIN_ROOM', {
+      sessionId: roomGoal,
+      lastSeqId: 0,
+      deviceId: 'dev_student_phone',
+    });
+    assert.equal(
+      studentDev1Socket.joinedRooms.has(roomGoal),
+      true,
+      'First device for student_101 must join roomGoal'
+    );
+
+    // 1. Student with whiteboard edit permission attempts WHITEBOARD_CLEAR -> must be rejected!
+    await AudioStageController.grantWhiteboardAccess(roomGoal, 'student_101');
+    await WhiteboardEngine.syncElements(roomGoal, [
+      { id: 'teacher_diagram_1', type: 'rectangle', version: 1, x: 10, y: 10, isDeleted: false },
+    ]);
+    await studentDev1Socket.triggerClientEvent('WHITEBOARD_CLEAR');
+    const elementsAfterStudentClearAttempt = await WhiteboardEngine.getAllElements(roomGoal);
+    assert.equal(
+      elementsAfterStudentClearAttempt.length,
+      1,
+      'Student must NOT be allowed to clear the whiteboard via WHITEBOARD_CLEAR even when granted whiteboard drawing permission'
+    );
+
+    // Teacher WHITEBOARD_CLEAR -> must succeed!
+    await teacherSocket.triggerClientEvent('WHITEBOARD_CLEAR');
+    const elementsAfterTeacherClear = await WhiteboardEngine.getAllElements(roomGoal);
+    assert.equal(elementsAfterTeacherClear.length, 0, 'Teacher WHITEBOARD_CLEAR must clear the board');
+
+    // 2. Second device (dev_student_laptop) for student_101 attempts JOIN_ROOM -> must be blocked!
+    const studentDev2Socket = createTestSocket(
+      {
+        userId: 'student_101',
+        name: 'Rahul Verma',
+        role: 'student',
+        batchId: roomGoal,
+        sessionId: roomGoal,
+      },
+      roomGoal,
+      'dev_student_laptop'
+    );
+    await handleConnection(studentDev2Socket);
+    await studentDev2Socket.triggerClientEvent('JOIN_ROOM', {
+      sessionId: roomGoal,
+      lastSeqId: 0,
+      deviceId: 'dev_student_laptop',
+    });
+
+    const blockedEvent = studentDev2Socket.emittedEvents.find(
+      (e: any) => e.event === 'MULTI_DEVICE_BLOCKED'
+    );
+    assert.ok(blockedEvent, 'Second device must receive MULTI_DEVICE_BLOCKED when multi-device is disabled');
+    assert.equal(
+      studentDev2Socket.joinedRooms.has(roomGoal),
+      false,
+      'Blocked second device must not join the Socket.IO room'
+    );
+
+    // 3. Host Teacher enables multi-device access for student_101 via AUDIO_SET_STUDENT_MULTI_DEVICE
+    await teacherSocket.triggerClientEvent('AUDIO_SET_STUDENT_MULTI_DEVICE', {
+      studentId: 'student_101',
+      allow: true,
+    });
+
+    // Now dev_student_laptop retries JOIN_ROOM -> succeeds!
+    await studentDev2Socket.triggerClientEvent('JOIN_ROOM', {
+      sessionId: roomGoal,
+      lastSeqId: 0,
+      deviceId: 'dev_student_laptop',
+    });
+    assert.equal(
+      studentDev2Socket.joinedRooms.has(roomGoal),
+      true,
+      'Second device must be allowed to join after Host Teacher enables multi-device for student_101'
+    );
+
+    // 4. Independent device microphones: Teacher grants mic to student_101, both devices activate mic, then dev_student_phone self-mutes
+    await AudioStageController.grantStudentMic(roomGoal, 'student_101', false);
+    await (AudioStageController as any).setStudentDeviceMicState(
+      roomGoal,
+      'student_101',
+      'dev_student_phone',
+      true
+    );
+    await (AudioStageController as any).setStudentDeviceMicState(
+      roomGoal,
+      'student_101',
+      'dev_student_laptop',
+      true
+    );
+
+    await studentDev1Socket.triggerClientEvent('AUDIO_STUDENT_SELF_MUTE', {
+      studentId: 'student_101',
+      deviceId: 'dev_student_phone',
+    });
+
+    const activeMics = await AudioStageController.getActiveStudentMics(roomGoal);
+    assert.ok(
+      activeMics.includes('student_101'),
+      'student_101 must remain in activeStudentMics when dev_student_phone mutes because dev_student_laptop is still unmuted'
+    );
+  });
+
+  it('10. Bidirectional Whiteboard & Content Sync Across Host, Co-Host, and Student with Board Access', async () => {
+    const { EventEmitter } = await import('node:events');
+    const { AudioStageController } = await import('../../src/modules/audio-stage/audio.controller');
+    const { WhiteboardEngine } = await import('../../src/modules/whiteboard/whiteboard.engine');
+    const { ContentEngine } = await import('../../src/modules/content-sync/content.engine');
+
+    const connectionListeners = server.io.listeners('connection') as Array<(socket: any) => Promise<void>>;
+    const handleConnection = connectionListeners[0];
+
+    const createTestSocket = (user: any, boundSessionId: string, deviceId?: string) => {
+      const emitter = new EventEmitter();
+      const emittedEvents: Array<{ event: string; payload: any }> = [];
+      const joinedRooms = new Set<string>();
+      const registeredHandlers = new Map<string, (...args: any[]) => Promise<void>>();
+
+      const fakeSocket: any = {
+        id: `sock_${user.userId}_${deviceId || 'default'}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        user,
+        sessionId: boundSessionId,
+        deviceId,
+        handshake: {
+          auth: { deviceId },
+          query: { sessionId: boundSessionId, deviceId },
+        },
+        data: {},
+        joinedRooms,
+        emittedEvents,
+        join: async (room: string) => {
+          joinedRooms.add(room);
+        },
+        leave: async (room: string) => {
+          joinedRooms.delete(room);
+        },
+        emit: (event: string, payload: any) => {
+          emittedEvents.push({ event, payload });
+          emitter.emit(event, payload);
+        },
+        on: (event: string, handler: (...args: any[]) => Promise<void>) => {
+          registeredHandlers.set(event, handler);
+        },
+        to: () => ({ emit: () => {} }),
+        volatile: { to: () => ({ emit: () => {} }) },
+        disconnect: () => {},
+        triggerClientEvent: async (event: string, payload?: any, ack?: any) => {
+          const handler = registeredHandlers.get(event);
+          assert.ok(handler, `Handler for ${event} must be registered`);
+          await handler(payload, ack);
+        },
+      };
+      return fakeSocket;
+    };
+
+    const roomSync = 'sess_bidirectional_sync_test';
+
+    const hostSocket = createTestSocket(
+      {
+        userId: 'teacher_501',
+        name: 'Dr. Anand Sharma',
+        role: 'teacher',
+        batchId: roomSync,
+        sessionId: roomSync,
+      },
+      roomSync,
+      'dev_host'
+    );
+    const coHostSocket = createTestSocket(
+      {
+        userId: 'teacher_502',
+        name: 'Prof. Neha Verma',
+        role: 'teacher',
+        batchId: roomSync,
+        sessionId: roomSync,
+      },
+      roomSync,
+      'dev_cohost'
+    );
+    const studentSocket = createTestSocket(
+      {
+        userId: 'student_101',
+        name: 'Rahul Verma',
+        role: 'student',
+        batchId: roomSync,
+        sessionId: roomSync,
+      },
+      roomSync,
+      'dev_student_101'
+    );
+    const viewerStudentSocket = createTestSocket(
+      {
+        userId: 'student_999',
+        name: 'Priya Viewer',
+        role: 'student',
+        batchId: roomSync,
+        sessionId: roomSync,
+      },
+      roomSync,
+      'dev_student_999'
+    );
+
+    await handleConnection(hostSocket);
+    await handleConnection(coHostSocket);
+    await handleConnection(studentSocket);
+    await handleConnection(viewerStudentSocket);
+
+    await hostSocket.triggerClientEvent('JOIN_ROOM', { sessionId: roomSync, lastSeqId: 0 });
+    await coHostSocket.triggerClientEvent('JOIN_ROOM', { sessionId: roomSync, lastSeqId: 0 });
+    await studentSocket.triggerClientEvent('JOIN_ROOM', { sessionId: roomSync, lastSeqId: 0 });
+    await viewerStudentSocket.triggerClientEvent('JOIN_ROOM', { sessionId: roomSync, lastSeqId: 0 });
+
+    // 1. Host scrolls Whiteboard camera -> Co-Host & Students receive TEACHER_CAM_UPDATE with authorId='teacher_501'
+    await hostSocket.triggerClientEvent('TEACHER_CAM_UPDATE', {
+      x: -420,
+      y: -310,
+      w: 1280,
+      h: 720,
+      zoom: 1.25,
+    });
+    const hostCamState = await WhiteboardEngine.getTeacherCam(roomSync);
+    assert.equal(hostCamState.x, -420);
+    assert.equal(hostCamState.y, -310);
+    assert.equal(hostCamState.authorId, 'teacher_501');
+
+    // 2. Host grants Co-Host (teacher_502) Whiteboard access -> Co-Host scrolls Whiteboard camera -> updates state with authorId='teacher_502'
+    await AudioStageController.setCoTeacherWhiteboardAccess(roomSync, 'teacher_502', true);
+    await coHostSocket.triggerClientEvent('TEACHER_CAM_UPDATE', {
+      x: -800,
+      y: -600,
+      w: 1440,
+      h: 900,
+      zoom: 1.5,
+    });
+    const coHostCamState = await WhiteboardEngine.getTeacherCam(roomSync);
+    assert.equal(coHostCamState.x, -800);
+    assert.equal(coHostCamState.y, -600);
+    assert.equal(coHostCamState.authorId, 'teacher_502');
+
+    // 3. Unauthorized viewer student (student_999) attempts TEACHER_CAM_UPDATE -> ignored!
+    await viewerStudentSocket.triggerClientEvent('TEACHER_CAM_UPDATE', {
+      x: 9999,
+      y: 9999,
+      w: 800,
+      h: 600,
+      zoom: 1,
+    });
+    const camAfterUnauthorized = await WhiteboardEngine.getTeacherCam(roomSync);
+    assert.equal(
+      camAfterUnauthorized.x,
+      -800,
+      'Unauthorized student must not be able to overwrite TEACHER_CAM_UPDATE'
+    );
+
+    // 4. Grant student_101 whiteboard access -> student_101 can now sync TEACHER_CAM_UPDATE, CONTENT_SCROLL_SYNC, and CONTENT_LASER_MOVE
+    await AudioStageController.grantWhiteboardAccess(roomSync, 'student_101');
+
+    await studentSocket.triggerClientEvent('TEACHER_CAM_UPDATE', {
+      x: -150,
+      y: -250,
+      w: 1024,
+      h: 768,
+      zoom: 1.1,
+    });
+    const studentCamState = await WhiteboardEngine.getTeacherCam(roomSync);
+    assert.equal(studentCamState.x, -150);
+    assert.equal(studentCamState.y, -250);
+    assert.equal(studentCamState.authorId, 'student_101');
+
+    // 5. Content Mode Scroll Sync from Host, Co-Host, and Authorized Student
+    await hostSocket.triggerClientEvent('CONTENT_SCROLL_SYNC', {
+      activeBlockId: 'blk_faraday_law',
+      blockOffsetRatio: 0.45,
+    });
+    let contentState = await ContentEngine.getState(roomSync);
+    assert.equal(contentState.activeBlockId, 'blk_faraday_law');
+    assert.equal(contentState.blockOffsetRatio, 0.45);
+    assert.equal(contentState.scrollAuthorId, 'teacher_501');
+
+    await coHostSocket.triggerClientEvent('CONTENT_SCROLL_SYNC', {
+      activeBlockId: 'blk_lenz_law',
+      blockOffsetRatio: 0.75,
+    });
+    contentState = await ContentEngine.getState(roomSync);
+    assert.equal(contentState.activeBlockId, 'blk_lenz_law');
+    assert.equal(contentState.blockOffsetRatio, 0.75);
+    assert.equal(contentState.scrollAuthorId, 'teacher_502');
+
+    await studentSocket.triggerClientEvent('CONTENT_SCROLL_SYNC', {
+      activeBlockId: 'blk_summary',
+      blockOffsetRatio: 0.9,
+    });
+    contentState = await ContentEngine.getState(roomSync);
+    assert.equal(contentState.activeBlockId, 'blk_summary');
+    assert.equal(contentState.blockOffsetRatio, 0.9);
+    assert.equal(contentState.scrollAuthorId, 'student_101');
+
+    // Unauthorized viewer student cannot overwrite CONTENT_SCROLL_SYNC
+    await viewerStudentSocket.triggerClientEvent('CONTENT_SCROLL_SYNC', {
+      activeBlockId: 'blk_header',
+      blockOffsetRatio: 0,
+    });
+    contentState = await ContentEngine.getState(roomSync);
+    assert.equal(
+      contentState.activeBlockId,
+      'blk_summary',
+      'Unauthorized viewer student must not overwrite CONTENT_SCROLL_SYNC'
+    );
+  });
 });

@@ -102,6 +102,9 @@ export interface TeacherCam {
   Zt: number;
   Wt: number;
   Ht: number;
+  authorId?: string;
+  authorName?: string;
+  updatedAt?: number;
 }
 
 export interface LaserPointerState {
@@ -115,6 +118,9 @@ export interface LaserPointerState {
   regionId?: string;
   regionRx?: number;
   regionRy?: number;
+  authorId?: string;
+  authorName?: string;
+  updatedAt?: number;
 }
 
 export interface WhiteboardCursorState {
@@ -161,6 +167,8 @@ export interface ContentSyncState {
   activeTopicId: string;
   activeBlockId: string;
   blockOffsetRatio: number;
+  scrollAuthorId?: string;
+  scrollUpdatedAt?: number;
   penStrokes: ContentStroke[];
   laserPointer: LaserPointerState;
 }
@@ -178,6 +186,7 @@ export interface RaisedHandEntry {
   avatar?: string;
   rollNumber?: string;
   raisedAt: number;
+  deviceId?: string;
 }
 
 export interface InvitedTeacherEntry {
@@ -200,6 +209,7 @@ export interface AudioStageState {
   invitedTeachers?: InvitedTeacherEntry[];
   whiteboardEditors?: string[];
   allowStudentUnmute?: boolean;
+  multiDeviceStudents?: string[];
 }
 
 export interface SessionSnapshot {

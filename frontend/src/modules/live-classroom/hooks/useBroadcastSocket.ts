@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
+// @ts-ignore - socket.io-msgpack-parser ships an empty index.d.ts on npm
 import msgpackParser from '@socket.io/msgpack-parser';
 import { getApiBaseUrl } from '../services/curriculumClient';
 import { ContentRegionId } from '../utils/contentSyncMath';
@@ -76,6 +77,9 @@ export interface WhiteboardCameraState {
   zoom: number;
   viewportWidth: number;
   viewportHeight: number;
+  authorId?: string;
+  authorName?: string;
+  updatedAt?: number;
 }
 
 export interface WhiteboardCursorState {
@@ -121,6 +125,8 @@ export interface ContentModeState {
   scrollAnchor: {
     blockId: string;
     offsetRatio: number;
+    authorId?: string;
+    updatedAt?: number;
   };
   penStrokes: ContentStroke[];
 }
@@ -141,6 +147,9 @@ export interface LaserPointerState {
   regionId?: ContentRegionId;
   regionRx?: number;
   regionRy?: number;
+  authorId?: string;
+  authorName?: string;
+  updatedAt?: number;
 }
 
 export interface InvitedTeacherEntry {
@@ -171,6 +180,34 @@ export interface AudioStageState {
   invitedTeachers?: InvitedTeacherEntry[];
   whiteboardEditors?: string[];
   allowStudentUnmute?: boolean;
+  multiDeviceStudents?: string[];
+}
+
+const CLIENT_DEVICE_STORAGE_KEY = 'broadcast_client_device_id';
+
+/**
+ * Generates or retrieves a persistent per-device identifier so the backend can:
+ * 1. Enforce single-device student join by default (unless Host allows multi-device for that student)
+ * 2. Mint distinct LiveKit participant identities (`student_101__dev_xyz`) so multi-device mics work independently
+ */
+export function getOrCreateClientDeviceId(): string {
+  if (typeof window === 'undefined') return 'dev_ssr';
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const urlDeviceId = params.get('deviceId');
+    if (urlDeviceId && urlDeviceId.trim().length > 0) {
+      return urlDeviceId.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+    }
+    const existing = window.localStorage.getItem(CLIENT_DEVICE_STORAGE_KEY);
+    if (existing && existing.trim().length > 0) {
+      return existing.trim();
+    }
+    const generated = `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    window.localStorage.setItem(CLIENT_DEVICE_STORAGE_KEY, generated);
+    return generated;
+  } catch {
+    return `dev_${Math.random().toString(36).slice(2, 10)}`;
+  }
 }
 
 export interface StudentAttendanceSummary {
@@ -194,6 +231,7 @@ export interface UseBroadcastSocketParams {
   token?: string;
   studentId?: string;
   teacherId?: string;
+  deviceId?: string;
   onStudentTokenRefresh?: (token: string, autoActivate?: boolean) => void;
   onStudentMicRevoked?: () => void;
 }
@@ -204,16 +242,26 @@ export function useBroadcastSocket({
   token,
   studentId,
   teacherId,
+  deviceId: propDeviceId,
   onStudentTokenRefresh,
   onStudentMicRevoked,
 }: UseBroadcastSocketParams) {
   const socketRef = useRef<Socket | null>(null);
   const seqIdRef = useRef<number>(0);
+  const clientDeviceIdRef = useRef<string>(propDeviceId || getOrCreateClientDeviceId());
+  if (propDeviceId && clientDeviceIdRef.current !== propDeviceId) {
+    clientDeviceIdRef.current = propDeviceId;
+  }
 
   const onStudentMicRevokedRef = useRef(onStudentMicRevoked);
   useEffect(() => {
     onStudentMicRevokedRef.current = onStudentMicRevoked;
   }, [onStudentMicRevoked]);
+
+  const onStudentTokenRefreshRef = useRef(onStudentTokenRefresh);
+  useEffect(() => {
+    onStudentTokenRefreshRef.current = onStudentTokenRefresh;
+  }, [onStudentTokenRefresh]);
 
   const [isConnected, setIsConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
@@ -247,8 +295,14 @@ export function useBroadcastSocket({
   const [activeTopicId, setActiveTopicId] = useState<string>('top_resistance');
   const [activeBlockId, setActiveBlockId] = useState<string>('blk_header');
   const [blockOffsetRatio, setBlockOffsetRatio] = useState<number>(0);
+  const [scrollAuthorId, setScrollAuthorId] = useState<string | undefined>(undefined);
+  const [scrollUpdatedAt, setScrollUpdatedAt] = useState<number>(0);
   const [penStrokes, setPenStrokes] = useState<any[]>([]);
   const [laserPointer, setLaserPointer] = useState<any>({ x: 0, y: 0, active: false });
+  const localUserId =
+    role === 'teacher'
+      ? `teacher_${String(teacherId || '501').replace(/^teacher_/, '')}`
+      : `student_${String(studentId || '101').replace(/^student_/, '')}`;
 
   // Audio Stage & Collaboration Permissions State
   // All microphones are muted by default (teacherMicActive = false)
@@ -258,6 +312,17 @@ export function useBroadcastSocket({
   const [raisedHands, setRaisedHands] = useState<any[]>([]);
   const [invitedTeachers, setInvitedTeachers] = useState<InvitedTeacherEntry[]>([]);
   const [whiteboardEditors, setWhiteboardEditors] = useState<string[]>([]);
+  const [multiDeviceStudents, setMultiDeviceStudents] = useState<string[]>([]);
+  const [multiDeviceBlocked, setMultiDeviceBlocked] = useState<{
+    reason?: string;
+    message: string;
+    studentId?: string;
+    existingDeviceIds?: string[];
+  } | null>(null);
+  const multiDeviceBlockedRef = useRef<boolean>(false);
+  useEffect(() => {
+    multiDeviceBlockedRef.current = Boolean(multiDeviceBlocked);
+  }, [multiDeviceBlocked]);
   const [audioError, setAudioError] = useState<{
     message: string;
     canForceReplace?: boolean;
@@ -283,6 +348,7 @@ export function useBroadcastSocket({
     setSeqId(0);
     const baseUrl = getApiBaseUrl();
     const cleanTeacherId = teacherId ? String(teacherId).replace(/^teacher_/, '') : '501';
+    const clientDeviceId = clientDeviceIdRef.current;
 
     const socket = io(baseUrl, {
       parser: msgpackParser,
@@ -296,12 +362,14 @@ export function useBroadcastSocket({
         studentId,
         teacherId: `teacher_${cleanTeacherId}`,
         sessionId,
+        deviceId: clientDeviceId,
       },
       query: {
         sessionId,
         role,
         studentId: studentId || '101',
         teacherId: `teacher_${cleanTeacherId}`,
+        deviceId: clientDeviceId,
       },
       reconnection: true,
       reconnectionAttempts: Infinity,
@@ -317,10 +385,11 @@ export function useBroadcastSocket({
       setIsReconnecting(false);
       setReconnectAttempt(0);
 
-      // Trigger Join Room and catch-up with our highest known seqId from ref
+      // Trigger Join Room and catch-up with our highest known seqId from ref + per-device ID
       socket.emit('JOIN_ROOM', {
         sessionId,
         lastSeqId: seqIdRef.current,
+        deviceId: clientDeviceId,
       });
     });
 
@@ -346,8 +415,20 @@ export function useBroadcastSocket({
       }
     });
 
-    // 1. Room Joined confirmation
+    // 1. Room Joined confirmation & Single-Device Enforcement
+    socket.on('MULTI_DEVICE_BLOCKED', (data: any) => {
+      setMultiDeviceBlocked({
+        reason: data?.reason || 'MULTI_DEVICE_NOT_ALLOWED',
+        message:
+          data?.message ||
+          'You are already joined from another device. Students can join from one device only unless the Host Teacher enables multi-device access for your account.',
+        studentId: data?.studentId,
+        existingDeviceIds: data?.existingDeviceIds,
+      });
+    });
+
     socket.on('ROOM_JOINED', (data: any) => {
+      setMultiDeviceBlocked(null);
       if (data.onlineCount !== undefined) {
         setOnlineCount(data.onlineCount);
       }
@@ -366,6 +447,9 @@ export function useBroadcastSocket({
         }
         if (Array.isArray(data.audioStage.whiteboardEditors)) {
           setWhiteboardEditors(data.audioStage.whiteboardEditors);
+        }
+        if (Array.isArray(data.audioStage.multiDeviceStudents)) {
+          setMultiDeviceStudents(data.audioStage.multiDeviceStudents);
         }
       }
     });
@@ -390,6 +474,12 @@ export function useBroadcastSocket({
         if (snap.contentState.blockOffsetRatio !== undefined) {
           setBlockOffsetRatio(snap.contentState.blockOffsetRatio);
         }
+        if (snap.contentState.scrollAuthorId) {
+          setScrollAuthorId(snap.contentState.scrollAuthorId);
+        }
+        if (snap.contentState.scrollUpdatedAt) {
+          setScrollUpdatedAt(snap.contentState.scrollUpdatedAt);
+        }
         if (snap.contentState.penStrokes) setPenStrokes(snap.contentState.penStrokes);
       }
       if (snap.audioStage) {
@@ -410,6 +500,9 @@ export function useBroadcastSocket({
         }
         if (Array.isArray(snap.audioStage.whiteboardEditors)) {
           setWhiteboardEditors(snap.audioStage.whiteboardEditors);
+        }
+        if (Array.isArray(snap.audioStage.multiDeviceStudents)) {
+          setMultiDeviceStudents(snap.audioStage.multiDeviceStudents);
         }
       }
     });
@@ -457,6 +550,8 @@ export function useBroadcastSocket({
         if (p.type === 'CONTENT_SCROLL_SYNC') {
           setActiveBlockId(p.payload.activeBlockId);
           setBlockOffsetRatio(p.payload.blockOffsetRatio);
+          if (p.payload.authorId) setScrollAuthorId(p.payload.authorId);
+          setScrollUpdatedAt(p.payload.updatedAt || p.timestamp || Date.now());
         }
         if (p.type === 'NAV_STATE_CHANGE') {
           setActiveLessonId(p.payload.activeLessonId);
@@ -547,6 +642,8 @@ export function useBroadcastSocket({
       if (data?.seqId) updateSeqId(data.seqId);
       setActiveBlockId(data.activeBlockId);
       setBlockOffsetRatio(data.blockOffsetRatio);
+      if (data?.authorId) setScrollAuthorId(data.authorId);
+      setScrollUpdatedAt(data?.updatedAt || Date.now());
     });
 
     // 8. Navigation State Sync
@@ -641,8 +738,13 @@ export function useBroadcastSocket({
         `student_${data.studentId}` === myUserId;
 
       if (isTargetMe) {
-        if (data.token && onStudentTokenRefresh) {
-          onStudentTokenRefresh(data.token, Boolean(data.autoActivate));
+        const grantedToken =
+          (data.deviceTokens && data.deviceTokens[clientDeviceId]) || data.token;
+        const shouldAutoActivate =
+          Boolean(data.autoActivate) &&
+          (!data.targetDeviceId || data.targetDeviceId === clientDeviceId);
+        if (grantedToken && onStudentTokenRefreshRef.current) {
+          onStudentTokenRefreshRef.current(grantedToken, shouldAutoActivate);
         }
       }
     });
@@ -652,17 +754,47 @@ export function useBroadcastSocket({
     });
 
     socket.on('AUDIO_MIC_REVOKED', (data: any) => {
-      setActiveStudentMics((prev) => prev.filter((id) => id !== data.studentId));
+      if (!data?.deviceId) {
+        setActiveStudentMics((prev) => prev.filter((id) => id !== data.studentId));
+      }
       if (role === 'student' && data?.studentId) {
         const isTargetMe =
           data.studentId === studentId ||
           data.studentId === `student_${studentId}` ||
           data.studentId.replace(/^student_/, '') === studentId;
         if (isTargetMe) {
+          // If a specific deviceId was muted, only revoke local mic on that device
+          if (data.deviceId && data.deviceId !== clientDeviceId) {
+            return;
+          }
           onStudentMicRevokedRef.current?.();
         }
       }
     });
+
+    socket.on(
+      'STUDENT_MULTI_DEVICE_UPDATED',
+      (data: {
+        studentId?: string;
+        allowMultiDevice?: boolean;
+        multiDeviceStudents?: string[];
+      }) => {
+        if (Array.isArray(data?.multiDeviceStudents)) {
+          setMultiDeviceStudents(data.multiDeviceStudents);
+        }
+        if (role === 'student' && data?.allowMultiDevice && multiDeviceBlockedRef.current) {
+          const normMyId = `student_${String(studentId || '101').replace(/^student_/, '')}`;
+          if (!data.studentId || data.studentId === normMyId) {
+            setMultiDeviceBlocked(null);
+            socket.emit('JOIN_ROOM', {
+              sessionId,
+              lastSeqId: seqIdRef.current,
+              deviceId: clientDeviceId,
+            });
+          }
+        }
+      }
+    );
 
     socket.on('AUDIO_MUTE_ALL', () => {
       setActiveStudentMics([]);
@@ -708,7 +840,7 @@ export function useBroadcastSocket({
     // Heartbeat ping interval for student (every 30 seconds)
     const heartbeatTimer = setInterval(() => {
       if (socket.connected && role === 'student') {
-        socket.emit('HEARTBEAT');
+        socket.emit('HEARTBEAT', { deviceId: clientDeviceId });
         setLastHeartbeat(Date.now());
       }
     }, 30000);
@@ -736,6 +868,8 @@ export function useBroadcastSocket({
         ...cam,
         Cx: typeof cam?.Cx === 'number' ? Math.round(cam.Cx * 10) / 10 : 0,
         Cy: typeof cam?.Cy === 'number' ? Math.round(cam.Cy * 10) / 10 : 0,
+        authorId: localUserId,
+        updatedAt: Date.now(),
       };
       setTeacherCam((prev: any) => {
         if (
@@ -750,11 +884,11 @@ export function useBroadcastSocket({
         }
         return roundedCam;
       });
-      if (socketRef.current?.connected && role === 'teacher') {
+      if (socketRef.current?.connected) {
         socketRef.current.emit('TEACHER_CAM_UPDATE', roundedCam);
       }
     },
-    [role]
+    [localUserId]
   );
 
   const broadcastWhiteboardCursor = useCallback(
@@ -870,14 +1004,17 @@ export function useBroadcastSocket({
     (blockId: string, ratio: number) => {
       setActiveBlockId(blockId);
       setBlockOffsetRatio(ratio);
-      if (socketRef.current?.connected && role === 'teacher') {
+      setScrollAuthorId(localUserId);
+      setScrollUpdatedAt(Date.now());
+      if (socketRef.current?.connected) {
         socketRef.current.emit('CONTENT_SCROLL_SYNC', {
           activeBlockId: blockId,
           blockOffsetRatio: ratio,
+          authorId: localUserId,
         });
       }
     },
-    [role]
+    [localUserId]
   );
 
   const broadcastNavSync = useCallback(
@@ -912,21 +1049,21 @@ export function useBroadcastSocket({
           : [],
       };
       setPenStrokes((prev) => [...prev, roundedStroke]);
-      if (socketRef.current?.connected && role === 'teacher') {
+      if (socketRef.current?.connected) {
         socketRef.current.emit('CONTENT_STROKE_ADD', roundedStroke);
       }
     },
-    [role]
+    []
   );
 
   const broadcastDeleteStroke = useCallback(
     (lessonId: string, strokeId: string) => {
       setPenStrokes((prev) => prev.filter((s) => s.id !== strokeId));
-      if (socketRef.current?.connected && role === 'teacher') {
+      if (socketRef.current?.connected) {
         socketRef.current.emit('CONTENT_STROKE_DELETE', { lessonId, strokeId });
       }
     },
-    [role]
+    []
   );
 
   const broadcastClearStrokes = useCallback(
@@ -945,18 +1082,20 @@ export function useBroadcastSocket({
         ...laser,
         x: typeof laser?.x === 'number' ? Math.round(laser.x * 10) / 10 : 0,
         y: typeof laser?.y === 'number' ? Math.round(laser.y * 10) / 10 : 0,
+        authorId: localUserId,
+        updatedAt: Date.now(),
       };
       setLaserPointer(roundedLaser);
-      if (socketRef.current?.connected && role === 'teacher') {
+      if (socketRef.current?.connected) {
         socketRef.current.emit('CONTENT_LASER_MOVE', roundedLaser);
       }
     },
-    [role]
+    [localUserId]
   );
 
   const raiseHand = useCallback(() => {
     if (socketRef.current?.connected) {
-      socketRef.current.emit('AUDIO_RAISE_HAND');
+      socketRef.current.emit('AUDIO_RAISE_HAND', { deviceId: clientDeviceIdRef.current });
     }
   }, []);
 
@@ -1008,17 +1147,66 @@ export function useBroadcastSocket({
   const studentSelfUnmute = useCallback(() => {
     if (socketRef.current?.connected && role === 'student') {
       const normId = studentId ? `student_${studentId.replace(/^student_/, '')}` : undefined;
-      socketRef.current.emit('AUDIO_STUDENT_SELF_UNMUTE', { studentId: normId });
+      socketRef.current.emit('AUDIO_STUDENT_SELF_UNMUTE', {
+        studentId: normId,
+        deviceId: clientDeviceIdRef.current,
+      });
     }
   }, [role, studentId]);
 
-  // Student self mute
+  // Student self mute (scoped to this deviceId so another device of the same student stays unmuted independently)
   const studentSelfMute = useCallback(() => {
     if (socketRef.current?.connected && role === 'student') {
       const normId = studentId ? `student_${studentId.replace(/^student_/, '')}` : undefined;
-      socketRef.current.emit('AUDIO_STUDENT_SELF_MUTE', { studentId: normId });
+      socketRef.current.emit('AUDIO_STUDENT_SELF_MUTE', {
+        studentId: normId,
+        deviceId: clientDeviceIdRef.current,
+      });
     }
   }, [role, studentId]);
+
+  // Notify server of this specific device's active microphone state
+  const notifyDeviceMicActive = useCallback(
+    (active: boolean) => {
+      if (socketRef.current?.connected && role === 'student') {
+        socketRef.current.emit('AUDIO_DEVICE_MIC_ACTIVE', {
+          deviceId: clientDeviceIdRef.current,
+          active,
+        });
+      }
+    },
+    [role]
+  );
+
+  // Host Teacher toggles multi-device join permission for a specific student
+  const setStudentMultiDeviceAccess = useCallback(
+    (targetStudentId: string, allow: boolean) => {
+      const normId = `student_${String(targetStudentId).replace(/^student_/, '')}`;
+      setMultiDeviceStudents((prev) =>
+        allow ? Array.from(new Set([...prev, normId])) : prev.filter((id) => id !== normId)
+      );
+      if (socketRef.current?.connected && role === 'teacher') {
+        socketRef.current.emit('AUDIO_SET_STUDENT_MULTI_DEVICE', {
+          studentId: normId,
+          allow,
+        });
+      }
+    },
+    [role]
+  );
+
+  const retryJoinRoom = useCallback(() => {
+    setMultiDeviceBlocked(null);
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('JOIN_ROOM', {
+        sessionId,
+        lastSeqId: seqIdRef.current,
+        deviceId: clientDeviceIdRef.current,
+      });
+    } else {
+      socketRef.current?.connect();
+    }
+  }, [sessionId]);
 
   const broadcastTeacherMicState = useCallback(
     (active: boolean) => {
@@ -1118,9 +1306,13 @@ export function useBroadcastSocket({
     const sock = socketRef.current;
     if (sock) {
       if (sock.connected) {
-        sock.emit('LEAVE_SESSION', { sessionId }, () => {
-          sock.disconnect();
-        });
+        sock.emit(
+          'LEAVE_SESSION',
+          { sessionId, deviceId: clientDeviceIdRef.current },
+          () => {
+            sock.disconnect();
+          }
+        );
         window.setTimeout(() => {
           sock.disconnect();
         }, 120);
@@ -1181,6 +1373,8 @@ export function useBroadcastSocket({
     activeTopicId,
     activeBlockId,
     blockOffsetRatio,
+    scrollAuthorId,
+    scrollUpdatedAt,
     penStrokes,
     laserPointer,
     activeStudentMics,
@@ -1192,6 +1386,10 @@ export function useBroadcastSocket({
     setInvitedTeachers,
     whiteboardEditors,
     setWhiteboardEditors,
+    multiDeviceStudents,
+    setMultiDeviceStudents,
+    multiDeviceBlocked,
+    clientDeviceId: clientDeviceIdRef.current,
     audioError,
     // actions
     changeMode,
@@ -1215,6 +1413,9 @@ export function useBroadcastSocket({
     setAllowStudentUnmuteOption,
     studentSelfUnmute,
     studentSelfMute,
+    notifyDeviceMicActive,
+    setStudentMultiDeviceAccess,
+    retryJoinRoom,
     broadcastTeacherMicState,
     inviteCoTeacher,
     toggleCoTeacherWhiteboard,

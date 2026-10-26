@@ -960,4 +960,286 @@ describe('Phase 1 Unit Tests: JWT Verifier, StorageProvider, and SessionTimeline
       );
     });
   });
+
+  // ==========================================================================
+  // 10. Goal Deliverables: Comic Sans Default Font, Single-Device Join Enforcement & Independent Device Mics
+  // ==========================================================================
+  describe('10. Goal Deliverables: Comic Sans Injected Text, Single-Device Student Join Enforcement & Independent Device Mics', () => {
+    it('sets Comic Sans (fontFamily: 5) on injected whiteboard text blocks', async () => {
+      const sessionId = `sess_comic_sans_${Date.now()}`;
+      const elements = await WhiteboardEngine.injectContentBlockAsExcalidraw(sessionId, {
+        blockId: 'blk_comic_1',
+        title: 'Ohm Law',
+        content: 'V = I * R',
+        type: 'concept',
+      });
+      const textEl = elements.find((e) => e.type === 'text');
+      assert.ok(textEl, 'Injected elements must include a text element');
+      assert.equal(
+        textEl.fontFamily,
+        5,
+        'Default whiteboard injected text fontFamily must be 5 (Comic Sans)'
+      );
+    });
+
+    it('enforces single-device join per student by default and allows multi-device when enabled by Host Teacher', async () => {
+      const sessionId = `sess_single_dev_${Date.now()}`;
+
+      // 1. First device (dev_phone_1) joins for student_101 -> allowed
+      const firstJoin = await (AudioStageController as any).canStudentDeviceJoin(
+        sessionId,
+        'student_101',
+        'dev_phone_1',
+        'sock_1'
+      );
+      assert.equal(firstJoin.allowed, true, 'First device for student_101 must be allowed');
+
+      // 2. Same device (dev_phone_1) reconnects -> allowed
+      const sameDeviceRejoin = await (AudioStageController as any).canStudentDeviceJoin(
+        sessionId,
+        'student_101',
+        'dev_phone_1',
+        'sock_1b'
+      );
+      assert.equal(sameDeviceRejoin.allowed, true, 'Reconnecting from the same deviceId must be allowed');
+
+      // 3. Second device (dev_tablet_2) tries to join for student_101 -> blocked!
+      const secondDeviceJoin = await (AudioStageController as any).canStudentDeviceJoin(
+        sessionId,
+        'student_101',
+        'dev_tablet_2',
+        'sock_2'
+      );
+      assert.equal(
+        secondDeviceJoin.allowed,
+        false,
+        'Second device for student_101 must be blocked by default'
+      );
+      assert.equal(secondDeviceJoin.activeDeviceId, 'dev_phone_1');
+
+      // 4. Host Teacher enables multi-device access for student_101
+      const multiList = await (AudioStageController as any).setStudentMultiDeviceAccess(
+        sessionId,
+        'student_101',
+        true
+      );
+      assert.ok(
+        multiList.includes('student_101'),
+        'multiDeviceStudents list must include student_101 after Host enables it'
+      );
+
+      // 5. Now second device (dev_tablet_2) for student_101 is allowed!
+      const secondDeviceAfterGrant = await (AudioStageController as any).canStudentDeviceJoin(
+        sessionId,
+        'student_101',
+        'dev_tablet_2',
+        'sock_2'
+      );
+      assert.equal(
+        secondDeviceAfterGrant.allowed,
+        true,
+        'Second device for student_101 must be allowed after Host enables multi-device access'
+      );
+      assert.equal(secondDeviceAfterGrant.allowMultiDevice, true);
+
+      // 6. Other students (student_102) remain restricted to 1 device
+      await (AudioStageController as any).canStudentDeviceJoin(
+        sessionId,
+        'student_102',
+        'dev_s102_a',
+        'sock_3'
+      );
+      const otherStudentSecondDev = await (AudioStageController as any).canStudentDeviceJoin(
+        sessionId,
+        'student_102',
+        'dev_s102_b',
+        'sock_4'
+      );
+      assert.equal(
+        otherStudentSecondDev.allowed,
+        false,
+        'student_102 must remain single-device restricted'
+      );
+    });
+
+    it('mints distinct per-device LiveKit identities and isolates per-device mic mute state', async () => {
+      const sessionId = `sess_indep_mic_${Date.now()}`;
+      await (AudioStageController as any).setStudentMultiDeviceAccess(sessionId, 'student_101', true);
+      await (AudioStageController as any).canStudentDeviceJoin(
+        sessionId,
+        'student_101',
+        'dev_A',
+        'sock_A'
+      );
+      await (AudioStageController as any).canStudentDeviceJoin(
+        sessionId,
+        'student_101',
+        'dev_B',
+        'sock_B'
+      );
+
+      // 1. Verify getJoinToken produces distinct LiveKit participant identities per device
+      const tokenA = await AudioStageController.getJoinToken(
+        sessionId,
+        'student_101',
+        'Rahul Verma',
+        'student',
+        true,
+        'dev_A'
+      );
+      const tokenB = await AudioStageController.getJoinToken(
+        sessionId,
+        'student_101',
+        'Rahul Verma',
+        'student',
+        true,
+        'dev_B'
+      );
+      const payloadA = JSON.parse(
+        Buffer.from(tokenA.token.split('.')[1], 'base64url').toString('utf8')
+      );
+      const payloadB = JSON.parse(
+        Buffer.from(tokenB.token.split('.')[1], 'base64url').toString('utf8')
+      );
+      assert.equal(payloadA.sub, 'student_101__dev_A');
+      assert.equal(payloadB.sub, 'student_101__dev_B');
+
+      // 2. Grant mic to student_101 -> returns per-device tokens for both dev_A and dev_B
+      const grantRes = await AudioStageController.grantStudentMic(sessionId, 'student_101', false);
+      assert.equal(grantRes.success, true);
+      assert.ok(
+        (grantRes as any).deviceTokens?.dev_A && (grantRes as any).deviceTokens?.dev_B,
+        'grantStudentMic must return distinct deviceTokens for all active devices of student_101'
+      );
+
+      // 3. Both dev_A and dev_B turn on their mics
+      await (AudioStageController as any).setStudentDeviceMicState(
+        sessionId,
+        'student_101',
+        'dev_A',
+        true
+      );
+      await (AudioStageController as any).setStudentDeviceMicState(
+        sessionId,
+        'student_101',
+        'dev_B',
+        true
+      );
+
+      // 4. Student mutes ONLY dev_A -> dev_B must remain active and student_101 stays in activeStudentMics!
+      const muteDevARes = await (AudioStageController as any).muteStudentDevice(
+        sessionId,
+        'student_101',
+        'dev_A'
+      );
+      assert.equal(muteDevARes.anyDeviceMicActive, true, 'dev_B is still unmuted so anyDeviceMicActive must be true');
+      const activeMicsAfterDevAMute = await AudioStageController.getActiveStudentMics(sessionId);
+      assert.ok(
+        activeMicsAfterDevAMute.includes('student_101'),
+        'student_101 must remain in activeStudentMics while dev_B is still unmuted'
+      );
+
+      // 5. Now student also mutes dev_B -> anyDeviceMicActive becomes false
+      const muteDevBRes = await (AudioStageController as any).muteStudentDevice(
+        sessionId,
+        'student_101',
+        'dev_B'
+      );
+      assert.equal(muteDevBRes.anyDeviceMicActive, false, 'Both devices muted -> anyDeviceMicActive must be false');
+    });
+  });
+
+  // ==========================================================================
+  // 11. Non-Blocking Telegram Error Alerts, Service Watchdog & 11:00 PM Daily Health Report
+  // ==========================================================================
+  describe('11. Non-Blocking Telegram Error Alerts, Service Watchdog & 11:00 PM Daily Health Report', () => {
+    it('sends messages via common sendTelegramMessage, dispatches non-blocking background error alerts with deduplication, and triggers daily report at 23:00 IST', async () => {
+      const {
+        TelegramMonitorService,
+        sendTelegramMessage,
+        notifyTelegramErrorAsync,
+      } = await import('../../src/modules/monitoring/telegram.service');
+      const { redis } = await import('../../src/config/redis');
+
+      const capturedPayloads: Array<{ url: string; payload: Record<string, any> }> = [];
+      TelegramMonitorService.clearDedupeCache();
+      TelegramMonitorService.setTransport(async (url, payload) => {
+        capturedPayloads.push({ url, payload });
+        return {
+          ok: true,
+          status: 200,
+          data: { ok: true, result: { message_id: 9000 + capturedPayloads.length } },
+        };
+      });
+
+      try {
+        // 1. Common sendTelegramMessage function
+        const res1 = await sendTelegramMessage('<b>Test Common Function</b>', {
+          parseMode: 'HTML',
+        });
+        assert.equal(res1.ok, true);
+        assert.equal(capturedPayloads.length, 1);
+        assert.equal(capturedPayloads[0].payload.chat_id, '-5264089817');
+        assert.ok(capturedPayloads[0].url.includes('8624790281:'));
+
+        // 2. Non-blocking notifyTelegramErrorAsync + deduplication cooldown
+        notifyTelegramErrorAsync({
+          source: 'Fastify HTTP Server',
+          error: new Error('Database timeout in test'),
+          context: { method: 'POST', url: '/api/v1/sessions/init', statusCode: 500 },
+          dedupeKey: 'test_dedupe_err_1',
+          cooldownMs: 60_000,
+        });
+        // Duplicate error immediately after should be suppressed by cooldown
+        notifyTelegramErrorAsync({
+          source: 'Fastify HTTP Server',
+          error: new Error('Database timeout in test'),
+          context: { method: 'POST', url: '/api/v1/sessions/init', statusCode: 500 },
+          dedupeKey: 'test_dedupe_err_1',
+          cooldownMs: 60_000,
+        });
+
+        await new Promise((r) => setTimeout(r, 40));
+        assert.equal(
+          capturedPayloads.length,
+          2,
+          'Duplicate error within cooldown window must be suppressed'
+        );
+        assert.ok(
+          capturedPayloads[1].payload.text.includes('BROADCAST ERROR ALERT'),
+          'Error alert must include BROADCAST ERROR ALERT header'
+        );
+        assert.ok(
+          capturedPayloads[1].payload.text.includes('Database timeout in test'),
+          'Error alert must include error message'
+        );
+
+        // 3. Daily 11:00 PM (23:00 IST) schedule evaluation
+        // 2030-05-15T17:29:00.000Z is 22:59 IST -> should NOT trigger
+        const at2259Ist = new Date('2030-05-15T17:29:00.000Z');
+        const triggeredBefore = await TelegramMonitorService.evaluateDailyReportSchedule(at2259Ist);
+        assert.equal(triggeredBefore, false, 'Must not trigger daily report at 22:59 IST');
+
+        // 2030-05-15T17:30:00.000Z is 23:00 IST (11:00 PM IST) -> MUST trigger once
+        await redis.del('monitor:daily_health_report:2030-05-15');
+        const at2300Ist = new Date('2030-05-15T17:30:00.000Z');
+        const triggeredAt11Pm = await TelegramMonitorService.evaluateDailyReportSchedule(at2300Ist);
+        assert.equal(triggeredAt11Pm, true, 'Must trigger daily health report at 23:00 (11:00 PM) IST');
+
+        // Second evaluation in the same 23:00 IST minute must not duplicate
+        const triggeredAgainSameDay = await TelegramMonitorService.evaluateDailyReportSchedule(
+          at2300Ist
+        );
+        assert.equal(
+          triggeredAgainSameDay,
+          false,
+          'Must not send duplicate 11:00 PM report on the same calendar date'
+        );
+        await redis.del('monitor:daily_health_report:2030-05-15');
+      } finally {
+        TelegramMonitorService.setTransport(null);
+        TelegramMonitorService.clearDedupeCache();
+      }
+    });
+  });
 });

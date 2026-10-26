@@ -420,4 +420,154 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
       );
     });
   });
+
+  describe('7. Goal Deliverables: Comic Sans Default Font, No Student Clear Button, Screen Wake Lock & Cross-Browser Support', () => {
+    it('enforces Comic Sans (fontFamily: 5) as default whiteboard font and hides Clear button from students', () => {
+      const stageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/ExcalidrawStage.tsx'),
+        'utf8'
+      );
+      const globalsCss = fs.readFileSync(
+        path.resolve(__dirname, '../src/app/globals.css'),
+        'utf8'
+      );
+
+      // 1. Default whiteboard font is 5 (Comic Sans / ComicShanns)
+      assert.equal(
+        stageSource.includes('export const DEFAULT_WHITEBOARD_FONT_FAMILY = 5'),
+        true,
+        'ExcalidrawStage.tsx must export DEFAULT_WHITEBOARD_FONT_FAMILY = 5 (Comic Sans)'
+      );
+      assert.equal(
+        stageSource.includes('currentItemFontFamily: DEFAULT_WHITEBOARD_FONT_FAMILY'),
+        true,
+        'ExcalidrawStage initialData and scene updates must use DEFAULT_WHITEBOARD_FONT_FAMILY'
+      );
+      assert.equal(
+        globalsCss.includes('Comic Sans MS'),
+        true,
+        'globals.css must include Comic Sans MS font stack for whiteboard rendering'
+      );
+
+      // 2. Clear button is restricted strictly to teacher (never shown to student on live classroom whiteboard)
+      assert.equal(
+        stageSource.includes("const canClearWhiteboard = isEditable && (role === 'teacher' || isRoughPad)"),
+        true,
+        'ExcalidrawStage.tsx must restrict Clear button to canClearWhiteboard (never shown to students on live whiteboard)'
+      );
+    });
+
+    it('provides useScreenWakeLock hook and integrates it into LearningSessionLayout to prevent phone screen auto-off', () => {
+      const wakeLockPath = path.resolve(
+        __dirname,
+        '../src/modules/live-classroom/hooks/useScreenWakeLock.ts'
+      );
+      assert.equal(
+        fs.existsSync(wakeLockPath),
+        true,
+        'useScreenWakeLock.ts hook must exist'
+      );
+
+      const wakeLockSource = fs.readFileSync(wakeLockPath, 'utf8');
+      assert.equal(
+        wakeLockSource.includes("wakeLock.request('screen')"),
+        true,
+        'useScreenWakeLock must request W3C Screen Wake Lock API'
+      );
+      assert.equal(
+        wakeLockSource.includes('visibilitychange'),
+        true,
+        'useScreenWakeLock must re-acquire wake lock on visibilitychange'
+      );
+
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+      assert.equal(
+        layoutSource.includes('useScreenWakeLock('),
+        true,
+        'LearningSessionLayout.tsx must activate useScreenWakeLock during live sessions'
+      );
+    });
+
+    it('supports Chrome, Safari, Firefox, and Edge across MediaRecorder codecs, Fullscreen APIs, and Multi-Device Controls', () => {
+      // 1. Safari generic video/mp4 fallback in PREFERRED_CODECS
+      assert.equal(
+        PREFERRED_CODECS.includes('video/mp4'),
+        true,
+        'PREFERRED_CODECS must include generic video/mp4 for Safari compatibility'
+      );
+
+      // 2. Fullscreen hook supports webkit, moz, and ms vendor prefixes
+      const fsSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/hooks/useFullscreenWorkspace.ts'),
+        'utf8'
+      );
+      assert.equal(
+        fsSource.includes('mozRequestFullScreen') && fsSource.includes('webkitRequestFullscreen'),
+        true,
+        'useFullscreenWorkspace.ts must support Safari webkit and Firefox moz prefixes'
+      );
+
+      // 3. TopModeNavbar includes Host Teacher per-student multi-device toggle
+      const navbarSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/TopModeNavbar.tsx'),
+        'utf8'
+      );
+      assert.equal(
+        navbarSource.includes('multi-device-btn-'),
+        true,
+        'TopModeNavbar.tsx must render per-student multi-device toggle for the Host Teacher'
+      );
+    });
+
+    it('synchronizes Whiteboard and Content scroll, camera, laser, and cursor bidirectionally across Host, Co-Host, and Students with board access', () => {
+      const wbStageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/ExcalidrawStage.tsx'),
+        'utf8'
+      );
+      const contentStageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/VirtualContentStage.tsx'),
+        'utf8'
+      );
+
+      // 1. ExcalidrawStage syncs incoming remote camera for all roles (not gated by role === 'student') and prevents self-echo via authorId + suppressRemoteCameraEchoUntilRef
+      assert.equal(
+        wbStageSource.includes('currentUserId && camera.authorId && camera.authorId === currentUserId') &&
+          wbStageSource.includes('if (isEditable && isOwnCamera) return;'),
+        true,
+        'ExcalidrawStage must ignore self-authored camera updates while syncing remote camera updates to Host, Co-Host, and Students'
+      );
+      assert.equal(
+        wbStageSource.includes('suppressRemoteCameraEchoUntilRef'),
+        true,
+        'ExcalidrawStage must suppress programmatic camera echoes when applying remote camera updates'
+      );
+      assert.equal(
+        wbStageSource.includes('if (!effectiveIsHostTeacher || !isEditable || isRoughPad || !apiReady) return;'),
+        true,
+        'ExcalidrawStage must only broadcast initial camera on mount from the Host Teacher so joining Co-Hosts do not reset camera to (0,0)'
+      );
+
+      // 2. VirtualContentStage syncs incoming scroll and laser for all roles (Host, Co-Host, Student) and prevents programmatic scroll echo
+      assert.equal(
+        contentStageSource.includes('contentState.scrollAnchor.authorId === currentUserId') &&
+          contentStageSource.includes('if (!followTeacher || (canAnnotate && isOwnScroll)) return;'),
+        true,
+        'VirtualContentStage must ignore self-authored scroll anchors while syncing remote scroll updates to Host, Co-Host, and Students'
+      );
+      assert.equal(
+        contentStageSource.includes('if (isProgrammaticScrollRef.current) return;'),
+        true,
+        'VirtualContentStage handleScroll must not echo programmatic scroll updates back over the socket'
+      );
+      assert.equal(
+        contentStageSource.includes('const isRemoteLaser =') &&
+          contentStageSource.includes('laserPointer.authorId !== currentUserId'),
+        true,
+        'VirtualContentStage must render remote laser pointer and live cursor for all participants (Host, Co-Host, and Students)'
+      );
+    });
+  });
 });

@@ -149,6 +149,7 @@ export class CurriculumClient {
     role?: 'teacher' | 'student';
     studentId?: string;
     teacherId?: string;
+    deviceId?: string;
   }) {
     const res = await this.request<{ success: boolean; data: any }>('/api/v1/sessions/init', {
       method: 'POST',

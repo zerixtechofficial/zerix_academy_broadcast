@@ -42,6 +42,9 @@ export interface LessonBlock {
 
 interface VirtualContentStageProps {
   role: 'teacher' | 'student';
+  currentUserId?: string;
+  isHostTeacher?: boolean;
+  canEditContent?: boolean;
   lessonTitle: string;
   topicTitle: string;
   blocks: LessonBlock[];
@@ -80,6 +83,9 @@ function hexToRgba(hex: string, alpha: number): string {
 
 export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   role,
+  currentUserId,
+  isHostTeacher,
+  canEditContent,
   lessonTitle,
   topicTitle,
   blocks,
@@ -95,6 +101,12 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   onLaserMove,
   onSendBlockToWhiteboard,
 }) => {
+  const canAnnotate = canEditContent ?? role === 'teacher';
+  const effectiveIsHostTeacher = isHostTeacher ?? role === 'teacher';
+  const isRemoteLaser = Boolean(
+    laserPointer.active &&
+      (!currentUserId || !laserPointer.authorId || laserPointer.authorId !== currentUserId)
+  );
   const outerContainerRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const pageSheetRef = useRef<HTMLDivElement | null>(null);
@@ -193,22 +205,22 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     return () => window.clearInterval(interval);
   }, [laserTrail.length]);
 
-  // When active tool changes away from laser, clear teacher laser coordinates and trail
+  // When active tool changes away from laser, clear local laser coordinates and trail
   useEffect(() => {
     if (activeTool !== 'laser') {
       setTeacherLaserCoord(null);
       setLaserTrail([]);
-      if (role === 'teacher') {
+      if (canAnnotate) {
         onLaserMove({ blockId: '', x: 0, y: 0, active: false });
       }
     }
-  }, [activeTool, role, onLaserMove]);
+  }, [activeTool, canAnnotate, onLaserMove]);
 
-  // Student Remote Laser / Cursor Sync: calculates accurate sheet-relative coordinates and generates Excalidraw decaying trail
+  // Remote Laser / Cursor Sync (Host, Co-Host & Students): calculates accurate sheet-relative coordinates and generates Excalidraw decaying trail
   useEffect(() => {
-    if (role !== 'student' || !laserPointer.active) {
-      if (!laserPointer.active) {
-        setRemoteLaserCoord(null);
+    if (!isRemoteLaser) {
+      setRemoteLaserCoord(null);
+      if (!teacherLaserCoord?.active) {
         setLaserTrail([]);
       }
       return;
@@ -243,7 +255,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
     const now = Date.now();
     setRemoteLaserCoord({ x: targetX, y: targetY, active: true, tool: laserPointer.tool || 'cursor' });
-    // Only generate decaying laser trail for student if teacher was actively dragging in laser mode
+    // Only generate decaying laser trail for followers if remote collaborator was actively dragging in laser mode
     if ((laserPointer as any).isDragging && laserPointer.tool === 'laser') {
       setLaserTrail((prev) => {
         const fresh = prev.filter((pt) => now - pt.t < LASER_TRAIL_DURATION_MS);
@@ -254,15 +266,15 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         return [...fresh.slice(-64), { x: targetX, y: targetY, t: now }];
       });
     }
-  }, [role, laserPointer, blockLayouts]);
+  }, [isRemoteLaser, teacherLaserCoord?.active, laserPointer, blockLayouts]);
 
-  // Student Viewport Auto-Scroll Sync to Teacher's Cursor Position & Active Block:
+  // Viewport Auto-Scroll Sync to Remote Collaborator's Cursor Position & Active Block (Host, Co-Host & Students):
   // In Mobile Landscape mode, screen height is very short (~300px) so only ONE section/box fits at a time.
-  // When Teacher points to or focuses on a section with their cursor/laser, this ensures the student's
+  // When Presenter points to or focuses on a section with their cursor/laser, this ensures the follower's
   // mobile landscape viewport smoothly scrolls to frame THAT specific box or content only.
   // In Portrait mode or Desktop, it smoothly scrolls when the focused box is not already fully visible.
   useEffect(() => {
-    if (role !== 'student' || !followTeacher || !laserPointer.active) return;
+    if (!followTeacher || !isRemoteLaser) return;
     const container = scrollContainerRef.current;
     if (!container) return;
 
@@ -365,23 +377,27 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       }
     }
   }, [
-    role,
     followTeacher,
-    laserPointer.active,
+    isRemoteLaser,
     laserPointer.blockId,
     laserPointer.y,
   ]);
 
-  // Student scroll sync to Teacher's (blockId, offsetRatio)
+  // Scroll sync to Presenter's (blockId, offsetRatio) across Host, Co-Host & Students
   useEffect(() => {
-    if (role !== 'student' || !followTeacher) return;
+    const isOwnScroll = Boolean(
+      currentUserId &&
+        contentState.scrollAnchor?.authorId &&
+        contentState.scrollAnchor.authorId === currentUserId
+    );
+    if (!followTeacher || (canAnnotate && isOwnScroll)) return;
     const container = scrollContainerRef.current;
     if (!container) return;
 
     const anchorBlockId = contentState.scrollAnchor?.blockId;
     const offsetRatio = contentState.scrollAnchor?.offsetRatio || 0;
 
-    // If teacher is at top showing heading (blk_header) with near-zero offset (or no anchor),
+    // If presenter is at top showing heading (blk_header) with near-zero offset (or no anchor),
     // scroll to exact top 0 so in mobile phone content heading is 100% visible and not scrolled below heading
     if ((anchorBlockId === 'blk_header' || !anchorBlockId) && offsetRatio <= 0.05) {
       if (programmaticScrollTimeoutRef.current) {
@@ -428,15 +444,18 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
     setIsOutOfSync(false);
   }, [
-    role,
+    currentUserId,
+    canAnnotate,
     followTeacher,
     contentState.scrollAnchor?.blockId,
     contentState.scrollAnchor?.offsetRatio,
+    contentState.scrollAnchor?.authorId,
+    contentState.scrollAnchor?.updatedAt,
   ]);
 
-  // Teacher: emit initial scroll anchor on mount so students sync immediately to heading
+  // Host Teacher: emit initial scroll anchor on mount so Co-Hosts & Students sync immediately to heading
   useEffect(() => {
-    if (role === 'teacher' && !hasEmittedInitialScrollRef.current) {
+    if (effectiveIsHostTeacher && !hasEmittedInitialScrollRef.current) {
       hasEmittedInitialScrollRef.current = true;
       const timer = window.setTimeout(() => {
         const container = scrollContainerRef.current;
@@ -446,11 +465,10 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       }, 500);
       return () => window.clearTimeout(timer);
     }
-  }, [role, onScrollSync]);
+  }, [effectiveIsHostTeacher, onScrollSync]);
 
   // User manual scroll intent helper: tracks active user gestures (wheel, touch, pointer) on all devices
   const handleUserScrollIntent = useCallback(() => {
-    if (role !== 'student') return;
     isUserScrollingRef.current = true;
     if (userScrollTimeoutRef.current) {
       window.clearTimeout(userScrollTimeoutRef.current);
@@ -458,16 +476,16 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     userScrollTimeoutRef.current = window.setTimeout(() => {
       isUserScrollingRef.current = false;
     }, 400);
-  }, [role]);
+  }, []);
 
   // Scroll listener:
-  // - For Teacher: computes top visible blockId + offsetRatio and broadcasts to students
-  // - For Student: checks if student is in sync with teacher's anchor; only shows Follow Teacher if out of sync
+  // - For Collaborators with Board/Content Access (Host, Co-Host, or Student with Board Access): computes top visible blockId + offsetRatio and broadcasts to room
+  // - For View-Only Students: checks if student is in sync with presenter's anchor; only shows Follow Teacher if out of sync
   const handleScroll = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
 
-    if (role === 'student') {
+    if (!canAnnotate) {
       const anchorBlockId = contentState.scrollAnchor?.blockId;
       const offsetRatio = contentState.scrollAnchor?.offsetRatio || 0;
       let teacherTargetScrollTop = 0;
@@ -498,13 +516,16 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         }
       }
 
-      // If student was out-of-sync but scrolled back within 40px of teacher, re-lock and hide button
+      // If student was out-of-sync but scrolled back within 40px of presenter, re-lock and hide button
       if (!followTeacher && scrollDiff <= 40) {
         setIsOutOfSync(false);
         onToggleFollow(true);
       }
       return;
     }
+
+    // Do not echo programmatic scroll updates (triggered by remote CONTENT_SCROLL_SYNC or cursor auto-scroll) back to the server
+    if (isProgrammaticScrollRef.current) return;
 
     const now = Date.now();
     if (now - lastScrollEmitRef.current < 60) return;
@@ -556,7 +577,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     lastMatchedBlockIdRef.current = matchedBlockId;
     lastOffsetRatioRef.current = offsetRatio;
     onScrollSync(matchedBlockId, Number(offsetRatio.toFixed(3)));
-  }, [role, followTeacher, onToggleFollow, blocks, onScrollSync, contentState.scrollAnchor]);
+  }, [canAnnotate, followTeacher, onToggleFollow, blocks, onScrollSync, contentState.scrollAnchor]);
 
   // Erase strokes near a pointer coordinate or matching a touched word token
   const eraseStrokeAtPointer = useCallback(
@@ -606,7 +627,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     e: React.PointerEvent<HTMLDivElement>,
     blockId: string
   ) => {
-    if (role !== 'teacher' || activeTool === 'cursor' || activeTool === 'laser') return;
+    if (!canAnnotate || activeTool === 'cursor' || activeTool === 'laser') return;
     const blockEl = blockRefs.current[blockId];
     if (!blockEl) return;
 
@@ -644,7 +665,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     e: React.PointerEvent<HTMLDivElement>,
     blockId: string
   ) => {
-    if (role !== 'teacher' || activeTool === 'cursor' || activeTool === 'laser') return;
+    if (!canAnnotate || activeTool === 'cursor' || activeTool === 'laser') return;
     const blockEl = blockRefs.current[blockId];
     if (!blockEl) return;
 
@@ -697,7 +718,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     e: React.PointerEvent<HTMLDivElement>,
     blockId: string
   ) => {
-    if (role !== 'teacher') return;
+    if (!canAnnotate) return;
     if (activeTool === 'eraser') {
       activeDrawingBlockIdRef.current = null;
       setActiveDrawingBlockId(null);
@@ -762,7 +783,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
   // Sheet-Wide Cursor & Laser Pointer Handlers: tracks exact cursor coordinates across the entire content sheet
   const handleSheetPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (role !== 'teacher') return;
+    if (!canAnnotate) return;
     const sheetEl = pageSheetRef.current;
     if (!sheetEl) return;
     const sheetRect = sheetEl.getBoundingClientRect();
@@ -866,7 +887,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   };
 
   const handleSheetPointerUp = useCallback(() => {
-    if (role === 'teacher') {
+    if (canAnnotate) {
       const sheetEl = pageSheetRef.current;
       if (!sheetEl) return;
       const sheetRect = sheetEl.getBoundingClientRect();
@@ -887,17 +908,17 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         } as any);
       }
     }
-  }, [role, activeTool, teacherLaserCoord, onLaserMove]);
+  }, [canAnnotate, activeTool, teacherLaserCoord, onLaserMove]);
 
   // Listen for global pointerup so drag release anywhere on window clears isDragging
   useEffect(() => {
-    if (role !== 'teacher') return;
+    if (!canAnnotate) return;
     window.addEventListener('pointerup', handleSheetPointerUp);
     return () => window.removeEventListener('pointerup', handleSheetPointerUp);
-  }, [role, handleSheetPointerUp]);
+  }, [canAnnotate, handleSheetPointerUp]);
 
   const handleSheetPointerLeave = () => {
-    if (role === 'teacher') {
+    if (canAnnotate) {
       if (idlePointerTimerRef.current) {
         window.clearTimeout(idlePointerTimerRef.current);
         idlePointerTimerRef.current = null;
@@ -972,11 +993,11 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   return (
     <div
       ref={outerContainerRef}
-      data-active-content-tool={role === 'teacher' ? activeTool : 'cursor'}
+      data-active-content-tool={canAnnotate ? activeTool : 'cursor'}
       className="relative flex-1 h-full flex flex-col bg-slate-50 overflow-hidden select-none"
     >
-      {/* Floating Teacher Annotation Pill — Mobile Bottom Thumb-Zone & Desktop Top Bar (Toggled via Top Bar Icon or Ctrl+T) */}
-      {role === 'teacher' && isToolboxVisible && (
+      {/* Floating Teacher / Collaborator Annotation Pill — Mobile Bottom Thumb-Zone & Desktop Top Bar (Toggled via Top Bar Icon or Ctrl+T) */}
+      {canAnnotate && isToolboxVisible && (
         <div
           data-prevent-nav-toggle="true"
           className="pointer-events-none absolute bottom-2.5 sm:bottom-auto sm:top-3 left-1/2 -translate-x-1/2 z-30 max-w-[98vw]"
@@ -1072,24 +1093,28 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
               </>
             )}
 
-            <div className="h-3.5 w-px bg-slate-200 mx-0.5 shrink-0" />
+            {role === 'teacher' && (
+              <>
+                <div className="h-3.5 w-px bg-slate-200 mx-0.5 shrink-0" />
 
-            <button
-              type="button"
-              data-testid="content-clear-strokes-btn"
-              onClick={onClearStrokes}
-              className="flex items-center gap-1 px-1.5 sm:px-2.5 py-0.5 sm:py-1 rounded-full text-[10px] sm:text-xs font-medium text-rose-600 hover:bg-rose-50 transition-colors whitespace-nowrap shrink-0"
-              title="Clear All Page Annotations"
-            >
-              <Trash2 className="w-3 sm:w-3.5 h-3 sm:h-3.5 shrink-0" />
-              <span>Clear</span>
-            </button>
+                <button
+                  type="button"
+                  data-testid="content-clear-strokes-btn"
+                  onClick={onClearStrokes}
+                  className="flex items-center gap-1 px-1.5 sm:px-2.5 py-0.5 sm:py-1 rounded-full text-[10px] sm:text-xs font-medium text-rose-600 hover:bg-rose-50 transition-colors whitespace-nowrap shrink-0"
+                  title="Clear All Page Annotations"
+                >
+                  <Trash2 className="w-3 sm:w-3.5 h-3 sm:h-3.5 shrink-0" />
+                  <span>Clear</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}
 
-      {/* Student Follow Teacher Floating Button at Bottom (shown ONLY when student and teacher are not in sync) */}
-      {role === 'student' && !followTeacher && isOutOfSync && (
+      {/* Follower "Follow Teacher" Floating Button at Bottom (shown ONLY when view-only follower and presenter are not in sync) */}
+      {!canAnnotate && !followTeacher && isOutOfSync && (
         <div
           data-prevent-nav-toggle="true"
           className="pointer-events-none fixed bottom-6 left-1/2 -translate-x-1/2 z-50 select-none animate-in fade-in slide-in-from-bottom-3 duration-200"
@@ -1197,7 +1222,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                 onPointerMove={(e) => handleBlockPointerMove(e, headerBlockId)}
                 onPointerUp={(e) => handleBlockPointerUp(e, headerBlockId)}
                 className={`relative pb-3.5 mb-3.5 sm:pb-5 sm:mb-6 border-b border-slate-200 flex items-start sm:items-center justify-between gap-2 select-none ${
-                  role === 'teacher' && activeTool !== 'cursor' && activeTool !== 'laser'
+                  canAnnotate && activeTool !== 'cursor' && activeTool !== 'laser'
                     ? 'cursor-crosshair touch-none'
                     : 'cursor-default'
                 }`}
@@ -1374,7 +1399,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                       ? 'bg-white border-[#12a3ff]/40 ring-1 ring-[#12a3ff]/15 shadow-xs'
                       : 'bg-white border-slate-200 hover:border-slate-300'
                   } ${
-                    role === 'teacher' && activeTool !== 'cursor'
+                    canAnnotate && activeTool !== 'cursor'
                       ? 'cursor-crosshair touch-none'
                       : 'cursor-default'
                   }`}
@@ -1546,8 +1571,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
             </svg>
           )}
 
-          {/* Live Teacher Cursor (Select / Pen tool): Exact cursor tracking across all content blocks */}
-          {role === 'student' && remoteLaserCoord?.active && laserPointer.tool !== 'laser' && (
+          {/* Live Remote Collaborator Cursor (Select / Pen tool): Exact cursor tracking across all content blocks for Host, Co-Host & Students */}
+          {isRemoteLaser && remoteLaserCoord?.active && laserPointer.tool !== 'laser' && (
             <div
               data-testid="teacher-content-cursor"
               className="pointer-events-none absolute z-40 transition-transform duration-75"
@@ -1567,23 +1592,23 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                 <path d="M3 3l7 18 3-7 7-3L3 3z" />
               </svg>
               <div className="ml-3.5 -mt-2 px-1.5 py-0.5 rounded-md bg-[#12a3ff] text-white text-[10px] font-semibold shadow-md whitespace-nowrap">
-                Teacher
+                {laserPointer.authorName || 'Teacher'}
               </div>
             </div>
           )}
 
           {/* Glowing Solid Laser Dot: Pointing EXACTLY at Cursor Position (Zero Offset, Solid Color, No Pulse) */}
-          {((role === 'teacher' && activeTool === 'laser' && teacherLaserCoord?.active)
+          {((canAnnotate && activeTool === 'laser' && teacherLaserCoord?.active)
             ? teacherLaserCoord
-            : (role === 'student' && remoteLaserCoord?.active && laserPointer.tool === 'laser')
+            : (isRemoteLaser && remoteLaserCoord?.active && laserPointer.tool === 'laser')
             ? remoteLaserCoord
             : null) && (
             <div
               data-testid="content-laser-dot"
               className="pointer-events-none absolute z-40 -translate-x-1/2 -translate-y-1/2"
               style={{
-                left: `${((role === 'teacher' ? teacherLaserCoord : remoteLaserCoord)!).x}px`,
-                top: `${((role === 'teacher' ? teacherLaserCoord : remoteLaserCoord)!).y}px`,
+                left: `${(((canAnnotate && activeTool === 'laser' && teacherLaserCoord?.active) ? teacherLaserCoord : remoteLaserCoord)!).x}px`,
+                top: `${(((canAnnotate && activeTool === 'laser' && teacherLaserCoord?.active) ? teacherLaserCoord : remoteLaserCoord)!).y}px`,
               }}
             >
               <div className="w-4 h-4 rounded-full bg-[#ef4444] shadow-[0_0_14px_4px_rgba(239,68,68,0.75)] ring-2 ring-white" />

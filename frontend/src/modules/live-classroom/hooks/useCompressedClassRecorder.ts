@@ -30,6 +30,7 @@ export const PREFERRED_CODECS = [
   'video/webm;codecs=vp9,opus',
   'video/mp4;codecs=avc1,mp4a',
   'video/webm;codecs=vp8,opus',
+  'video/mp4',
   'video/webm',
 ] as const;
 
@@ -276,6 +277,9 @@ export function useCompressedClassRecorder({
 
     try {
       const audioCtx: AudioContext = new AudioCtx({ sampleRate: 48000 });
+      if (audioCtx.state === 'suspended' && typeof audioCtx.resume === 'function') {
+        audioCtx.resume().catch(() => {});
+      }
       audioContextRef.current = audioCtx;
       const destination = audioCtx.createMediaStreamDestination();
 

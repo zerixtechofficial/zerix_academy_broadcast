@@ -34,35 +34,78 @@ export class AudioStageController {
     return `room:${sessionId}:whiteboard_editors`;
   }
 
+  private static multiDeviceStudentsKey(sessionId: string): string {
+    return `room:${sessionId}:multi_device_students`;
+  }
+
+  private static studentDevicesKey(sessionId: string, studentId: string): string {
+    const norm = this.normalizeStudentId(studentId);
+    return `room:${sessionId}:student_devices:${norm}`;
+  }
+
+  public static DEVICE_STALE_MS = 45_000;
+
+  public static normalizeStudentId(studentId: string): string {
+    const clean = String(studentId || '').trim();
+    if (!clean) return clean;
+    if (clean.startsWith('student_') || clean.startsWith('teacher_')) return clean;
+    return `student_${clean}`;
+  }
+
+  public static buildParticipantIdentity(userId: string, deviceId?: string): string {
+    const cleanDevice = typeof deviceId === 'string' ? deviceId.trim() : '';
+    return cleanDevice ? `${userId}__${cleanDevice}` : userId;
+  }
+
   /**
    * Generates a LiveKit connection token for participant.
+   * When deviceId is provided, mints a per-device LiveKit identity (`${userId}__${deviceId}`)
+   * so multiple authorized devices for the same student never collide or disconnect each other in LiveKit SFU.
    */
   public static async getJoinToken(
     sessionId: string,
     userId: string,
     name: string,
-    role: 'teacher' | 'student'
-  ): Promise<{ token: string; canPublishAudio: boolean }> {
+    role: 'teacher' | 'student',
+    deviceIdOrForcePublish?: string | boolean,
+    maybeDeviceId?: string
+  ): Promise<{ token: string; canPublishAudio: boolean; participantIdentity: string }> {
     let canPublish = false;
+    const deviceId =
+      typeof deviceIdOrForcePublish === 'string'
+        ? deviceIdOrForcePublish
+        : typeof maybeDeviceId === 'string'
+        ? maybeDeviceId
+        : undefined;
+    const forcePublish =
+      typeof deviceIdOrForcePublish === 'boolean' ? deviceIdOrForcePublish : undefined;
 
-    if (role === 'teacher') {
+    if (forcePublish !== undefined) {
+      canPublish = forcePublish;
+    } else if (role === 'teacher') {
       canPublish = true;
     } else {
       // Check if student currently has mic permission or if students are allowed to unmute
-      const hasMic = await redis.sismember(this.activeMicsKey(sessionId), userId);
-      const allowUnmute = await this.getAllowStudentUnmute(sessionId);
-      canPublish = hasMic === 1 || allowUnmute;
+      const normId = this.normalizeStudentId(userId);
+      const [hasMicRaw, hasMicNorm, allowUnmute] = await Promise.all([
+        redis.sismember(this.activeMicsKey(sessionId), userId),
+        redis.sismember(this.activeMicsKey(sessionId), normId),
+        this.getAllowStudentUnmute(sessionId),
+      ]);
+      canPublish = hasMicRaw === 1 || hasMicNorm === 1 || allowUnmute;
     }
+
+    const participantIdentity = this.buildParticipantIdentity(userId, deviceId);
 
     const token = await generateLiveKitToken({
       roomName: sessionId,
-      participantIdentity: userId,
+      participantIdentity,
       participantName: name,
       canPublishAudio: canPublish,
       canSubscribe: true,
     });
 
-    return { token, canPublishAudio: canPublish };
+    return { token, canPublishAudio: canPublish, participantIdentity };
   }
 
   /**
@@ -152,6 +195,7 @@ export class AudioStageController {
     invitedTeachers: InvitedTeacherEntry[];
     whiteboardEditors: string[];
     allowStudentUnmute: boolean;
+    multiDeviceStudents: string[];
   }> {
     const [
       activeStudentMics,
@@ -160,6 +204,7 @@ export class AudioStageController {
       invitedTeachers,
       whiteboardEditors,
       allowStudentUnmute,
+      multiDeviceStudents,
     ] = await Promise.all([
       this.getActiveStudentMics(sessionId),
       this.getRaisedHands(sessionId),
@@ -167,6 +212,7 @@ export class AudioStageController {
       this.getInvitedTeachers(sessionId),
       this.getWhiteboardEditors(sessionId),
       this.getAllowStudentUnmute(sessionId),
+      this.getMultiDeviceStudents(sessionId),
     ]);
     return {
       activeStudentMics,
@@ -176,6 +222,328 @@ export class AudioStageController {
       invitedTeachers,
       whiteboardEditors,
       allowStudentUnmute,
+      multiDeviceStudents,
+    };
+  }
+
+  /**
+   * Retrieves list of students whom the Host Teacher has allowed to join from multiple devices simultaneously.
+   */
+  public static async getMultiDeviceStudents(sessionId: string): Promise<string[]> {
+    return await redis.smembers(this.multiDeviceStudentsKey(sessionId));
+  }
+
+  /**
+   * Checks whether a particular student is permitted by the Host Teacher to join from multiple devices.
+   */
+  public static async isStudentMultiDeviceAllowed(
+    sessionId: string,
+    studentId: string
+  ): Promise<boolean> {
+    const norm = this.normalizeStudentId(studentId);
+    const [rawMember, normMember] = await Promise.all([
+      redis.sismember(this.multiDeviceStudentsKey(sessionId), studentId),
+      redis.sismember(this.multiDeviceStudentsKey(sessionId), norm),
+    ]);
+    return rawMember === 1 || normMember === 1;
+  }
+
+  /**
+   * Host Teacher enables or disables multi-device join access for a specific student.
+   */
+  public static async setStudentMultiDeviceAccess(
+    sessionId: string,
+    studentId: string,
+    allow: boolean
+  ): Promise<string[]> {
+    const norm = this.normalizeStudentId(studentId);
+    const rawClean = String(studentId || '').replace(/^student_/, '');
+    const key = this.multiDeviceStudentsKey(sessionId);
+
+    if (allow) {
+      await redis.sadd(key, norm, rawClean);
+    } else {
+      await redis.srem(key, norm, rawClean, studentId);
+    }
+
+    const multiDeviceStudents = await this.getMultiDeviceStudents(sessionId);
+    await RoomManager.appendPacket(sessionId, 'STUDENT_MULTI_DEVICE_UPDATED', {
+      studentId: norm,
+      allow,
+      multiDeviceStudents,
+    });
+    return multiDeviceStudents;
+  }
+
+  /**
+   * Retrieves active (non-stale) connected devices for a student in the session.
+   */
+  public static async getStudentActiveDevices(
+    sessionId: string,
+    studentId: string,
+    activeSocketIds?: Set<string>
+  ): Promise<
+    Array<{
+      deviceId: string;
+      socketId?: string;
+      lastSeenAt: number;
+      micActive: boolean;
+    }>
+  > {
+    const key = this.studentDevicesKey(sessionId, studentId);
+    const rawMap = await redis.hgetall(key);
+    if (!rawMap) return [];
+
+    const now = Date.now();
+    const valid: Array<{
+      deviceId: string;
+      socketId?: string;
+      lastSeenAt: number;
+      micActive: boolean;
+    }> = [];
+    const staleDeviceIds: string[] = [];
+
+    for (const [devId, rawJson] of Object.entries(rawMap)) {
+      try {
+        const parsed = JSON.parse(rawJson);
+        const lastSeenAt = Number(parsed?.lastSeenAt || 0);
+        const isTimeStale = now - lastSeenAt > this.DEVICE_STALE_MS;
+        const isSocketGone =
+          activeSocketIds &&
+          activeSocketIds.size > 0 &&
+          parsed?.socketId &&
+          !activeSocketIds.has(parsed.socketId);
+
+        if (isTimeStale || isSocketGone) {
+          staleDeviceIds.push(devId);
+        } else {
+          valid.push({
+            deviceId: parsed.deviceId || devId,
+            socketId: parsed.socketId,
+            lastSeenAt,
+            micActive: Boolean(parsed.micActive),
+          });
+        }
+      } catch {
+        staleDeviceIds.push(devId);
+      }
+    }
+
+    if (staleDeviceIds.length > 0) {
+      await redis.hdel(key, ...staleDeviceIds);
+    }
+
+    return valid;
+  }
+
+  /**
+   * Enforces Single-Device Student Join Rule (unless Host Teacher enabled multi-device for this student).
+   * - Same deviceId reconnecting/refreshing is always allowed.
+   * - Different deviceId while another device is active is blocked unless multi-device is enabled for this student.
+   */
+  public static async canStudentDeviceJoin(
+    sessionId: string,
+    studentId: string,
+    deviceId?: string,
+    socketId?: string,
+    activeSocketIds?: Set<string>
+  ): Promise<{
+    allowed: boolean;
+    activeDeviceId?: string;
+    allowMultiDevice: boolean;
+  }> {
+    const effectiveDeviceId =
+      (typeof deviceId === 'string' && deviceId.trim()) || socketId || 'default_device';
+    const allowMultiDevice = await this.isStudentMultiDeviceAllowed(sessionId, studentId);
+    const activeDevices = await this.getStudentActiveDevices(
+      sessionId,
+      studentId,
+      activeSocketIds
+    );
+
+    const otherActiveDevice = activeDevices.find((d) => d.deviceId !== effectiveDeviceId);
+    if (!allowMultiDevice && otherActiveDevice) {
+      return {
+        allowed: false,
+        activeDeviceId: otherActiveDevice.deviceId,
+        allowMultiDevice: false,
+      };
+    }
+
+    const existingSameDevice = activeDevices.find((d) => d.deviceId === effectiveDeviceId);
+    const key = this.studentDevicesKey(sessionId, studentId);
+    await redis.hset(
+      key,
+      effectiveDeviceId,
+      JSON.stringify({
+        deviceId: effectiveDeviceId,
+        socketId: socketId || existingSameDevice?.socketId,
+        lastSeenAt: Date.now(),
+        micActive: existingSameDevice ? Boolean(existingSameDevice.micActive) : false,
+      })
+    );
+
+    return {
+      allowed: true,
+      activeDeviceId: effectiveDeviceId,
+      allowMultiDevice,
+    };
+  }
+
+  /**
+   * Refreshes heartbeat timestamp for a student's active device.
+   */
+  public static async touchStudentDevice(
+    sessionId: string,
+    studentId: string,
+    deviceId?: string,
+    socketId?: string
+  ): Promise<void> {
+    const effectiveDeviceId =
+      (typeof deviceId === 'string' && deviceId.trim()) || socketId || 'default_device';
+    const key = this.studentDevicesKey(sessionId, studentId);
+    const existingRaw = await redis.hget(key, effectiveDeviceId);
+    let micActive = false;
+    let resolvedSocketId = socketId;
+    if (existingRaw) {
+      try {
+        const parsed = JSON.parse(existingRaw);
+        micActive = Boolean(parsed.micActive);
+        resolvedSocketId = socketId || parsed.socketId;
+      } catch {
+        // ignore
+      }
+    }
+    await redis.hset(
+      key,
+      effectiveDeviceId,
+      JSON.stringify({
+        deviceId: effectiveDeviceId,
+        socketId: resolvedSocketId,
+        lastSeenAt: Date.now(),
+        micActive,
+      })
+    );
+  }
+
+  /**
+   * Removes a disconnected student device from Redis and returns whether any remaining device still has an active mic.
+   */
+  public static async removeStudentDevice(
+    sessionId: string,
+    studentId: string,
+    deviceId?: string,
+    socketId?: string
+  ): Promise<{ remainingDevices: number; anyDeviceMicActive: boolean }> {
+    const key = this.studentDevicesKey(sessionId, studentId);
+    const rawMap = await redis.hgetall(key);
+    if (!rawMap) {
+      return { remainingDevices: 0, anyDeviceMicActive: false };
+    }
+
+    const toDelete: string[] = [];
+    for (const [devId, rawJson] of Object.entries(rawMap)) {
+      if (deviceId && devId === deviceId) {
+        toDelete.push(devId);
+        continue;
+      }
+      if (socketId) {
+        try {
+          const parsed = JSON.parse(rawJson);
+          if (parsed?.socketId === socketId) {
+            toDelete.push(devId);
+          }
+        } catch {
+          toDelete.push(devId);
+        }
+      }
+    }
+
+    if (toDelete.length > 0) {
+      await redis.hdel(key, ...toDelete);
+    }
+
+    const remaining = await this.getStudentActiveDevices(sessionId, studentId);
+    const anyDeviceMicActive = remaining.some((d) => d.micActive);
+    return {
+      remainingDevices: remaining.length,
+      anyDeviceMicActive,
+    };
+  }
+
+  /**
+   * Updates per-device microphone state for a student so multiple devices have independent mic state.
+   */
+  public static async setStudentDeviceMicState(
+    sessionId: string,
+    studentId: string,
+    deviceId: string | undefined,
+    micActive: boolean
+  ): Promise<{ anyDeviceMicActive: boolean }> {
+    const effectiveDeviceId =
+      (typeof deviceId === 'string' && deviceId.trim()) || 'default_device';
+    const key = this.studentDevicesKey(sessionId, studentId);
+    const existingRaw = await redis.hget(key, effectiveDeviceId);
+    let socketId: string | undefined;
+    if (existingRaw) {
+      try {
+        socketId = JSON.parse(existingRaw)?.socketId;
+      } catch {
+        // ignore
+      }
+    }
+
+    await redis.hset(
+      key,
+      effectiveDeviceId,
+      JSON.stringify({
+        deviceId: effectiveDeviceId,
+        socketId,
+        lastSeenAt: Date.now(),
+        micActive,
+      })
+    );
+
+    if (micActive) {
+      await redis.sadd(this.activeMicsKey(sessionId), studentId);
+    }
+
+    const activeDevices = await this.getStudentActiveDevices(sessionId, studentId);
+    const anyDeviceMicActive = activeDevices.some((d) => d.micActive);
+    return { anyDeviceMicActive };
+  }
+
+  /**
+   * Mutes a single student device (`deviceId`) without muting or revoking audio on the student's other active devices.
+   * Only removes `studentId` from `activeStudentMics` when ALL of the student's devices are muted.
+   */
+  public static async muteStudentDevice(
+    sessionId: string,
+    studentId: string,
+    deviceId?: string
+  ): Promise<{ studentId: string; deviceId?: string; anyDeviceMicActive: boolean }> {
+    if (!deviceId) {
+      await this.muteStudent(sessionId, studentId);
+      return { studentId, anyDeviceMicActive: false };
+    }
+
+    const { anyDeviceMicActive } = await this.setStudentDeviceMicState(
+      sessionId,
+      studentId,
+      deviceId,
+      false
+    );
+
+    if (!anyDeviceMicActive) {
+      const norm = this.normalizeStudentId(studentId);
+      const rawClean = String(studentId || '').replace(/^student_/, '');
+      await redis.srem(this.activeMicsKey(sessionId), studentId, norm, rawClean);
+    }
+
+    return {
+      studentId,
+      deviceId,
+      anyDeviceMicActive,
     };
   }
 
@@ -511,12 +879,23 @@ export class AudioStageController {
 
   /**
    * Teacher approves student mic. Enforces Strict Max 10 Concurrent Student Mics Rule.
+   * Also mints per-device LiveKit tokens (`deviceTokens`) for all active devices of the student
+   * so multiple authorized devices can use their microphones independently without LiveKit identity collisions.
    */
   public static async grantStudentMic(
     sessionId: string,
     studentId: string,
-    forceReplaceOldest = false
-  ): Promise<{ success: boolean; studentId: string; token?: string; evictedStudentId?: string; autoActivate?: boolean }> {
+    forceReplaceOldest = false,
+    targetDeviceId?: string
+  ): Promise<{
+    success: boolean;
+    studentId: string;
+    token?: string;
+    deviceTokens?: Record<string, string>;
+    targetDeviceId?: string;
+    evictedStudentId?: string;
+    autoActivate?: boolean;
+  }> {
     const micsKey = this.activeMicsKey(sessionId);
     const activeCount = await redis.scard(micsKey);
 
@@ -541,19 +920,45 @@ export class AudioStageController {
       }
     }
 
+    // Check if student raised hand from a specific device before clearing hand
+    let raisedHandDeviceId: string | undefined;
+    try {
+      const handMetaRaw = await redis.hget(this.raisedHandsMetaKey(sessionId), studentId);
+      if (handMetaRaw) {
+        const parsedHand = JSON.parse(handMetaRaw);
+        if (parsedHand?.deviceId) {
+          raisedHandDeviceId = String(parsedHand.deviceId);
+        }
+      }
+    } catch {
+      // ignore
+    }
+
     await redis.sadd(micsKey, studentId);
     await this.lowerHand(sessionId, studentId);
 
-    // Update LiveKit participant permission
-    try {
-      await livekitRoomService.updateParticipant(sessionId, studentId, undefined, {
-        canPublish: true,
-      });
-    } catch (err: any) {
-      console.warn(`[AudioStageController] LiveKit SFU update participant note: ${err.message}`);
+    const activeDevices = await this.getStudentActiveDevices(sessionId, studentId);
+    const resolvedTargetDeviceId =
+      targetDeviceId ||
+      raisedHandDeviceId ||
+      (activeDevices.length === 1 ? activeDevices[0].deviceId : undefined);
+
+    // Update LiveKit participant permission for base identity and any active device identities
+    const identitiesToUpdate = [
+      studentId,
+      ...activeDevices.map((d) => this.buildParticipantIdentity(studentId, d.deviceId)),
+    ];
+    for (const identity of identitiesToUpdate) {
+      try {
+        await livekitRoomService.updateParticipant(sessionId, identity, undefined, {
+          canPublish: true,
+        });
+      } catch (err: any) {
+        console.warn(`[AudioStageController] LiveKit SFU update participant note: ${err.message}`);
+      }
     }
 
-    // Generate fresh LiveKit token with publish permission
+    // Generate fresh LiveKit token with publish permission (base identity + per-device identities)
     const token = await generateLiveKitToken({
       roomName: sessionId,
       participantIdentity: studentId,
@@ -562,31 +967,73 @@ export class AudioStageController {
       canSubscribe: true,
     });
 
+    const deviceTokens: Record<string, string> = {};
+    for (const dev of activeDevices) {
+      deviceTokens[dev.deviceId] = await generateLiveKitToken({
+        roomName: sessionId,
+        participantIdentity: this.buildParticipantIdentity(studentId, dev.deviceId),
+        participantName: `Student-${studentId}`,
+        canPublishAudio: true,
+        canSubscribe: true,
+      });
+    }
+    if (resolvedTargetDeviceId && !deviceTokens[resolvedTargetDeviceId]) {
+      deviceTokens[resolvedTargetDeviceId] = await generateLiveKitToken({
+        roomName: sessionId,
+        participantIdentity: this.buildParticipantIdentity(studentId, resolvedTargetDeviceId),
+        participantName: `Student-${studentId}`,
+        canPublishAudio: true,
+        canSubscribe: true,
+      });
+    }
+
     await RoomManager.appendPacket(sessionId, 'AUDIO_MIC_GRANTED', {
       studentId,
+      targetDeviceId: resolvedTargetDeviceId,
       evictedStudentId,
       autoActivate: true,
     });
 
-    return { success: true, studentId, token, evictedStudentId, autoActivate: true };
+    return {
+      success: true,
+      studentId,
+      token,
+      deviceTokens,
+      targetDeviceId: resolvedTargetDeviceId,
+      evictedStudentId,
+      autoActivate: true,
+    };
   }
 
   /**
-   * Teacher mutes individual student mic.
+   * Teacher mutes individual student mic across all devices of that student.
    */
   public static async muteStudent(
     sessionId: string,
     studentId: string
   ): Promise<boolean> {
     const micsKey = this.activeMicsKey(sessionId);
-    await redis.srem(micsKey, studentId);
+    const norm = this.normalizeStudentId(studentId);
+    const rawClean = String(studentId || '').replace(/^student_/, '');
+    await redis.srem(micsKey, studentId, norm, rawClean);
 
-    try {
-      await livekitRoomService.updateParticipant(sessionId, studentId, undefined, {
-        canPublish: false,
-      });
-    } catch (err: any) {
-      console.warn(`[AudioStageController] LiveKit mute note: ${err.message}`);
+    const activeDevices = await this.getStudentActiveDevices(sessionId, studentId);
+    for (const dev of activeDevices) {
+      await this.setStudentDeviceMicState(sessionId, studentId, dev.deviceId, false);
+    }
+
+    const identitiesToMute = [
+      studentId,
+      ...activeDevices.map((d) => this.buildParticipantIdentity(studentId, d.deviceId)),
+    ];
+    for (const identity of identitiesToMute) {
+      try {
+        await livekitRoomService.updateParticipant(sessionId, identity, undefined, {
+          canPublish: false,
+        });
+      } catch (err: any) {
+        console.warn(`[AudioStageController] LiveKit mute note: ${err.message}`);
+      }
     }
 
     await RoomManager.appendPacket(sessionId, 'AUDIO_MIC_REVOKED', { studentId });

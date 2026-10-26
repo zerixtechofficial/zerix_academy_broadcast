@@ -75,15 +75,19 @@ export class ContentEngine {
   public static async updateScroll(
     sessionId: string,
     activeBlockId: string,
-    blockOffsetRatio: number
+    blockOffsetRatio: number,
+    authorId?: string
   ): Promise<BroadcastPacket> {
     const clampedRatio = Math.max(0, Math.min(1, blockOffsetRatio));
     const current = await this.getState(sessionId);
+    const updatedAt = Date.now();
 
     const updated: ContentSyncState = {
       ...current,
       activeBlockId,
       blockOffsetRatio: clampedRatio,
+      scrollAuthorId: authorId,
+      scrollUpdatedAt: updatedAt,
     };
 
     await redis.set(this.stateKey(sessionId), JSON.stringify(updated));
@@ -91,6 +95,8 @@ export class ContentEngine {
     return await RoomManager.appendPacket(sessionId, 'CONTENT_SCROLL_SYNC', {
       activeBlockId,
       blockOffsetRatio: clampedRatio,
+      authorId,
+      updatedAt,
     });
   }
 

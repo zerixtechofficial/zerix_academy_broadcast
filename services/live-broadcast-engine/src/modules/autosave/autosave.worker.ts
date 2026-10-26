@@ -7,6 +7,7 @@ import { WhiteboardEngine } from '../whiteboard/whiteboard.engine';
 import { AttendanceEngine } from '../attendance/attendance.engine';
 import { getSessionTimelineTracker } from '../session-timeline/sessionTimeline.tracker';
 import { SessionSnapshot } from '../../types/broadcast.types';
+import { notifyTelegramErrorAsync } from '../monitoring/telegram.service';
 
 const bullmqConnection = {
   host: env.REDIS_HOST,
@@ -44,6 +45,10 @@ export class AutoSaveService {
 
     this.checkpointWorker.on('error', (err) => {
       console.error('[AutoSaveService:CheckpointWorker] Worker error:', err.message);
+      notifyTelegramErrorAsync({
+        source: 'BullMQ CheckpointWorker',
+        error: err,
+      });
     });
 
     // 2. Worker for 5-minute teacher disconnect grace timeout
@@ -59,6 +64,10 @@ export class AutoSaveService {
 
     this.graceWorker.on('error', (err) => {
       console.error('[AutoSaveService:GraceWorker] Worker error:', err.message);
+      notifyTelegramErrorAsync({
+        source: 'BullMQ GraceWorker',
+        error: err,
+      });
     });
 
     console.log('[AutoSaveService] Background checkpoint & teacher grace workers initialized.');
@@ -133,6 +142,11 @@ export class AutoSaveService {
       }
     } catch (err: any) {
       console.error(`[AutoSaveService] Checkpoint failed for ${sessionId}:`, err.message);
+      notifyTelegramErrorAsync({
+        source: 'AutoSaveService.performCheckpoint',
+        error: err,
+        context: { sessionId },
+      });
     }
   }
 
@@ -219,6 +233,11 @@ export class AutoSaveService {
         `[AutoSaveService] VOD/Whiteboard finalization error for ${sessionId}:`,
         err.message
       );
+      notifyTelegramErrorAsync({
+        source: 'AutoSaveService.ensureSessionVodFinalized',
+        error: err,
+        context: { sessionId },
+      });
     }
   }
 
@@ -250,6 +269,11 @@ export class AutoSaveService {
       console.log(`[AutoSaveService] Session ${sessionId} cleanly finalized and archived.`);
     } catch (err: any) {
       console.error(`[AutoSaveService] Error in executeGraceFinalize for ${sessionId}:`, err.message);
+      notifyTelegramErrorAsync({
+        source: 'AutoSaveService.executeGraceFinalize',
+        error: err,
+        context: { sessionId },
+      });
     }
   }
 

@@ -20,6 +20,16 @@ export const createRedisClient = (customName = 'client'): Redis => {
   const client = new Redis(redisOptions);
   client.on('error', (err) => {
     console.error(`[Redis:${customName}] Connection error:`, err.message);
+    import('../modules/monitoring/telegram.service')
+      .then(({ notifyTelegramErrorAsync }) => {
+        notifyTelegramErrorAsync({
+          source: `Redis (${customName})`,
+          error: err,
+          context: { host: env.REDIS_HOST, port: env.REDIS_PORT },
+          cooldownMs: 300_000,
+        });
+      })
+      .catch(() => {});
   });
   return client;
 };
@@ -33,4 +43,14 @@ redis.on('connect', () => {
 
 redis.on('error', (err) => {
   console.error('[Redis] Main client error:', err.message);
+  import('../modules/monitoring/telegram.service')
+    .then(({ notifyTelegramErrorAsync }) => {
+      notifyTelegramErrorAsync({
+        source: 'Redis (Main Client)',
+        error: err,
+        context: { host: env.REDIS_HOST, port: env.REDIS_PORT },
+        cooldownMs: 300_000,
+      });
+    })
+    .catch(() => {});
 });

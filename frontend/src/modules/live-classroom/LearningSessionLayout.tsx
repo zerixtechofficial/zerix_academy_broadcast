@@ -17,6 +17,7 @@ import {
 } from './hooks/useBroadcastSocket';
 import { useLiveKitStage } from './hooks/useLiveKitStage';
 import { useFullscreenWorkspace } from './hooks/useFullscreenWorkspace';
+import { useScreenWakeLock } from './hooks/useScreenWakeLock';
 import { useCompressedClassRecorder } from './hooks/useCompressedClassRecorder';
 import {
   CurriculumClient,
@@ -210,6 +211,8 @@ export default function LearningSessionLayout() {
     activeTopicId,
     activeBlockId,
     blockOffsetRatio,
+    scrollAuthorId,
+    scrollUpdatedAt,
     penStrokes,
     laserPointer,
     activeStudentMics,
@@ -221,6 +224,10 @@ export default function LearningSessionLayout() {
     setInvitedTeachers,
     whiteboardEditors,
     setWhiteboardEditors,
+    multiDeviceStudents,
+    setMultiDeviceStudents,
+    multiDeviceBlocked,
+    clientDeviceId,
     audioError,
     changeMode,
     broadcastTeacherCam,
@@ -243,6 +250,9 @@ export default function LearningSessionLayout() {
     setAllowStudentUnmuteOption,
     studentSelfUnmute,
     studentSelfMute,
+    notifyDeviceMicActive,
+    setStudentMultiDeviceAccess,
+    retryJoinRoom,
     broadcastTeacherMicState,
     inviteCoTeacher,
     toggleCoTeacherWhiteboard,
@@ -269,8 +279,14 @@ export default function LearningSessionLayout() {
       }
     },
     onStudentMicRevoked: () => {
+      setCanPublishAudio(false);
       setMicrophoneActiveRef.current(false).catch(() => {});
     },
+  });
+
+  // Prevent phone/tablet/desktop screen from turning off during an active live broadcast
+  useScreenWakeLock({
+    enabled: !hasLeftSession && teacherStatus !== 'ENDED' && !multiDeviceBlocked,
   });
 
   // Load Initial Session Snapshot, Curriculum Tree, Lesson Blocks & Attendance
@@ -285,6 +301,7 @@ export default function LearningSessionLayout() {
           teacherId,
           studentId,
           token,
+          deviceId: clientDeviceId,
         });
 
         if (!isMounted) return;
@@ -306,6 +323,9 @@ export default function LearningSessionLayout() {
           }
           if (Array.isArray(initData.audioStage.whiteboardEditors)) {
             setWhiteboardEditors(initData.audioStage.whiteboardEditors);
+          }
+          if (Array.isArray(initData.audioStage.multiDeviceStudents)) {
+            setMultiDeviceStudents(initData.audioStage.multiDeviceStudents);
           }
         }
 
@@ -335,6 +355,8 @@ export default function LearningSessionLayout() {
     setTeacherMicActive,
     setInvitedTeachers,
     setWhiteboardEditors,
+    setMultiDeviceStudents,
+    clientDeviceId,
   ]);
 
   // Reload lesson content when activeLessonId changes
@@ -429,6 +451,8 @@ export default function LearningSessionLayout() {
     onMicStateChange: (enabled) => {
       if (role === 'teacher') {
         broadcastTeacherMicState(enabled);
+      } else if (role === 'student') {
+        notifyDeviceMicActive(enabled);
       }
     },
   });
@@ -449,21 +473,14 @@ export default function LearningSessionLayout() {
 
   // Handle local microphone toggle:
   // - Teachers toggle normally
-  // - Students with open mic (allowStudentUnmute) notify server on unmute/mute
-  // - Students with teacher grant toggle mic track
+  // - Students notify server per-device on mute/unmute so multi-device mics operate independently
   const handleToggleLocalMic = useCallback(async () => {
     if (role === 'student') {
       if (isMicrophoneEnabled) {
         await setMicrophoneActive(false);
-        if (allowStudentUnmute) {
-          studentSelfMute();
-        }
+        studentSelfMute();
       } else {
-        if (
-          allowStudentUnmute &&
-          !activeStudentMics.includes(currentUserId) &&
-          !activeStudentMics.includes(studentId)
-        ) {
+        if (allowStudentUnmute && !canPublishAudio) {
           studentSelfUnmute();
         }
         await setMicrophoneActive(true);
@@ -475,9 +492,7 @@ export default function LearningSessionLayout() {
     role,
     isMicrophoneEnabled,
     allowStudentUnmute,
-    activeStudentMics,
-    currentUserId,
-    studentId,
+    canPublishAudio,
     setMicrophoneActive,
     studentSelfMute,
     studentSelfUnmute,
@@ -652,6 +667,9 @@ export default function LearningSessionLayout() {
       zoom: teacherCam?.Zt ?? 1.0,
       viewportWidth: teacherCam?.Wt ?? 1280,
       viewportHeight: teacherCam?.Ht ?? 720,
+      authorId: teacherCam?.authorId,
+      authorName: teacherCam?.authorName,
+      updatedAt: teacherCam?.updatedAt,
     }),
     [teacherCam]
   );
@@ -725,6 +743,7 @@ export default function LearningSessionLayout() {
       })),
       invitedTeachers,
       whiteboardEditors,
+      multiDeviceStudents,
       allowStudentUnmute: Boolean(allowStudentUnmute),
     };
   }, [
@@ -738,6 +757,7 @@ export default function LearningSessionLayout() {
     normalizedAttendanceList,
     invitedTeachers,
     whiteboardEditors,
+    multiDeviceStudents,
     allowStudentUnmute,
   ]);
 
@@ -1036,6 +1056,7 @@ export default function LearningSessionLayout() {
         teacherId,
         studentId,
         token,
+        deviceId: clientDeviceId,
       });
       if (initData.livekit) {
         setLivekitToken(initData.livekit.token);
@@ -1044,7 +1065,7 @@ export default function LearningSessionLayout() {
     } catch {
       // Ignore init error on rejoin
     }
-  }, [rejoinSession, sessionId, role, teacherId, studentId, token]);
+  }, [rejoinSession, sessionId, role, teacherId, studentId, token, clientDeviceId]);
 
   return (
     <div
@@ -1141,6 +1162,7 @@ export default function LearningSessionLayout() {
           }
         }}
         onRevokeWhiteboardAccess={revokeWhiteboardAccess}
+        onToggleStudentMultiDevice={setStudentMultiDeviceAccess}
         onSwitchRole={handleSwitchRole}
         onSelectBatch={handleSelectBatch}
         onSimulateDisconnect={simulateDisconnect}
@@ -1175,6 +1197,7 @@ export default function LearningSessionLayout() {
               key={`live-whiteboard-${role}-${currentUserId}`}
               role={role}
               currentUserId={currentUserId}
+              isHostTeacher={isHostTeacher}
               isRoughPad={false}
               canEditWhiteboard={canEditWhiteboard}
               elements={incomingWhiteboardDelta}
@@ -1211,6 +1234,9 @@ export default function LearningSessionLayout() {
             /* Content Mode (800px Virtual Page with Formula A Scaling & Block-ID Anchoring) */
             <VirtualContentStage
               role={role}
+              currentUserId={currentUserId}
+              isHostTeacher={isHostTeacher}
+              canEditContent={role === 'teacher' || canEditWhiteboard}
               lessonTitle={lessonTitle}
               topicTitle={topicTitle}
               blocks={normalizedBlocks}
@@ -1221,6 +1247,8 @@ export default function LearningSessionLayout() {
                 scrollAnchor: {
                   blockId: activeBlockId,
                   offsetRatio: blockOffsetRatio,
+                  authorId: scrollAuthorId,
+                  updatedAt: scrollUpdatedAt,
                 },
                 penStrokes: penStrokes || [],
               }}
@@ -1240,6 +1268,9 @@ export default function LearningSessionLayout() {
                 regionId: laserPointer?.regionId,
                 regionRx: laserPointer?.regionRx,
                 regionRy: laserPointer?.regionRy,
+                authorId: laserPointer?.authorId,
+                authorName: laserPointer?.authorName,
+                updatedAt: laserPointer?.updatedAt,
               }}
               isToolboxVisible={isContentToolboxVisible}
               followTeacher={followTeacher}
@@ -1260,7 +1291,43 @@ export default function LearningSessionLayout() {
         </main>
       </div>
 
-      {/* 3. Intentional Leave / Broadcast Ended Fullscreen Overlay */}
+      {/* 3. Single-Device Enforcement Modal (Shown when Student attempts to join from a 2nd device without Host permission) */}
+      {multiDeviceBlocked && (
+        <div
+          data-testid="multi-device-blocked-modal"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/75 backdrop-blur-sm"
+        >
+          <div className="w-full max-w-md rounded-2xl bg-white border border-slate-200 shadow-2xl p-6 text-center space-y-4">
+            <div className="mx-auto w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 text-amber-600 flex items-center justify-center text-xl font-bold">
+              🔒
+            </div>
+            <h2
+              data-testid="multi-device-blocked-heading"
+              className="text-lg font-bold text-slate-900"
+            >
+              Active on Another Device
+            </h2>
+            <p
+              data-testid="multi-device-blocked-description"
+              className="text-xs sm:text-sm text-slate-600 leading-relaxed"
+            >
+              {multiDeviceBlocked.message}
+            </p>
+            <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-2">
+              <button
+                type="button"
+                data-testid="retry-multi-device-join-btn"
+                onClick={retryJoinRoom}
+                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-[#12a3ff] hover:bg-[#0d8de0] text-white text-xs sm:text-sm font-semibold shadow-sm transition-colors"
+              >
+                Retry Join
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4. Intentional Leave / Broadcast Ended Fullscreen Overlay */}
       {(hasLeftSession || teacherStatus === 'ENDED') && (
         <div
           data-testid={

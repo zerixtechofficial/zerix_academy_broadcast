@@ -37,6 +37,11 @@ export interface AppEnv {
   R2_SECRET_ACCESS_KEY?: string;
   R2_BUCKET_NAME: string;
   R2_ENDPOINT?: string;
+  // Telegram Alerting & Health Monitoring
+  TELEGRAM_BOT_TOKEN: string;
+  TELEGRAM_ERROR_CHAT_ID: string;
+  TELEGRAM_DAILY_REPORT_TIME: string;
+  FRONTEND_HEALTH_URL: string;
 }
 
 const resolvedEndpoint =
@@ -99,4 +104,12 @@ export const env: AppEnv = {
     process.env.R2_SECRET_ACCESS_KEY || process.env.STORAGE_SECRET_ACCESS_KEY || undefined,
   R2_BUCKET_NAME: resolvedBucket,
   R2_ENDPOINT: resolvedEndpoint,
+  TELEGRAM_BOT_TOKEN: (
+    process.env.TELEGRAM_BOT_TOKEN || '8624790281:AAHsADm9eq_-DU4vJ9Y5v7b9lP-q34jqYn0'
+  ).trim(),
+  TELEGRAM_ERROR_CHAT_ID: (process.env.TELEGRAM_ERROR_CHAT_ID || '-5264089817')
+    .replace(/^["']|["']$/g, '')
+    .trim(),
+  TELEGRAM_DAILY_REPORT_TIME: (process.env.TELEGRAM_DAILY_REPORT_TIME || '23:00').trim(),
+  FRONTEND_HEALTH_URL: (process.env.FRONTEND_HEALTH_URL || 'http://127.0.0.1:3000').trim(),
 };

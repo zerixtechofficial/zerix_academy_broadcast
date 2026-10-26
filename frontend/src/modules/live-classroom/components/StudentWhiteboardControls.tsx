@@ -78,24 +78,46 @@ export const StudentWhiteboardControls: React.FC<StudentWhiteboardControlsProps>
     );
   }
 
-  // 2. Co-Teacher View-Only Badge
+  // 2. Co-Teacher View-Only Badge (+ Follow Teacher button if Co-Teacher panned away)
   if (role === 'teacher' && !isEditable) {
     return (
-      <div
-        data-prevent-nav-toggle="true"
-        data-testid="coteacher-wb-readonly-badge"
-        className="pointer-events-none absolute top-2 left-2 sm:top-2.5 sm:left-3 z-30 max-w-[calc(100vw-1rem)] select-none"
-      >
-        <div className="pointer-events-auto max-w-full min-w-0 flex items-center flex-nowrap whitespace-nowrap gap-1.5 bg-amber-50/95 backdrop-blur-md border border-amber-200 shadow-md rounded-full px-3 py-1 text-[11px] sm:text-xs text-amber-800 font-semibold overflow-x-auto no-scrollbar">
-          <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
-          <span className="truncate">
-            <span className="hidden sm:inline">
-              Co-Teacher View Mode — Request Host Teacher to Enable Whiteboard Access
+      <>
+        <div
+          data-prevent-nav-toggle="true"
+          data-testid="coteacher-wb-readonly-badge"
+          className="pointer-events-none absolute top-2 left-2 sm:top-2.5 sm:left-3 z-30 max-w-[calc(100vw-1rem)] select-none"
+        >
+          <div className="pointer-events-auto max-w-full min-w-0 flex items-center flex-nowrap whitespace-nowrap gap-1.5 bg-amber-50/95 backdrop-blur-md border border-amber-200 shadow-md rounded-full px-3 py-1 text-[11px] sm:text-xs text-amber-800 font-semibold overflow-x-auto no-scrollbar">
+            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
+            <span className="truncate">
+              <span className="hidden sm:inline">
+                Co-Teacher View Mode — Request Host Teacher to Enable Whiteboard Access
+              </span>
+              <span className="sm:hidden">Co-Teacher View Only</span>
             </span>
-            <span className="sm:hidden">Co-Teacher View Only</span>
-          </span>
+          </div>
         </div>
-      </div>
+        {!followTeacher && (
+          <div
+            data-prevent-nav-toggle="true"
+            data-testid="student-whiteboard-controls"
+            className="pointer-events-none fixed left-1/2 -translate-x-1/2 bottom-6 z-50 flex items-center select-none animate-in fade-in slide-in-from-bottom-3 duration-200"
+          >
+            <button
+              type="button"
+              data-testid="follow-teacher-btn"
+              onClick={() => {
+                onToggleFollow(true);
+                onChangeZoomMultiplier(() => 1.0);
+              }}
+              className="pointer-events-auto flex items-center gap-2 px-5 py-2.5 rounded-full bg-[#12a3ff] hover:bg-[#0d8de0] active:scale-95 text-white text-xs sm:text-sm font-semibold shadow-xl ring-2 ring-white/90 transition-all cursor-pointer"
+            >
+              <Compass className="w-4 h-4 shrink-0" />
+              <span>Follow Teacher</span>
+            </button>
+          </div>
+        )}
+      </>
     );
   }
 

@@ -70,6 +70,16 @@ export function useFullscreenWorkspace(
         setIsFullscreen(true);
         return;
       }
+      if (targetEl.mozRequestFullScreen) {
+        await targetEl.mozRequestFullScreen();
+        setIsFullscreen(true);
+        return;
+      }
+      if (targetEl.msRequestFullscreen) {
+        await targetEl.msRequestFullscreen();
+        setIsFullscreen(true);
+        return;
+      }
     } catch {
       // Fallback for iOS Safari / embedded webviews / restricted headless contexts
     }
@@ -86,6 +96,10 @@ export function useFullscreenWorkspace(
           await doc.exitFullscreen();
         } else if (doc.webkitExitFullscreen) {
           await doc.webkitExitFullscreen();
+        } else if (doc.mozCancelFullScreen) {
+          await doc.mozCancelFullScreen();
+        } else if (doc.msExitFullscreen) {
+          await doc.msExitFullscreen();
         }
       }
     } catch {

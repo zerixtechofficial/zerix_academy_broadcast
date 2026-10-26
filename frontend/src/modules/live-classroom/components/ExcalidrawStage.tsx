@@ -79,6 +79,7 @@ function getDeterministicNonce(el: any): number {
 interface ExcalidrawStageProps {
   role: 'teacher' | 'student';
   currentUserId?: string;
+  isHostTeacher?: boolean;
   canEditWhiteboard?: boolean;
   elements: ExcalidrawElementState[];
   files?: Record<string, any>;
@@ -102,9 +103,16 @@ interface ExcalidrawStageProps {
 
 const LASER_TRAIL_DURATION_MS = 900;
 
+/**
+ * Default font family for all Excalidraw text tools & injected elements:
+ * 5 = FONT_FAMILY.ComicShanns (Comic Sans / Comic Shanns in @excalidraw/excalidraw v0.18.0)
+ */
+export const DEFAULT_WHITEBOARD_FONT_FAMILY = 5;
+
 export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
   role,
   currentUserId,
+  isHostTeacher,
   canEditWhiteboard,
   elements,
   files = {},
@@ -231,9 +239,10 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
     );
   }, []);
 
-  // Camera & cursor throttle state for Teacher
+  // Camera & cursor throttle state for Teacher / Collaborator with Whiteboard access
   const lastCameraEmitRef = useRef<number>(0);
   const trailingCameraTimerRef = useRef<number | null>(null);
+  const suppressRemoteCameraEchoUntilRef = useRef<number>(0);
   const lastEmittedCameraRef = useRef<WhiteboardCameraState>({
     centerX: 640,
     centerY: 360,
@@ -265,6 +274,7 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
   });
 
   const isEditable = isRoughPad || (canEditWhiteboard ?? role === 'teacher');
+  const effectiveIsHostTeacher = isHostTeacher ?? role === 'teacher';
 
   // Load Excalidraw's restoreElements helper on client mount
   useEffect(() => {
@@ -281,10 +291,17 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
     };
   }, []);
 
-  // Helper to emit Teacher camera with leading + trailing throttle
+  // Helper to emit Teacher / Collaborator camera with leading + trailing throttle
   const emitTeacherCamera = useCallback(
     (scrollX: number, scrollY: number, zoomVal: number, w: number, h: number) => {
-      if (role !== 'teacher' || isRoughPad) return;
+      if (
+        !isEditable ||
+        isRoughPad ||
+        isApplyingRemoteRef.current ||
+        Date.now() < suppressRemoteCameraEchoUntilRef.current
+      ) {
+        return;
+      }
       const safeZoom = Math.max(0.1, zoomVal || 1);
       const safeW = Math.max(240, w || viewportSizeRef.current.width || 1280);
       const safeH = Math.max(200, h || viewportSizeRef.current.height || 720);
@@ -336,7 +353,7 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
         }, 45 - elapsed);
       }
     },
-    [role, isRoughPad]
+    [isEditable, isRoughPad]
   );
 
   // Measure wrapper container dimensions for Formula B viewport aspect-ratio auto-fit & call api.refresh()
@@ -373,9 +390,9 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
     };
   }, []);
 
-  // Emit initial & resized Teacher camera so Students in responsive mode always have exact Teacher viewport bounds
+  // Emit initial & resized Host Teacher camera so Co-Hosts & Students in responsive mode always have exact Teacher viewport bounds
   useEffect(() => {
-    if (role !== 'teacher' || isRoughPad || !apiReady) return;
+    if (!effectiveIsHostTeacher || !isEditable || isRoughPad || !apiReady) return;
     const api = excalidrawApiRef.current;
     if (!api) return;
     const appState = api.getAppState?.() || {};
@@ -383,7 +400,15 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
     const scrollY = appState.scrollY ?? 0;
     const zoomVal = appState.zoom?.value ?? 1;
     emitTeacherCamera(scrollX, scrollY, zoomVal, viewportSize.width, viewportSize.height);
-  }, [role, isRoughPad, apiReady, viewportSize.width, viewportSize.height, emitTeacherCamera]);
+  }, [
+    effectiveIsHostTeacher,
+    isEditable,
+    isRoughPad,
+    apiReady,
+    viewportSize.width,
+    viewportSize.height,
+    emitTeacherCamera,
+  ]);
 
   // Serialize a single Excalidraw element preserving all tool properties (Shapes, Arrows, Freedraw, Text, Images, Frames)
   // Rounds all stroke/element coordinates (x, y, width, height, points) to 1 decimal place (Math.round(val * 10) / 10) before emitting
@@ -428,7 +453,7 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
         copy.text = el.text ?? el.originalText ?? '';
         copy.originalText = el.originalText ?? el.text ?? '';
         copy.fontSize = el.fontSize ?? 18;
-        copy.fontFamily = el.fontFamily ?? 1;
+        copy.fontFamily = el.fontFamily ?? DEFAULT_WHITEBOARD_FONT_FAMILY;
         copy.textAlign = el.textAlign || 'left';
         copy.verticalAlign = el.verticalAlign || 'top';
         copy.lineHeight = el.lineHeight ?? 1.25;
@@ -635,7 +660,7 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
               text: resolvedText,
               originalText: el.originalText ?? resolvedText ?? '',
               fontSize: el.fontSize ?? 18,
-              fontFamily: el.fontFamily ?? 1,
+              fontFamily: el.fontFamily ?? DEFAULT_WHITEBOARD_FONT_FAMILY,
               textAlign: el.textAlign || 'left',
               verticalAlign: el.verticalAlign || 'top',
               lineHeight: el.lineHeight ?? 1.25,
@@ -838,6 +863,7 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
     api.updateScene({
       appState: {
         viewModeEnabled: !isEditable,
+        currentItemFontFamily: DEFAULT_WHITEBOARD_FONT_FAMILY,
       },
     });
     endApplyingRemote();
@@ -1080,33 +1106,43 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
     endApplyingRemote,
   ]);
 
-  // Formula B: Student Live Board Camera Sync + Custom Zoom Multiplier + Cursor Edge Follow
+  // Formula B: Live Board Camera Sync (Host, Co-Host & Students) + Custom Zoom Multiplier + Cursor Edge Follow
   useEffect(() => {
-    if (role !== 'student' || isRoughPad || !followTeacher) return;
+    if (isRoughPad || !followTeacher) return;
+    const isOwnCamera = Boolean(
+      currentUserId && camera.authorId && camera.authorId === currentUserId
+    );
+    // An editor who authored the latest camera update does not re-apply their own camera
+    if (isEditable && isOwnCamera) return;
+
     const api = excalidrawApiRef.current;
     if (!api || !apiReady) return;
-    // Do not interrupt a student who is actively dragging/panning or drawing on the live board
+    // Do not interrupt a user who is actively dragging/panning or drawing on the live board
     if (isPointerDownRef.current || (isEditable && isUserActivelyInteracting(api))) return;
 
     const Ws = Math.max(240, viewportSize.width);
     const Hs = Math.max(200, viewportSize.height);
 
-    // Formula B.2: Teacher visible world area
+    // Formula B.2: Active presenter visible world area
     const teacherZoom = Math.max(0.1, camera.zoom || 1);
     const W_teacher_visible = Math.max(240, (camera.viewportWidth || 1280) / teacherZoom);
     const H_teacher_visible = Math.max(200, (camera.viewportHeight || 720) / teacherZoom);
 
-    // Formula B.3: Auto-fit zoom ratio so 100% of Teacher's visible area fits inside Student screen
+    // Formula B.3: Auto-fit zoom ratio so 100% of presenter's visible area fits inside follower's screen
     const Z_autofit = Math.min(Ws / W_teacher_visible, Hs / H_teacher_visible);
 
-    // Formula B.4: Effective student zoom including custom student multiplier M_student
+    // Formula B.4: Effective zoom including custom zoom multiplier M_student
     const Z_effective = Math.min(5.0, Math.max(0.1, Z_autofit * studentZoomMultiplier));
 
     let targetCx = camera.centerX ?? 640;
     let targetCy = camera.centerY ?? 360;
 
-    // Formula B.5: When Teacher cursor is near viewport edge, smoothly lerp camera center toward (Lx, Ly)
-    if (!isEditable && whiteboardCursor?.active) {
+    // Formula B.5: When remote collaborator cursor is near viewport edge, smoothly lerp camera center toward (Lx, Ly)
+    const isRemoteCursor = Boolean(
+      whiteboardCursor?.active &&
+        (!currentUserId || !whiteboardCursor.userId || whiteboardCursor.userId !== currentUserId)
+    );
+    if (isRemoteCursor && whiteboardCursor) {
       const studentVisibleWorldW = Ws / Z_effective;
       const studentVisibleWorldH = Hs / Z_effective;
       const prevCenter = smoothedCenterRef.current;
@@ -1142,6 +1178,14 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
       Math.abs(curScrollY - scrollY) > 0.5 ||
       Math.abs(curZoom - Z_effective) > 0.002
     ) {
+      suppressRemoteCameraEchoUntilRef.current = Date.now() + 350;
+      lastEmittedCameraRef.current = {
+        centerX: Math.round(targetCx * 10) / 10,
+        centerY: Math.round(targetCy * 10) / 10,
+        zoom: Math.round(Z_effective * 1000) / 1000,
+        viewportWidth: Math.round(Ws),
+        viewportHeight: Math.round(Hs),
+      };
       beginApplyingRemote();
       api.updateScene({
         appState: {
@@ -1166,11 +1210,12 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
     });
   }, [
     role,
+    currentUserId,
     isRoughPad,
     isEditable,
     followTeacher,
     camera,
-    !isEditable ? whiteboardCursor : null,
+    whiteboardCursor,
     studentZoomMultiplier,
     viewportSize,
     apiReady,
@@ -1182,9 +1227,9 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
   // Append incoming remote collaborator laser points to the decaying laser trail ONLY when button === 'down' (dragging)
   useEffect(() => {
     if (isRoughPad) return;
-    const isSelfCursor =
-      Boolean(currentUserId && whiteboardCursor?.userId && whiteboardCursor.userId === currentUserId) ||
-      (isEditable && activeToolType === 'laser');
+    const isSelfCursor = Boolean(
+      currentUserId && whiteboardCursor?.userId && whiteboardCursor.userId === currentUserId
+    );
     if (isSelfCursor) return;
 
     if (
@@ -1271,8 +1316,9 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
           ? apiElements
           : sceneElementsOverride || apiElements || [];
 
-      // Detect native "Clear canvas" action
+      // Detect native "Clear canvas" action (restricted strictly to Teacher on Live Board)
       if (
+        role === 'teacher' &&
         isEditable &&
         !isRoughPad &&
         allElements.length === 0 &&
@@ -1772,8 +1818,8 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
         setRemoteSyncTick((t) => t + 1);
       }
 
-      // Teacher live board: emit camera center & viewport dimensions
-      if (role === 'teacher' && isEditable) {
+      // Live board collaborator (Host, Co-Host, or Student with WB access): emit camera center & viewport dimensions
+      if (isEditable && !isRoughPad) {
         const w = appState?.width || viewportSizeRef.current.width || 1280;
         const h = appState?.height || viewportSizeRef.current.height || 720;
         emitTeacherCamera(scrollX, scrollY, zoomVal, w, h);
@@ -1854,8 +1900,12 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
     [isEditable, isRoughPad, flushLocalSceneDiffs]
   );
 
-  // Clear entire Whiteboard for Teacher / Authorized Editor (or Student Personal Rough Pad)
+  // Clear entire Whiteboard for Teacher ONLY (or Student Personal Rough Pad).
+  // Students on the shared Live Board must NEVER be given a Clear button or permitted to clear the board.
+  const canClearWhiteboard = isEditable && (role === 'teacher' || isRoughPad);
+
   const handleClearTeacherBoard = useCallback(() => {
+    if (role !== 'teacher' && !isRoughPad) return;
     const api = excalidrawApiRef.current;
     if (!api) return;
     elementSigMapRef.current.clear();
@@ -1868,14 +1918,14 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
     } else {
       onClearBoardRef.current?.();
     }
-  }, [isRoughPad, beginApplyingRemote, endApplyingRemote]);
+  }, [role, isRoughPad, beginApplyingRemote, endApplyingRemote]);
 
   // Mount a dedicated slot inside Excalidraw's bottom-docked toolbar (.App-toolbar)
-  // so the "Clear" button lives exclusively inside the toolbar pill.
+  // so the "Clear" button lives exclusively inside the toolbar pill (Teacher / RoughPad only).
   const [toolbarClearSlot, setToolbarClearSlot] = useState<HTMLElement | null>(null);
 
   useEffect(() => {
-    if (!isEditable || !apiReady) {
+    if (!canClearWhiteboard || !apiReady) {
       setToolbarClearSlot(null);
       return;
     }
@@ -1906,7 +1956,7 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
     return () => {
       observer.disconnect();
     };
-  }, [isEditable, apiReady]);
+  }, [canClearWhiteboard, apiReady]);
 
   // Stable Excalidraw API callback: wait one tick after mount so Excalidraw's internal
   // initializeScene(initialData) microtask completes before apiReady triggers updateScene.
@@ -1935,7 +1985,7 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
       viewBackgroundColor: '#ffffff',
       currentItemStrokeColor: '#0f172a',
       currentItemBackgroundColor: 'transparent',
-      currentItemFontFamily: 1,
+      currentItemFontFamily: DEFAULT_WHITEBOARD_FONT_FAMILY,
       theme: 'light',
     },
   });
@@ -1958,7 +2008,7 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
         }
         return prev;
       });
-      if (role === 'teacher' && !isRoughPad) {
+      if (isEditable && !isRoughPad) {
         emitTeacherCamera(
           scrollX,
           scrollY,
@@ -1967,10 +2017,11 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
           viewportSizeRef.current.height
         );
       } else if (
-        role === 'student' &&
+        !isEditable &&
         !isRoughPad &&
         followTeacherRef.current &&
-        !isApplyingRemoteRef.current
+        !isApplyingRemoteRef.current &&
+        Date.now() >= suppressRemoteCameraEchoUntilRef.current
       ) {
         const baseView = lastAppliedTeacherViewRef.current || localViewState;
         if (
@@ -1984,21 +2035,21 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
         }
       }
     },
-    [role, isRoughPad, emitTeacherCamera, localViewState]
+    [isEditable, isRoughPad, emitTeacherCamera, localViewState]
   );
 
-  // Student canvas pan/scroll gestures: moving canvas while following teacher unlocks followTeacher
+  // Follower canvas pan/scroll gestures: moving canvas while following unlocks followTeacher
   // and reveals the bottom "Follow Teacher" button; clicking "Follow Teacher" re-locks and hides it.
   const handleStudentWrapperWheel = useCallback(() => {
-    if (role === 'student' && !isRoughPad && followTeacherRef.current) {
+    if (!isEditable && !isRoughPad && followTeacherRef.current) {
       followTeacherRef.current = false;
       onToggleFollowRef.current(false);
     }
-  }, [role, isRoughPad]);
+  }, [isEditable, isRoughPad]);
 
   const handleStudentPointerDownCapture = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      if (role !== 'student' || isRoughPad) return;
+      if ((role !== 'student' && isEditable) || isRoughPad) return;
       const target = e.target as HTMLElement | null;
       if (
         target?.closest(
@@ -2026,14 +2077,14 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
   const handleStudentPointerMoveCapture = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       const drag = studentDragPanStartRef.current;
-      if (!drag || role !== 'student' || isRoughPad) return;
+      if (!drag || isRoughPad) return;
       const dx = e.clientX - drag.clientX;
       const dy = e.clientY - drag.clientY;
       if (!drag.hasPanned && Math.hypot(dx, dy) < 5) return;
 
       drag.hasPanned = true;
       isPointerDownRef.current = true;
-      if (followTeacherRef.current) {
+      if (!isEditable && followTeacherRef.current) {
         followTeacherRef.current = false;
         onToggleFollowRef.current(false);
       }
@@ -2060,7 +2111,7 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
         }
       }
     },
-    [role, isRoughPad, isEditable, beginApplyingRemote, endApplyingRemote]
+    [isRoughPad, isEditable, beginApplyingRemote, endApplyingRemote]
   );
 
   const handleStudentPointerUpCapture = useCallback(() => {
@@ -2134,6 +2185,7 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
   return (
     <div
       ref={wrapperRef}
+      data-role={role}
       onWheel={handleStudentWrapperWheel}
       onPointerDownCapture={handleStudentPointerDownCapture}
       onPointerMoveCapture={handleStudentPointerMoveCapture}
@@ -2155,8 +2207,8 @@ export const ExcalidrawStage: React.FC<ExcalidrawStageProps> = ({
         UIOptions={uiOptions}
       />
 
-      {/* Portal Clear Button Directly Inside Excalidraw's Bottom Toolbar Pill */}
-      {isEditable &&
+      {/* Portal Clear Button Directly Inside Excalidraw's Bottom Toolbar Pill (Teacher / RoughPad ONLY) */}
+      {canClearWhiteboard &&
         toolbarClearSlot &&
         createPortal(
           <>
