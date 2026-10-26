@@ -78,7 +78,7 @@ export class ContentEngine {
     blockOffsetRatio: number,
     authorId?: string
   ): Promise<BroadcastPacket> {
-    const clampedRatio = Math.max(0, Math.min(1, blockOffsetRatio));
+    const clampedRatio = Math.max(-0.5, Math.min(1.5, blockOffsetRatio));
     const current = await this.getState(sessionId);
     const updatedAt = Date.now();
 

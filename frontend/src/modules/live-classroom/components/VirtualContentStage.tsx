@@ -161,6 +161,31 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     setBlockLayouts(nextLayouts);
   }, []);
 
+  /**
+   * Returns a fresh `BlockDomLayoutCache` for `blockId`, synchronously measuring the live
+   * DOM node if the cache is not yet populated or if the block's rendered dimensions changed.
+   */
+  const getFreshBlockLayout = useCallback(
+    (blockId: string): BlockDomLayoutCache | undefined => {
+      const cached = blockLayouts[blockId];
+      const liveEl = blockRefs.current[blockId];
+      if (!liveEl) return cached;
+      const liveRect = liveEl.getBoundingClientRect();
+      if (
+        !cached ||
+        cached.blockRect.width <= 0 ||
+        Math.abs(cached.blockRect.width - liveRect.width) > 1.5 ||
+        Math.abs(cached.blockRect.height - liveRect.height) > 1.5
+      ) {
+        if (liveRect.width > 0 && liveRect.height > 0) {
+          return measureBlockDomLayout(blockId, liveEl);
+        }
+      }
+      return cached;
+    },
+    [blockLayouts]
+  );
+
   useEffect(() => {
     const rafId = window.requestAnimationFrame(() => {
       measureAllBlocksLayout();
@@ -216,7 +241,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     }
   }, [activeTool, canAnnotate, onLaserMove]);
 
-  // Remote Laser / Cursor Sync (Host, Co-Host & Students): calculates accurate sheet-relative coordinates and generates Excalidraw decaying trail
+  // Remote Laser / Cursor Sync (Host, Co-Host & Students): calculates accurate word/region-anchored coordinates and generates Excalidraw decaying trail
   useEffect(() => {
     if (!isRemoteLaser) {
       setRemoteLaserCoord(null);
@@ -235,8 +260,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     const targetBlock = laserPointer.blockId ? blockRefs.current[laserPointer.blockId] : null;
     if (targetBlock) {
       const bRect = targetBlock.getBoundingClientRect();
-      const cache = blockLayouts[laserPointer.blockId!];
-      if (cache && laserPointer.tokenId && typeof laserPointer.rx === 'number') {
+      const cache = getFreshBlockLayout(laserPointer.blockId!);
+      if (cache && cache.blockRect.width > 0) {
         const proj = projectPointToDevicePixels(laserPointer as any, cache);
         targetX = bRect.left - sheetRect.left + proj.px;
         targetY = bRect.top - sheetRect.top + proj.py;
@@ -266,13 +291,13 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         return [...fresh.slice(-64), { x: targetX, y: targetY, t: now }];
       });
     }
-  }, [isRemoteLaser, teacherLaserCoord?.active, laserPointer, blockLayouts]);
+  }, [isRemoteLaser, teacherLaserCoord?.active, laserPointer, blockLayouts, getFreshBlockLayout]);
 
-  // Viewport Auto-Scroll Sync to Remote Collaborator's Cursor Position & Active Block (Host, Co-Host & Students):
-  // In Mobile Landscape mode, screen height is very short (~300px) so only ONE section/box fits at a time.
-  // When Presenter points to or focuses on a section with their cursor/laser, this ensures the follower's
-  // mobile landscape viewport smoothly scrolls to frame THAT specific box or content only.
-  // In Portrait mode or Desktop, it smoothly scrolls when the focused box is not already fully visible.
+  // Viewport Auto-Scroll Sync to Remote Collaborator's Cursor/Pen Position (Host, Co-Host & Students):
+  // IMPORTANT: If the exact point being marked or pointed to is ALREADY visible inside the viewer's
+  // viewport (e.g. on a second Laptop at the same scroll position), do NOT scroll or yank the block to
+  // the top of the screen! Only adjust scroll smoothly if the remote point is actually off-screen
+  // (e.g. on a smaller mobile screen where wrapped text pushed the target point below/above the fold).
   useEffect(() => {
     if (!followTeacher || !isRemoteLaser) return;
     const container = scrollContainerRef.current;
@@ -281,106 +306,70 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     const targetBlockId = laserPointer.blockId;
     if (!targetBlockId) return;
 
-    const viewportHeight = container.clientHeight;
-    const isLandscape =
-      typeof window !== 'undefined' &&
-      (window.innerWidth > window.innerHeight || viewportHeight <= 480);
-
-    // If teacher's cursor is in blk_header, scroll to exact top 0 so heading is 100% visible
-    if (targetBlockId === 'blk_header') {
-      if (lastTargetBlockIdRef.current !== 'blk_header') {
-        lastTargetBlockIdRef.current = 'blk_header';
-        isProgrammaticScrollRef.current = true;
-        if (programmaticScrollTimeoutRef.current) window.clearTimeout(programmaticScrollTimeoutRef.current);
-        programmaticScrollTimeoutRef.current = window.setTimeout(() => {
-          isProgrammaticScrollRef.current = false;
-        }, 1200);
-
-        container.scrollTo({
-          top: 0,
-          behavior: 'smooth',
-        });
-        setIsOutOfSync(false);
-      }
-      return;
-    }
-
     const targetBlock = blockRefs.current[targetBlockId];
     if (!targetBlock) return;
 
+    const viewportHeight = Math.max(1, container.clientHeight);
     const containerRect = container.getBoundingClientRect();
     const blockRect = targetBlock.getBoundingClientRect();
     const relativeBlockTop = blockRect.top - containerRect.top + container.scrollTop;
-    const blockHeight = Math.max(1, targetBlock.offsetHeight);
+    const blockHeight = Math.max(1, targetBlock.offsetHeight || blockRect.height);
+
+    const cache = getFreshBlockLayout(targetBlockId);
+    let pointYInBlock = ((laserPointer.y || 0) / 100) * blockHeight;
+    if (cache && cache.blockRect.width > 0) {
+      const proj = projectPointToDevicePixels(laserPointer as any, cache);
+      pointYInBlock = proj.py;
+    }
+
+    const pointYInScroll = relativeBlockTop + pointYInBlock;
+    const pointYInViewport = pointYInScroll - container.scrollTop;
+    const edgeMargin = Math.min(32, Math.max(12, viewportHeight * 0.08));
+
+    // If the exact remote pointer/pen position is already comfortably visible in the viewport,
+    // keep the screen position steady and DO NOT jump the section to the top!
+    if (pointYInViewport >= edgeMargin && pointYInViewport <= viewportHeight - edgeMargin) {
+      lastTargetBlockIdRef.current = targetBlockId;
+      return;
+    }
 
     const now = Date.now();
     const hasBlockChanged = lastTargetBlockIdRef.current !== targetBlockId;
-    const blockTopInViewport = relativeBlockTop - container.scrollTop;
-    const blockBottomInViewport = relativeBlockTop + blockHeight - container.scrollTop;
-
-    if (isLandscape) {
-      // In Mobile Landscape: only ONE section fits at a time.
-      // Smoothly scroll and frame THAT box or content only.
-      if (hasBlockChanged || now - lastCursorScrollTimeRef.current > 350) {
-        let targetScrollTop = relativeBlockTop - 10;
-        if (blockHeight > viewportHeight) {
-          // If block is taller than short landscape viewport, keep cursor comfortably centered in view
-          const relCursorYInBlock = ((laserPointer.y || 0) / 100) * blockHeight;
-          const desiredScroll = relativeBlockTop + relCursorYInBlock - viewportHeight / 2;
-          const minScroll = relativeBlockTop - 10;
-          const maxScroll = relativeBlockTop + blockHeight - viewportHeight + 10;
-          targetScrollTop = Math.max(minScroll, Math.min(maxScroll, desiredScroll));
-        }
-
-        const scrollDiff = Math.abs(container.scrollTop - targetScrollTop);
-        if (hasBlockChanged || scrollDiff > 24) {
-          lastTargetBlockIdRef.current = targetBlockId;
-          lastCursorScrollTimeRef.current = now;
-
-          isProgrammaticScrollRef.current = true;
-          if (programmaticScrollTimeoutRef.current) window.clearTimeout(programmaticScrollTimeoutRef.current);
-          programmaticScrollTimeoutRef.current = window.setTimeout(() => {
-            isProgrammaticScrollRef.current = false;
-          }, 1000);
-
-          container.scrollTo({
-            top: Math.max(0, targetScrollTop),
-            behavior: 'smooth',
-          });
-          setIsOutOfSync(false);
-        }
-      }
-    } else {
-      // In Portrait mode or Desktop:
-      // If block is already comfortably visible, keep view steady without unnecessary jumping.
-      const isBlockComfortablyVisible =
-        blockTopInViewport >= 10 && blockBottomInViewport <= viewportHeight - 10;
-
-      if (!isBlockComfortablyVisible && (hasBlockChanged || now - lastCursorScrollTimeRef.current > 500)) {
-        lastTargetBlockIdRef.current = targetBlockId;
-        lastCursorScrollTimeRef.current = now;
-
-        const targetScrollTop = relativeBlockTop - 16;
-        isProgrammaticScrollRef.current = true;
-        if (programmaticScrollTimeoutRef.current) window.clearTimeout(programmaticScrollTimeoutRef.current);
-        programmaticScrollTimeoutRef.current = window.setTimeout(() => {
-          isProgrammaticScrollRef.current = false;
-        }, 1000);
-
-        container.scrollTo({
-          top: Math.max(0, targetScrollTop),
-          behavior: 'smooth',
-        });
-        setIsOutOfSync(false);
-      } else if (hasBlockChanged) {
-        lastTargetBlockIdRef.current = targetBlockId;
-      }
+    if (!hasBlockChanged && now - lastCursorScrollTimeRef.current < 400) {
+      return;
     }
+
+    let targetScrollTop = container.scrollTop;
+    if (pointYInViewport > viewportHeight - edgeMargin) {
+      targetScrollTop = pointYInScroll - viewportHeight * 0.65;
+    } else if (pointYInViewport < edgeMargin) {
+      targetScrollTop = Math.max(0, pointYInScroll - viewportHeight * 0.35);
+    }
+
+    if (Math.abs(container.scrollTop - targetScrollTop) <= 12) {
+      lastTargetBlockIdRef.current = targetBlockId;
+      return;
+    }
+
+    lastTargetBlockIdRef.current = targetBlockId;
+    lastCursorScrollTimeRef.current = now;
+
+    isProgrammaticScrollRef.current = true;
+    if (programmaticScrollTimeoutRef.current) window.clearTimeout(programmaticScrollTimeoutRef.current);
+    programmaticScrollTimeoutRef.current = window.setTimeout(() => {
+      isProgrammaticScrollRef.current = false;
+    }, 1000);
+
+    container.scrollTo({
+      top: Math.max(0, targetScrollTop),
+      behavior: 'smooth',
+    });
+    setIsOutOfSync(false);
   }, [
     followTeacher,
     isRemoteLaser,
-    laserPointer.blockId,
-    laserPointer.y,
+    laserPointer,
+    getFreshBlockLayout,
   ]);
 
   // Scroll sync to Presenter's (blockId, offsetRatio) across Host, Co-Host & Students
@@ -398,15 +387,19 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     const offsetRatio = contentState.scrollAnchor?.offsetRatio || 0;
 
     // If presenter is at top showing heading (blk_header) with near-zero offset (or no anchor),
-    // scroll to exact top 0 so in mobile phone content heading is 100% visible and not scrolled below heading
-    if ((anchorBlockId === 'blk_header' || !anchorBlockId) && offsetRatio <= 0.05) {
+    // scroll to exact top 0 so in mobile phone content heading is 100% visible
+    if ((anchorBlockId === 'blk_header' || !anchorBlockId) && Math.abs(offsetRatio) <= 0.02) {
+      if (container.scrollTop <= 3) {
+        setIsOutOfSync(false);
+        return;
+      }
       if (programmaticScrollTimeoutRef.current) {
         window.clearTimeout(programmaticScrollTimeoutRef.current);
       }
       isProgrammaticScrollRef.current = true;
       programmaticScrollTimeoutRef.current = window.setTimeout(() => {
         isProgrammaticScrollRef.current = false;
-      }, 1200);
+      }, 1000);
 
       container.scrollTo({
         top: 0,
@@ -422,23 +415,27 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       (anchorBlockId === 'blk_header' ? blockRefs.current['blk_header'] : null);
     if (!targetBlock) return;
 
+    const containerRect = container.getBoundingClientRect();
+    const blockRect = targetBlock.getBoundingClientRect();
+    const relativeTop = blockRect.top - containerRect.top + container.scrollTop;
+    const blockHeight = Math.max(1, targetBlock.offsetHeight || blockRect.height);
+    const targetScrollTop = Math.max(0, relativeTop + blockHeight * offsetRatio);
+
+    if (Math.abs(container.scrollTop - targetScrollTop) <= 3) {
+      setIsOutOfSync(false);
+      return;
+    }
+
     if (programmaticScrollTimeoutRef.current) {
       window.clearTimeout(programmaticScrollTimeoutRef.current);
     }
     isProgrammaticScrollRef.current = true;
     programmaticScrollTimeoutRef.current = window.setTimeout(() => {
       isProgrammaticScrollRef.current = false;
-    }, 1200);
-
-    const containerRect = container.getBoundingClientRect();
-    const blockRect = targetBlock.getBoundingClientRect();
-    const relativeTop = blockRect.top - containerRect.top + container.scrollTop;
-    const blockHeight = Math.max(1, targetBlock.offsetHeight);
-    const targetScrollTop =
-      relativeTop + blockHeight * offsetRatio - 20;
+    }, 1000);
 
     container.scrollTo({
-      top: Math.max(0, targetScrollTop),
+      top: targetScrollTop,
       behavior: 'smooth',
     });
 
@@ -479,7 +476,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   }, []);
 
   // Scroll listener:
-  // - For Collaborators with Board/Content Access (Host, Co-Host, or Student with Board Access): computes top visible blockId + offsetRatio and broadcasts to room
+  // - For Collaborators with Board/Content Access (Host, Co-Host, or Student with Board Access): computes top visible blockId + exact continuous offsetRatio and broadcasts to room
   // - For View-Only Students: checks if student is in sync with presenter's anchor; only shows Follow Teacher if out of sync
   const handleScroll = useCallback(() => {
     const container = scrollContainerRef.current;
@@ -489,7 +486,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       const anchorBlockId = contentState.scrollAnchor?.blockId;
       const offsetRatio = contentState.scrollAnchor?.offsetRatio || 0;
       let teacherTargetScrollTop = 0;
-      if ((anchorBlockId === 'blk_header' || !anchorBlockId) && offsetRatio <= 0.05) {
+      if ((anchorBlockId === 'blk_header' || !anchorBlockId) && Math.abs(offsetRatio) <= 0.02) {
         teacherTargetScrollTop = 0;
       } else {
         const targetBlock =
@@ -499,9 +496,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           const containerRect = container.getBoundingClientRect();
           const blockRect = targetBlock.getBoundingClientRect();
           const relativeTop = blockRect.top - containerRect.top + container.scrollTop;
-          const blockHeight = Math.max(1, targetBlock.offsetHeight);
-          teacherTargetScrollTop =
-            relativeTop + blockHeight * offsetRatio - 20;
+          const blockHeight = Math.max(1, targetBlock.offsetHeight || blockRect.height);
+          teacherTargetScrollTop = Math.max(0, relativeTop + blockHeight * offsetRatio);
         }
       }
       const scrollDiff = Math.abs(container.scrollTop - teacherTargetScrollTop);
@@ -531,8 +527,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     if (now - lastScrollEmitRef.current < 60) return;
     lastScrollEmitRef.current = now;
 
-    // If teacher is at top (scrollTop <= 15), anchor to heading directly
-    if (container.scrollTop <= 15) {
+    // If presenter is at top (scrollTop <= 8), anchor to heading directly
+    if (container.scrollTop <= 8) {
       lastMatchedBlockIdRef.current = 'blk_header';
       lastOffsetRatioRef.current = 0;
       onScrollSync('blk_header', 0);
@@ -553,19 +549,19 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       const el = item.el;
       if (!el) continue;
       const rect = el.getBoundingClientRect();
-      const relativeTop = rect.top - containerTop;
-      const height = Math.max(1, rect.height);
+      const blockTopInScroll = rect.top - containerTop + container.scrollTop;
+      const height = Math.max(1, el.offsetHeight || rect.height);
 
-      if (relativeTop + height > 28) {
+      if (blockTopInScroll + height > container.scrollTop + 8) {
         matchedBlockId = item.blockId;
-        const offsetPx = Math.max(0, 28 - relativeTop);
-        offsetRatio = Math.min(1, Math.max(0, offsetPx / height));
+        const rawRatio = (container.scrollTop - blockTopInScroll) / height;
+        offsetRatio = Math.max(-0.5, Math.min(1.5, rawRatio));
         found = true;
         break;
       }
     }
 
-    // If teacher is scrolled down past all measured tops (e.g. at the bottom of the page),
+    // If presenter is scrolled down past all measured tops (e.g. at the bottom of the page),
     // default to the last content block rather than reverting to blk_header
     if (!found && container.scrollTop > 30) {
       if (blocks.length > 0) {
@@ -576,7 +572,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
     lastMatchedBlockIdRef.current = matchedBlockId;
     lastOffsetRatioRef.current = offsetRatio;
-    onScrollSync(matchedBlockId, Number(offsetRatio.toFixed(3)));
+    onScrollSync(matchedBlockId, Number(offsetRatio.toFixed(4)));
   }, [canAnnotate, followTeacher, onToggleFollow, blocks, onScrollSync, contentState.scrollAnchor]);
 
   // Erase strokes near a pointer coordinate or matching a touched word token
@@ -696,19 +692,23 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       setCurrentPoints(next);
       setCurrentAnchorTokens(extractAnchorTokensFromPoints(next, cache));
 
-      // Broadcast active block and pen pointer to sync mobile landscape view to this block
+      // Broadcast active block and word/region-anchored pen pointer so remote screens track exact pen position
       const now = Date.now();
       if (now - lastLaserEmitRef.current >= 30) {
         lastLaserEmitRef.current = now;
-        const blockRelX = Math.max(0, Math.min(100, ((e.clientX - liveRect.left) / Math.max(1, liveRect.width)) * 100));
-        const blockRelY = Math.max(0, Math.min(100, ((e.clientY - liveRect.top) / Math.max(1, liveRect.height)) * 100));
         onLaserMove({
           blockId,
-          x: Math.round(blockRelX * 10) / 10,
-          y: Math.round(blockRelY * 10) / 10,
+          x: pt.x,
+          y: pt.y,
           active: true,
           tool: 'pen',
           isDragging: true,
+          tokenId: pt.tokenId,
+          rx: pt.rx,
+          ry: pt.ry,
+          regionId: pt.regionId,
+          regionRx: pt.regionRx,
+          regionRy: pt.regionRy,
         });
       }
     }
@@ -851,18 +851,22 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       let tokenId: string | undefined;
       let rx: number | undefined;
       let ry: number | undefined;
+      let regionId: any;
+      let regionRx: number | undefined;
+      let regionRy: number | undefined;
 
       if (targetBlockEl && targetBlockId) {
         const bRect = targetBlockEl.getBoundingClientRect();
-        blockRelX = Math.max(0, Math.min(100, ((e.clientX - bRect.left) / Math.max(1, bRect.width)) * 100));
-        blockRelY = Math.max(0, Math.min(100, ((e.clientY - bRect.top) / Math.max(1, bRect.height)) * 100));
-        const cache = blockLayouts[targetBlockId] || measureBlockDomLayout(targetBlockId, targetBlockEl);
-        const hit = hitTestWordToken(e.clientX - bRect.left, e.clientY - bRect.top, cache, 6);
-        if (hit) {
-          tokenId = hit.token.tokenId;
-          rx = hit.rx;
-          ry = hit.ry;
-        }
+        const cache = getFreshBlockLayout(targetBlockId) || measureBlockDomLayout(targetBlockId, targetBlockEl);
+        const captured = captureStrokePoint(e.clientX, e.clientY, cache, bRect);
+        blockRelX = captured.x;
+        blockRelY = captured.y;
+        tokenId = captured.tokenId;
+        rx = captured.rx;
+        ry = captured.ry;
+        regionId = captured.regionId;
+        regionRx = captured.regionRx;
+        regionRy = captured.regionRy;
       }
 
       const sheetXPct = Math.round(((sheetX / Math.max(1, sheetRect.width)) * 100) * 10) / 10;
@@ -879,6 +883,9 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         tokenId,
         rx,
         ry,
+        regionId,
+        regionRx,
+        regionRy,
         sheetXPct,
         sheetYPct,
         sheetYPx,
@@ -964,6 +971,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       const isLaserTarget = activeLaserTokenId === seg.tokenId;
 
       const style: React.CSSProperties = {};
+      /* Word highlighting with underline commented out as of now — using Pen SVG marking only
       if (isHighlighted && info?.highlightedColor) {
         style.backgroundColor = hexToRgba(info.highlightedColor, 0.42);
         style.boxShadow = `0 0 0 2px ${hexToRgba(info.highlightedColor, 0.35)}`;
@@ -973,6 +981,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         style.borderBottom = `2px solid ${info.markedColor}`;
         style.borderRadius = '2px';
       }
+      */
 
       return (
         <span
@@ -1203,9 +1212,9 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
               });
             }
 
-            const headerLayoutCache = blockLayouts[headerBlockId];
-            const headerSvgWidth = Math.max(100, Math.round(headerLayoutCache?.blockRect.width || 760));
-            const headerSvgHeight = Math.max(40, Math.round(headerLayoutCache?.blockRect.height || 80));
+            const headerLayoutCache = getFreshBlockLayout(headerBlockId);
+            const headerSvgWidth = Math.max(100, Number((headerLayoutCache?.blockRect.width || 760).toFixed(2)));
+            const headerSvgHeight = Math.max(40, Number((headerLayoutCache?.blockRect.height || 80).toFixed(2)));
 
             const lessonTitleSegments = tokenizeText(lessonTitle, 'title');
             const topicTitleSegments = tokenizeText(topicTitle, 'content');
@@ -1262,6 +1271,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                 {/* SVG Vector Drawing Overlay for Header */}
                 <svg
                   viewBox={`0 0 ${headerSvgWidth} ${headerSvgHeight}`}
+                  preserveAspectRatio="none"
                   className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-10"
                 >
                   {allHeaderStrokes.map((stroke) => {
@@ -1342,9 +1352,9 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                 });
               }
 
-              const layoutCache = blockLayouts[block.blockId];
-              const svgWidth = Math.max(100, Math.round(layoutCache?.blockRect.width || 760));
-              const svgHeight = Math.max(60, Math.round(layoutCache?.blockRect.height || 180));
+              const layoutCache = getFreshBlockLayout(block.blockId);
+              const svgWidth = Math.max(100, Number((layoutCache?.blockRect.width || 760).toFixed(2)));
+              const svgHeight = Math.max(60, Number((layoutCache?.blockRect.height || 180).toFixed(2)));
 
               const titleSegments = tokenizeText(block.title, 'title');
               const contentSegments = tokenizeText(block.content, 'content');
@@ -1485,6 +1495,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                   {/* Word-Anchored & Region-Anchored SVG Vector Overlay */}
                   <svg
                     viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+                    preserveAspectRatio="none"
                     className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-10"
                   >
                     {allBlockStrokes.map((stroke) => {

@@ -173,7 +173,11 @@ export function measureBlockDomLayout(
   regionNodes.forEach((node) => {
     const regionId = node.getAttribute('data-region-id') as ContentRegionId | null;
     if (!regionId) return;
-    const r = node.getBoundingClientRect();
+    const targetEl =
+      regionId === 'diagram'
+        ? (node.querySelector('svg') as Element | null) || node
+        : node;
+    const r = targetEl.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return;
     regions.set(regionId, {
       regionId,
@@ -196,25 +200,32 @@ export function measureBlockDomLayout(
 /**
  * Hit-tests a local coordinate `(localX, localY)` (in CSS pixels relative to block top-left)
  * against the block's word tokens.
- * First checks exact containment, then checks a tight tolerance halo (e.g. underlines just below a word).
+ *
+ * Line-Aware Asymmetric Vertical Geometry:
+ * In multi-line paragraphs (`leading-[1.7]`), the vertical gap between `line1.bottom` and
+ * `line2.top` is ~7px. Teachers naturally draw underlines 1-6px below the word on Line 1
+ * (`line1.bottom .. line1.bottom + 6px`), which touches the top ascender padding of Line 2.
+ * Each word's primary vertical target zone is `[t.top + 1.5, t.top + t.height + 6]` so that
+ * underlines drawn below a line ALWAYS bind to the word being underlined on that line and
+ * never snap to the top of a word on the line below.
  */
 export function hitTestWordToken(
   localX: number,
   localY: number,
   cache: BlockDomLayoutCache,
-  tolerancePx = 6
+  tolerancePx = 12
 ): { token: CachedTokenBox; rx: number; ry: number } | null {
-  // 1. Direct containment (including small horizontal space padding between words on the same line)
+  // 1. Direct containment including each word's immediate underline zone
   for (let i = 0; i < cache.tokenList.length; i++) {
     const t = cache.tokenList[i];
     if (
-      localX >= t.left - 2 &&
-      localX <= t.left + t.width + 2 &&
-      localY >= t.top - 2 &&
-      localY <= t.top + t.height + 2
+      localX >= t.left - 3 &&
+      localX <= t.left + t.width + 3 &&
+      localY >= t.top + 1.5 &&
+      localY <= t.top + t.height + 6
     ) {
-      const rx = Math.max(-0.15, Math.min(1.15, (localX - t.left) / Math.max(1, t.width)));
-      const ry = Math.max(-0.25, Math.min(1.25, (localY - t.top) / Math.max(1, t.height)));
+      const rx = Math.max(-1.5, Math.min(2.5, (localX - t.left) / Math.max(1, t.width)));
+      const ry = Math.max(-1.0, Math.min(2.2, (localY - t.top) / Math.max(1, t.height)));
       return {
         token: t,
         rx: Math.round(rx * 1000) / 1000,
@@ -223,7 +234,9 @@ export function hitTestWordToken(
     }
   }
 
-  // 2. Halo match (e.g. Teacher draws an underline 3-6px directly under a word)
+  // 2. Asymmetric line-aware halo match (inter-word spaces and underlines below text)
+  const tolX = Math.max(tolerancePx, 28);
+  const tolY = Math.max(tolerancePx, 16);
   let bestToken: CachedTokenBox | null = null;
   let bestDist = Infinity;
 
@@ -231,11 +244,19 @@ export function hitTestWordToken(
     const t = cache.tokenList[i];
     const dx =
       localX < t.left ? t.left - localX : localX > t.left + t.width ? localX - (t.left + t.width) : 0;
-    const dy =
-      localY < t.top ? t.top - localY : localY > t.top + t.height ? localY - (t.top + t.height) : 0;
 
-    if (dx <= tolerancePx && dy <= tolerancePx) {
-      const dist = dx * dx + dy * dy;
+    const effectiveTop = t.top + 1.5;
+    const effectiveBottom = t.top + t.height + 6;
+    const dy =
+      localY < effectiveTop
+        ? (effectiveTop - localY) * 2.0
+        : localY > effectiveBottom
+        ? localY - effectiveBottom
+        : 0;
+
+    if (dx <= tolX && dy <= tolY) {
+      // Weight vertical distance strongly so inter-word spaces stay on the same line
+      const dist = dx * dx + (dy * 4.0) * (dy * 4.0);
       if (dist < bestDist) {
         bestDist = dist;
         bestToken = t;
@@ -244,8 +265,8 @@ export function hitTestWordToken(
   }
 
   if (bestToken) {
-    const rx = Math.max(-0.2, Math.min(1.2, (localX - bestToken.left) / Math.max(1, bestToken.width)));
-    const ry = Math.max(-0.35, Math.min(1.35, (localY - bestToken.top) / Math.max(1, bestToken.height)));
+    const rx = Math.max(-1.5, Math.min(2.5, (localX - bestToken.left) / Math.max(1, bestToken.width)));
+    const ry = Math.max(-1.0, Math.min(2.2, (localY - bestToken.top) / Math.max(1, bestToken.height)));
     return {
       token: bestToken,
       rx: Math.round(rx * 1000) / 1000,
@@ -308,7 +329,7 @@ export function captureStrokePoint(
 
   // Hit-test word tokens (unless inside a pure SVG diagram region)
   if (point.regionId !== 'diagram') {
-    const hit = hitTestWordToken(localX, localY, cache, 7);
+    const hit = hitTestWordToken(localX, localY, cache, 14);
     if (hit) {
       point.tokenId = hit.token.tokenId;
       point.rx = hit.rx;
@@ -356,7 +377,7 @@ export function extractAnchorTokensFromPoints(
         !Number.isNaN(prevIdx) &&
         !Number.isNaN(currIdx) &&
         Math.abs(currIdx - prevIdx) > 1 &&
-        Math.abs(currIdx - prevIdx) <= 6
+        Math.abs(currIdx - prevIdx) <= 8
       ) {
         const prevBox = cache.tokens.get(prevId);
         const currBox = cache.tokens.get(pt.tokenId);
@@ -381,22 +402,18 @@ export function extractAnchorTokensFromPoints(
 /**
  * Resolves a single `AnchoredStrokePoint` into local block pixel coordinates `(px, py)`
  * on the current viewer's device using the viewer's live `BlockDomLayoutCache`.
+ *
+ * Uses Word-Token Anchoring first (`tokenId`, `rx`, `ry`) so Pen strokes and Laser pointers
+ * land on the exact same word and character offset on both Laptop (820px) and Mobile (360px),
+ * even when text wraps into additional lines on smaller screens.
  */
 export function projectPointToDevicePixels(
   pt: AnchoredStrokePoint,
   cache: BlockDomLayoutCache,
-  isPenStroke?: boolean
+  _isPenStroke?: boolean
 ): { px: number; py: number; tokenBox?: CachedTokenBox } {
   const blockW = Math.max(1, cache.blockRect.width);
   const blockH = Math.max(1, cache.blockRect.height);
-
-  // If freehand pen stroke, map directly to exact percentage to preserve smooth continuous freehand curves
-  if (isPenStroke) {
-    return {
-      px: (pt.x / 100) * blockW,
-      py: (pt.y / 100) * blockH,
-    };
-  }
 
   // 1. Word-token anchored point: maps directly onto the exact same word on this device!
   if (pt.tokenId && typeof pt.rx === 'number' && typeof pt.ry === 'number') {
@@ -433,6 +450,94 @@ export function projectPointToDevicePixels(
 }
 
 /**
+ * Expands horizontal multi-word stroke segments that wrapped across multiple lines on the
+ * current viewer's device so that the end of the upper line and the start of the wrapped
+ * lower line are cleanly anchored without missing intermediate words.
+ */
+function expandWrappedTokenPoints(
+  points: AnchoredStrokePoint[],
+  cache: BlockDomLayoutCache
+): AnchoredStrokePoint[] {
+  if (points.length < 2 || cache.tokens.size === 0) return points;
+
+  const expanded: AnchoredStrokePoint[] = [];
+  for (let i = 0; i < points.length; i++) {
+    const currPt = points[i];
+    expanded.push(currPt);
+
+    if (i >= points.length - 1) continue;
+    const nextPt = points[i + 1];
+    if (!currPt.tokenId || !nextPt.tokenId || currPt.tokenId === nextPt.tokenId) continue;
+
+    const [currPrefix, currIdxStr] = currPt.tokenId.split(':');
+    const [nextPrefix, nextIdxStr] = nextPt.tokenId.split(':');
+    const currIdx = Number(currIdxStr);
+    const nextIdx = Number(nextIdxStr);
+
+    if (
+      currPrefix !== nextPrefix ||
+      Number.isNaN(currIdx) ||
+      Number.isNaN(nextIdx) ||
+      nextIdx <= currIdx ||
+      nextIdx - currIdx > 12
+    ) {
+      continue;
+    }
+
+    const currBox = cache.tokens.get(currPt.tokenId);
+    const nextBox = cache.tokens.get(nextPt.tokenId);
+    if (!currBox || !nextBox) continue;
+
+    const avgH = (currBox.height + nextBox.height) * 0.5;
+    const isWrappedOnViewer = Math.abs(nextBox.top - currBox.top) > avgH * 0.6;
+    const ryA = typeof currPt.ry === 'number' ? currPt.ry : 0.95;
+    const ryB = typeof nextPt.ry === 'number' ? nextPt.ry : 0.95;
+
+    if (isWrappedOnViewer && Math.abs(ryB - ryA) < 0.85) {
+      const span = Math.max(1, nextIdx - currIdx);
+      for (let k = currIdx; k < nextIdx; k++) {
+        const kId = `${currPrefix}:${k}`;
+        const kNextId = `${currPrefix}:${k + 1}`;
+        const boxK = cache.tokens.get(kId);
+        const boxKNext = cache.tokens.get(kNextId);
+        if (!boxK || !boxKNext) continue;
+
+        const lineGap = Math.abs(boxKNext.top - boxK.top);
+        const localAvgH = (boxK.height + boxKNext.height) * 0.5;
+        if (lineGap > localAvgH * 0.6) {
+          const tRatio = (k - currIdx + 0.5) / span;
+          const interpRy = Math.round((ryA + (ryB - ryA) * tRatio) * 1000) / 1000;
+
+          // Complete stroke to the right edge of the last word before the line wrap
+          if (k > currIdx || (typeof currPt.rx === 'number' && currPt.rx < 0.92)) {
+            expanded.push({
+              x: currPt.x,
+              y: currPt.y,
+              tokenId: kId,
+              rx: 0.98,
+              ry: interpRy,
+            });
+          }
+
+          // Start stroke at the left edge of the first word on the wrapped line
+          if (k + 1 < nextIdx || (typeof nextPt.rx === 'number' && nextPt.rx > 0.08)) {
+            expanded.push({
+              x: nextPt.x,
+              y: nextPt.y,
+              tokenId: kNextId,
+              rx: 0.02,
+              ry: interpRy,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return expanded;
+}
+
+/**
  * Builds an SVG `d` path string in pixel space (`viewBox="0 0 blockWidth blockHeight"`)
  * for a stroke on the current device.
  *
@@ -456,7 +561,38 @@ export function buildResponsiveSvgPath(
       .join(' ');
   }
 
-  const projected = points.map((pt) => projectPointToDevicePixels(pt, cache, isPenStroke));
+  const workingPoints = expandWrappedTokenPoints(points, cache);
+  const projected = workingPoints.map((pt) => projectPointToDevicePixels(pt, cache, isPenStroke));
+
+  // If a stroke is primarily word-anchored, keep any un-tokenized margin points anchored relative to their nearest word-anchored neighbor
+  const hasTokenAnchoredPoint = projected.some((p) => Boolean(p.tokenBox));
+  if (hasTokenAnchoredPoint && projected.length > 1) {
+    const blockW = Math.max(1, cache.blockRect.width);
+    const blockH = Math.max(1, cache.blockRect.height);
+    for (let i = 0; i < projected.length; i++) {
+      if (projected[i].tokenBox || workingPoints[i].regionId === 'diagram') continue;
+      // Find nearest neighbor with a tokenBox
+      let nearestIdx = -1;
+      let minStepDist = Infinity;
+      for (let j = 0; j < projected.length; j++) {
+        if (projected[j].tokenBox && Math.abs(j - i) < minStepDist) {
+          minStepDist = Math.abs(j - i);
+          nearestIdx = j;
+        }
+      }
+      if (nearestIdx !== -1) {
+        const anchorProj = projected[nearestIdx];
+        const anchorPt = workingPoints[nearestIdx];
+        const currPt = workingPoints[i];
+        projected[i] = {
+          px: anchorProj.px + ((currPt.x - anchorPt.x) / 100) * blockW,
+          py: anchorProj.py + ((currPt.y - anchorPt.y) / 100) * Math.min(blockH, 220),
+          tokenBox: anchorProj.tokenBox,
+        };
+      }
+    }
+  }
+
   if (projected.length === 1) {
     const p = projected[0];
     return `M ${p.px.toFixed(1)} ${p.py.toFixed(1)} L ${(p.px + 0.5).toFixed(1)} ${(p.py + 0.5).toFixed(1)}`;
@@ -478,7 +614,7 @@ export function buildResponsiveSvgPath(
       const lineDiff = Math.abs(curr.tokenBox.top - prev.tokenBox.top);
       const avgHeight = (curr.tokenBox.height + prev.tokenBox.height) * 0.5;
       // If the two words are on different lines AND X jumped backward (line wrap)
-      if (lineDiff > avgHeight * 0.65 && curr.tokenBox.left < prev.tokenBox.left) {
+      if (lineDiff > avgHeight * 0.6 && curr.tokenBox.left < prev.tokenBox.left + 4) {
         shouldBreakSubpath = true;
       }
     }

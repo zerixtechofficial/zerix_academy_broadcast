@@ -704,4 +704,128 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
       );
     });
   });
+
+  // =========================================================================
+  // 9. Cross-Device Pen Marking Sync, Word Highlight Commented Out & Steady Scroll Sync
+  // =========================================================================
+  describe('9. Cross-Device Pen Marking Sync, Word Highlight Commented Out & Steady Scroll Sync', () => {
+    it('binds underlines drawn below Line 1 and in inter-word spaces to Line 1 tokens instead of snapping to Line 2 tokens below', async () => {
+      const { hitTestWordToken } = await import(
+        '../src/modules/live-classroom/utils/contentSyncMath'
+      );
+
+      // Simulate a paragraph where Line 1 is at y=40..61 (height=21) and Line 2 is at y=68..89 (7px gap)
+      const tokenList = [
+        { tokenId: 'b1:text:0', left: 20, top: 40, width: 65, height: 21 },
+        { tokenId: 'b1:text:1', left: 93, top: 40, width: 55, height: 21 },
+        // Line 2 directly underneath the space between b1:text:0 and b1:text:1
+        { tokenId: 'b1:text:10', left: 60, top: 68, width: 70, height: 21 },
+      ];
+      const cache = {
+        blockId: 'b1',
+        blockRect: { left: 0, top: 0, width: 760, height: 220 } as DOMRect,
+        tokens: new Map(tokenList.map((t) => [t.tokenId, t])),
+        tokenList,
+        regions: new Map(),
+      };
+
+      // Drawing an underline 5px below Line 1 (py = 66) in the inter-word space (px = 88)
+      // Previously, symmetric vertical distance made py=66 closer to Line 2 (68-66=2px) than Line 1 (66-61=5px).
+      // With asymmetric line-aware vertical hit-testing, py=66 is inside Line 1's underline zone [41.5, 67] and above Line 2's top (68+1.5=69.5).
+      const hit = hitTestWordToken(88, 66, cache);
+      assert.ok(hit, 'Underline in inter-word space 5px below Line 1 must hit a token');
+      assert.ok(
+        hit!.token.tokenId === 'b1:text:0' || hit!.token.tokenId === 'b1:text:1',
+        `Expected Line 1 token (b1:text:0 or b1:text:1), got ${hit!.token.tokenId}`
+      );
+    });
+
+    it('projects Laptop Pen strokes onto exact wrapped Mobile words and breaks wrapped lines cleanly with M', async () => {
+      const {
+        projectPointToDevicePixels,
+        buildResponsiveSvgPath,
+      } = await import('../src/modules/live-classroom/utils/contentSyncMath');
+
+      // Laptop layout (760px wide): 4 words on a single line (y=40, height=20)
+      const laptopTokenList = [
+        { tokenId: 'b1:text:0', left: 24, top: 40, width: 80, height: 20 },
+        { tokenId: 'b1:text:1', left: 112, top: 40, width: 90, height: 20 },
+        { tokenId: 'b1:text:2', left: 210, top: 40, width: 85, height: 20 },
+        { tokenId: 'b1:text:3', left: 303, top: 40, width: 95, height: 20 },
+      ];
+      const laptopLayout = {
+        blockId: 'b1',
+        blockRect: { left: 0, top: 0, width: 760, height: 220 } as DOMRect,
+        tokens: new Map(laptopTokenList.map((t) => [t.tokenId, t])),
+        tokenList: laptopTokenList,
+        regions: new Map(),
+      };
+
+      // Mobile layout (350px wide): b1:text:0 and b1:text:1 on Line 1 (y=36), b1:text:2 and b1:text:3 wrapped to Line 2 (y=64)
+      const mobileTokenList = [
+        { tokenId: 'b1:text:0', left: 16, top: 36, width: 74, height: 19 },
+        { tokenId: 'b1:text:1', left: 98, top: 36, width: 82, height: 19 },
+        { tokenId: 'b1:text:2', left: 16, top: 64, width: 78, height: 19 },
+        { tokenId: 'b1:text:3', left: 102, top: 64, width: 88, height: 19 },
+      ];
+      const mobileLayout = {
+        blockId: 'b1',
+        blockRect: { left: 0, top: 0, width: 350, height: 410 } as DOMRect,
+        tokens: new Map(mobileTokenList.map((t) => [t.tokenId, t])),
+        tokenList: mobileTokenList,
+        regions: new Map(),
+      };
+
+      // Pen stroke drawn across b1:text:0 -> b1:text:3 on Laptop at ry = 1.05 (just below text)
+      const strokePoints = [
+        { x: 3.5, y: 27.7, tokenId: 'b1:text:0', rx: 0.05, ry: 1.05 },
+        { x: 18.0, y: 27.7, tokenId: 'b1:text:1', rx: 0.3, ry: 1.05 },
+        { x: 31.0, y: 27.7, tokenId: 'b1:text:2', rx: 0.3, ry: 1.05 },
+        { x: 51.0, y: 27.7, tokenId: 'b1:text:3', rx: 0.95, ry: 1.05 },
+      ];
+
+      // 1. Verify Pen stroke point projects to Mobile's wrapped token coordinates (NOT raw block percentage)
+      const projectedW2OnMobile = projectPointToDevicePixels(strokePoints[2], mobileLayout, true);
+      // b1:text:2 on mobile: left=16 + 0.3*78 = 39.4, top=64 + 1.05*19 = 83.95
+      assert.ok(
+        Math.abs(projectedW2OnMobile.px - 39.4) < 1 && Math.abs(projectedW2OnMobile.py - 83.95) < 1,
+        `Pen stroke must anchor to Mobile token b1:text:2 (got px=${projectedW2OnMobile.px}, py=${projectedW2OnMobile.py})`
+      );
+
+      // 2. Verify buildResponsiveSvgPath on Laptop stays a single continuous subpath (1 'M')
+      const laptopPath = buildResponsiveSvgPath(strokePoints, laptopLayout, true);
+      const laptopMoveCount = (laptopPath.match(/M /g) || []).length;
+      assert.equal(laptopMoveCount, 1, `Laptop single-line stroke should have 1 M command, got: ${laptopPath}`);
+
+      // 3. Verify buildResponsiveSvgPath on Mobile breaks into 2 horizontal subpaths across the wrapped line (2 'M' commands)
+      const mobilePath = buildResponsiveSvgPath(strokePoints, mobileLayout, true);
+      const mobileMoveCount = (mobilePath.match(/M /g) || []).length;
+      assert.equal(
+        mobileMoveCount,
+        2,
+        `Mobile wrapped-line stroke must split cleanly into 2 M subpaths without diagonal slash, got: ${mobilePath}`
+      );
+    });
+
+    it('comments out automatic word highlighting with underline and keeps steady scroll sync without jumping visible sections to top', () => {
+      const stageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/VirtualContentStage.tsx'),
+        'utf8'
+      );
+
+      // Verify word highlighting with underline is commented out in renderTokenizedText
+      assert.equal(
+        stageSource.includes('Word highlighting with underline commented out as of now — using Pen SVG marking only'),
+        true,
+        'VirtualContentStage must have automatic word highlighting/underline commented out as requested'
+      );
+
+      // Verify pointer/pen auto-scroll does NOT jump a section to the top when already visible
+      assert.equal(
+        stageSource.includes('if (pointYInViewport >= edgeMargin && pointYInViewport <= viewportHeight - edgeMargin) {'),
+        true,
+        'VirtualContentStage must not scroll or jump a section to top when the marked/laser point is already visible in the viewport'
+      );
+    });
+  });
 });
