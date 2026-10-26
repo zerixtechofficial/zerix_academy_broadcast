@@ -83,17 +83,64 @@ export default function LearningSessionLayout() {
       teacher_503: 'DEV_TOKEN_TEACHER_503',
       teacher_504: 'DEV_TOKEN_TEACHER_504',
     };
-    const urlToken = urlParams.get('token');
+    const isTokenMatchingSession = (
+      jwtOrToken: string | null,
+      targetSessionId: string
+    ): boolean => {
+      if (!jwtOrToken || jwtOrToken === 'undefined' || jwtOrToken === 'null') {
+        return false;
+      }
+      const trimmed = jwtOrToken.trim();
+      if (!trimmed) return false;
+      const parts = trimmed.split('.');
+      if (parts.length === 3) {
+        try {
+          const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+          const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+          const payload = JSON.parse(window.atob(padded));
+          if (payload.exp && Math.floor(Date.now() / 1000) >= Number(payload.exp)) {
+            return false;
+          }
+          if (
+            payload.sessionId &&
+            payload.sessionId !== '*' &&
+            payload.sessionId !== targetSessionId
+          ) {
+            return false;
+          }
+        } catch {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    const rawUrlToken = urlParams.get('token');
+    const urlToken = isTokenMatchingSession(rawUrlToken, sessId)
+      ? rawUrlToken!.trim()
+      : '';
     if (urlToken) {
       window.sessionStorage.setItem('broadcast_rejoin_token', urlToken);
+      window.sessionStorage.setItem('broadcast_rejoin_session_id', sessId);
     }
-    const storedToken = window.sessionStorage.getItem('broadcast_rejoin_token');
+    const rawStoredToken = window.sessionStorage.getItem('broadcast_rejoin_token');
+    const storedSessionId = window.sessionStorage.getItem('broadcast_rejoin_session_id');
+    const storedToken =
+      (!storedSessionId || storedSessionId === sessId) &&
+      isTokenMatchingSession(rawStoredToken, sessId)
+        ? rawStoredToken!.trim()
+        : '';
+    if (rawStoredToken && !storedToken) {
+      window.sessionStorage.removeItem('broadcast_rejoin_token');
+      window.sessionStorage.removeItem('broadcast_rejoin_session_id');
+    }
+    const cleanTeacherSuffix = normTeacherId.replace(/^teacher_/, '') || '501';
     const tok =
       urlToken ||
       storedToken ||
       (urlRole === 'student'
         ? `DEV_TOKEN_STUDENT_${stId}`
-        : teacherTokenMap[normTeacherId] || 'DEV_TOKEN_TEACHER_501');
+        : teacherTokenMap[normTeacherId] || `DEV_TOKEN_TEACHER_${cleanTeacherSuffix}`);
     return {
       role: urlRole as 'teacher' | 'student',
       teacherId: normTeacherId,
@@ -347,6 +394,21 @@ export default function LearningSessionLayout() {
         if (isMounted) setLessonContent(contentData);
       } catch (err: any) {
         console.error('[LearningSessionLayout] Init error:', err.message);
+        if (
+          isMounted &&
+          token &&
+          !token.startsWith('DEV_TOKEN_') &&
+          typeof window !== 'undefined'
+        ) {
+          window.sessionStorage.removeItem('broadcast_rejoin_token');
+          window.sessionStorage.removeItem('broadcast_rejoin_session_id');
+          const cleanTId = String(teacherId || '501').replace(/^teacher_/, '') || '501';
+          const fallbackTok =
+            role === 'student'
+              ? `DEV_TOKEN_STUDENT_${studentId || '101'}`
+              : `DEV_TOKEN_TEACHER_${cleanTId}`;
+          setToken(fallbackTok);
+        }
       }
     };
 

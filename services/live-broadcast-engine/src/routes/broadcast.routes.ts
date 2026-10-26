@@ -157,7 +157,10 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         deviceId?: string;
       };
 
-      let authToken = body.token;
+      let authToken =
+        body.token && body.token !== 'undefined' && body.token !== 'null'
+          ? body.token.trim()
+          : '';
       if (!authToken) {
         if (body.role === 'teacher') {
           const cleanTeacherId = body.teacherId

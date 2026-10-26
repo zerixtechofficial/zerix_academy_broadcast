@@ -19,10 +19,11 @@ export class LaravelApiDataProvider implements IDataProvider {
   private timeoutMs: number;
 
   constructor(baseUrl?: string, apiSecret?: string, timeoutMs = 8000) {
-    this.baseUrl = (baseUrl || process.env.LARAVEL_API_BASE_URL || 'http://127.0.0.1:8000').replace(
-      /\/$/,
-      ''
-    );
+    this.baseUrl = (
+      baseUrl ||
+      process.env.LARAVEL_API_BASE_URL ||
+      'https://api-academy.zerixtech.com'
+    ).replace(/\/$/, '');
     this.apiSecret =
       apiSecret ||
       process.env.LARAVEL_INTERNAL_API_SECRET ||
@@ -80,9 +81,42 @@ export class LaravelApiDataProvider implements IDataProvider {
           batchId: String(claims.batchId || sessionId || ''),
           sessionId: String(claims.sessionId || sessionId || ''),
           avatar: claims.avatarUrl,
+          isCoTeacher: Boolean((claims as any).isCoTeacher),
+          canUseWhiteboard:
+            typeof claims.canUseWhiteboard === 'boolean'
+              ? claims.canUseWhiteboard
+              : claims.role === 'teacher' && !(claims as any).isCoTeacher,
         };
       }
       return null;
+    }
+
+    // Optional dev token fallback when ALLOW_DEV_TOKENS=true
+    if (
+      process.env.ALLOW_DEV_TOKENS === 'true' &&
+      (cleanToken.startsWith('DEV_TOKEN_TEACHER_') || cleanToken.startsWith('DEV_TOKEN_STUDENT_'))
+    ) {
+      if (cleanToken.startsWith('DEV_TOKEN_TEACHER_')) {
+        const suffix = cleanToken.replace(/^DEV_TOKEN_TEACHER_/, '') || '501';
+        const isCoHost = ['502', '503', '504'].includes(suffix);
+        return {
+          userId: `teacher_${suffix}`,
+          name: suffix === '501' ? 'Prof. Anand Sharma' : `Teacher #${suffix}`,
+          role: 'teacher',
+          batchId: String(sessionId || 'batch_physics_101'),
+          sessionId: String(sessionId || 'batch_physics_101'),
+          isCoTeacher: isCoHost,
+          canUseWhiteboard: !isCoHost,
+        };
+      }
+      const stSuffix = cleanToken.replace(/^DEV_TOKEN_STUDENT_/, '') || '101';
+      return {
+        userId: `student_${stSuffix}`,
+        name: `Student #${stSuffix}`,
+        role: 'student',
+        batchId: String(sessionId || 'batch_physics_101'),
+        sessionId: String(sessionId || 'batch_physics_101'),
+      };
     }
 
     try {

@@ -131,7 +131,11 @@ export async function authenticateSocket(
     const auth = socket.handshake.auth || {};
     const query = socket.handshake.query || {};
 
-    let token = (auth.token || query.token || '') as string;
+    const rawToken = (auth.token || query.token || '') as string;
+    let token =
+      rawToken && rawToken !== 'undefined' && rawToken !== 'null'
+        ? String(rawToken).trim()
+        : '';
     const sessionId = (auth.sessionId || query.sessionId || 'batch_physics_101') as string;
 
     // Support 1-click dev testing switcher (?role=teacher or ?role=student&studentId=101..112)

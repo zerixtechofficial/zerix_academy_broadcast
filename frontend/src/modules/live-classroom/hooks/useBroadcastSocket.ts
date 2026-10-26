@@ -357,11 +357,15 @@ export function useBroadcastSocket({
     const cleanTeacherId = teacherId ? String(teacherId).replace(/^teacher_/, '') : '501';
     const clientDeviceId = clientDeviceIdRef.current;
 
+    const validToken =
+      token && token !== 'undefined' && token !== 'null' ? token.trim() : '';
+
     const socket = io(baseUrl, {
       parser: msgpackParser,
+      transports: ['websocket', 'polling'],
       auth: {
         token:
-          token ||
+          validToken ||
           (role === 'teacher'
             ? `DEV_TOKEN_TEACHER_${cleanTeacherId}`
             : `DEV_TOKEN_STUDENT_${studentId || '101'}`),

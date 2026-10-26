@@ -65,8 +65,11 @@ export class MockJsonDataProvider implements IDataProvider {
       return null;
     }
 
-    // Disallow static dev tokens when running in production or when explicitly disabled
-    if (process.env.NODE_ENV === 'production' || process.env.ALLOW_DEV_TOKENS === 'false') {
+    // Disallow static dev tokens when running in production (unless ALLOW_DEV_TOKENS=true) or when explicitly disabled
+    if (
+      process.env.ALLOW_DEV_TOKENS === 'false' ||
+      (process.env.NODE_ENV === 'production' && process.env.ALLOW_DEV_TOKENS !== 'true')
+    ) {
       return null;
     }
 
@@ -114,13 +117,15 @@ export class MockJsonDataProvider implements IDataProvider {
     }
     if (cleanToken.startsWith('DEV_TOKEN_TEACHER_') || cleanToken.startsWith('teacher_')) {
       const suffix = cleanToken.replace(/^DEV_TOKEN_TEACHER_/, '').replace(/^teacher_/, '');
+      const isCoHostSuffix = ['502', '503', '504'].includes(suffix);
       return {
         userId: `teacher_${suffix}`,
-        name: suffix === '501' ? 'Prof. Anand Sharma' : `Co-Teacher #${suffix}`,
+        name: suffix === '501' ? 'Prof. Anand Sharma' : `Teacher #${suffix}`,
         role: 'teacher',
         batchId: sessionId || 'batch_physics_101',
         sessionId: sessionId || 'batch_physics_101',
-        isCoTeacher: suffix !== '501',
+        isCoTeacher: isCoHostSuffix,
+        canUseWhiteboard: !isCoHostSuffix,
       };
     }
 
@@ -145,7 +150,7 @@ export class MockJsonDataProvider implements IDataProvider {
       }
     }
 
-    // 3. Fallback for query params like "101" or "student_101"
+    // 3. Fallback for query params like "101", "student_101", or "DEV_TOKEN_STUDENT_*"
     const matchedById = students.find(
       (s) => s.userId === cleanToken || s.userId === `student_${cleanToken}`
     );
@@ -159,6 +164,17 @@ export class MockJsonDataProvider implements IDataProvider {
         email: matchedById.email,
         avatar: matchedById.avatar,
         rollNumber: matchedById.rollNumber,
+      };
+    }
+
+    if (cleanToken.startsWith('DEV_TOKEN_STUDENT_') || cleanToken.startsWith('student_')) {
+      const stSuffix = cleanToken.replace(/^DEV_TOKEN_STUDENT_/, '').replace(/^student_/, '');
+      return {
+        userId: `student_${stSuffix}`,
+        name: `Student #${stSuffix}`,
+        role: 'student',
+        batchId: sessionId || 'batch_physics_101',
+        sessionId: sessionId || 'batch_physics_101',
       };
     }
 
