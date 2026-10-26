@@ -149,11 +149,40 @@ export default function LearningSessionLayout() {
       '';
     const stId = rawStId.replace(/^student_/, '');
 
-    const rawLang =
+    const rawLangCandidate =
       urlParams.get('languageId') ||
       urlParams.get('language_id') ||
       claims.languageId ||
       1;
+    const rawLang: number = (() => {
+      if (!isNaN(Number(rawLangCandidate)) && Number(rawLangCandidate) > 0) {
+        return Math.floor(Number(rawLangCandidate));
+      }
+      const code = String(rawLangCandidate || '').trim().toLowerCase();
+      const codeMap: Record<string, number> = {
+        en: 1,
+        english: 1,
+        hi: 2,
+        hindi: 2,
+        as: 3,
+        assamese: 3,
+        bn: 4,
+        brx: 5,
+        gu: 7,
+        kn: 8,
+        ml: 11,
+        mr: 13,
+        ne: 14,
+        or: 15,
+        pa: 17,
+        sa: 18,
+        ta: 21,
+        te: 22,
+        ur: 23,
+        hinglish: 24,
+      };
+      return codeMap[code] || 1;
+    })();
 
     return {
       role: resolvedRole,
