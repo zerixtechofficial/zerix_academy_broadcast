@@ -65,6 +65,7 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
     pingInterval: 10000,
   });
   (fastify as any).io = io;
+  AutoSaveService.setSocketServer(io);
 
   // Socket Authentication Middleware
   io.use(authenticateSocket);
@@ -630,7 +631,13 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
     socket.on('AUDIO_MUTE_ALL', async () => {
       if (user.role !== 'teacher') return;
       const muted = await AudioStageController.muteAllStudents(sessionId);
-      io.to(sessionId).emit('AUDIO_MUTE_ALL', { mutedStudents: muted });
+      io.to(sessionId).emit('AUDIO_MUTE_ALL', {
+        mutedStudents: muted,
+        allowStudentUnmute: false,
+      });
+      io.to(sessionId).emit('AUDIO_ALLOW_UNMUTE_CHANGED', {
+        allowStudentUnmute: false,
+      });
     });
 
     // 10b. Host Toggles "Allow Students to Unmute Themselves" (Open Discussion / Mute-Unmute for all students)
@@ -724,6 +731,19 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
           micActive,
           anyDeviceMicActive: state.anyDeviceMicActive,
         });
+        if (micActive) {
+          io.to(sessionId).emit('AUDIO_MIC_GRANTED', {
+            studentId: user.userId,
+            targetDeviceId: devId,
+            autoActivate: false,
+          });
+        } else if (!state.anyDeviceMicActive) {
+          io.to(sessionId).emit('AUDIO_MIC_REVOKED', {
+            studentId: user.userId,
+            deviceId: devId,
+            selfMuted: true,
+          });
+        }
       }
     );
 
@@ -927,6 +947,32 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
       }
     );
 
+    const checkAndStartHostCoHostGraceIfEmpty = async (
+      targetSessionId: string,
+      leavingSocketId: string
+    ) => {
+      const room = await RoomManager.getOrInitRoom(targetSessionId);
+      if (room.status === 'ENDED') return;
+
+      const remainingSockets = await io.in(targetSessionId).fetchSockets();
+      const hasActiveHostOrCoHost = remainingSockets.some(
+        (s: any) =>
+          s.id !== leavingSocketId &&
+          s.user?.role === 'teacher' &&
+          !s.data?.intentionalLeave
+      );
+      if (!hasActiveHostOrCoHost) {
+        const grace = await AutoSaveService.startTeacherGraceTimer(targetSessionId);
+        io.to(targetSessionId).emit('TEACHER_STATUS_CHANGE', {
+          status: 'TEACHER_RECONNECTING',
+          gracePeriodSeconds: grace.gracePeriodSeconds,
+          graceEndsAt: grace.graceEndsAt,
+          message:
+            'No Host or Co-Host is currently active. Waiting up to 5 minutes before closing the broadcast...',
+        });
+      }
+    };
+
     // 14. Participant Explicitly Leaves Meeting (Host, Co-Host, or Student leaves locally without ending broadcast)
     socket.on(
       'LEAVE_SESSION',
@@ -956,6 +1002,9 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
           }
         }
         await socket.leave(sessionId);
+        if (user.role === 'teacher') {
+          await checkAndStartHostCoHostGraceIfEmpty(sessionId, socket.id);
+        }
         if (typeof ack === 'function') {
           ack({ ok: true, action: 'left' });
         }
@@ -1032,18 +1081,7 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
         return;
       }
       if (user.role === 'teacher') {
-        const remainingSockets = await io.in(sessionId).fetchSockets();
-        const hasAnotherTeacher = remainingSockets.some(
-          (s: any) => s.id !== socket.id && s.user?.role === 'teacher'
-        );
-        if (!hasAnotherTeacher) {
-          // Teacher disconnected unexpectedly: trigger 5-minute BullMQ grace timer
-          await AutoSaveService.startTeacherGraceTimer(sessionId);
-          io.to(sessionId).emit('TEACHER_STATUS_CHANGE', {
-            status: 'TEACHER_RECONNECTING',
-            message: 'Teacher connection dropped. Waiting for teacher to reconnect...',
-          });
-        }
+        await checkAndStartHostCoHostGraceIfEmpty(sessionId, socket.id);
       } else {
         // Student disconnected unexpectedly: remove device registration and trigger 15-second network blip grace
         const devId = getSocketDeviceId();
@@ -1054,6 +1092,8 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
           socket.id
         );
         if (removal.remainingDevices === 0 && !socket.data?.blockedMultiDevice) {
+          await AudioStageController.muteStudent(sessionId, user.userId);
+          io.to(sessionId).emit('AUDIO_MIC_REVOKED', { studentId: user.userId });
           await AttendanceEngine.recordDisconnect(sessionId, user.userId, socket.id);
           setTimeout(async () => {
             try {

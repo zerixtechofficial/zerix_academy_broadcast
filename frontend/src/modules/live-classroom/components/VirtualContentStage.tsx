@@ -207,6 +207,14 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
     if (outerContainerRef.current) observer.observe(outerContainerRef.current);
     if (pageSheetRef.current) observer.observe(pageSheetRef.current);
+    Object.values(blockRefs.current).forEach((el) => {
+      if (el) observer.observe(el);
+    });
+    if (typeof document !== 'undefined' && (document as any).fonts?.ready) {
+      (document as any).fonts.ready.then(() => {
+        measureAllBlocksLayout();
+      }).catch(() => {});
+    }
     window.addEventListener('resize', measureAllBlocksLayout);
 
     return () => {
@@ -239,8 +247,16 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     return () => window.clearInterval(interval);
   }, [laserTrail.length]);
 
-  // When active tool changes away from laser, clear local laser coordinates and trail
+  // When active tool changes away from laser, clear local laser coordinates and trail;
+  // when active tool is not 'cursor' (select), clear any active browser text selection immediately
   useEffect(() => {
+    if (canAnnotate && activeTool !== 'cursor') {
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch {
+        // ignore
+      }
+    }
     if (activeTool !== 'laser') {
       setTeacherLaserCoord(null);
       setLaserTrail([]);
@@ -573,7 +589,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     contentState.scrollAnchor,
   ]);
 
-  // Erase strokes near a pointer coordinate or matching a touched word token
+  // Erase strokes near a pointer coordinate or matching a touched word token across all content blocks and full-page canvas
   const eraseStrokeAtPointer = useCallback(
     (
       blockId: string,
@@ -582,38 +598,61 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       cache: BlockDomLayoutCache,
       liveRect?: DOMRect
     ) => {
-      const blockStrokes = contentState.penStrokes.filter((s) => s.blockId === blockId);
-      if (blockStrokes.length === 0) return;
+      if (contentState.penStrokes.length === 0) return;
 
-      const rect = liveRect || cache.blockRect;
-      const localX = clientX - rect.left;
-      const localY = clientY - rect.top;
-      const pt = captureStrokePoint(clientX, clientY, cache, rect);
+      const candidateBlockIds = Array.from(
+        new Set([
+          blockId,
+          'blk_page_canvas',
+          'blk_header',
+          ...contentState.penStrokes.map((s) => s.blockId),
+        ])
+      );
 
-      for (const stroke of blockStrokes) {
-        // 1. Check if pointer hit a word token that belongs to this stroke
-        if (
-          pt.tokenId &&
-          ((Array.isArray(stroke.anchorTokens) &&
-            stroke.anchorTokens.includes(pt.tokenId)) ||
-            stroke.points.some((p: any) => p.tokenId === pt.tokenId))
-        ) {
-          onDeleteStroke(stroke.id);
-          continue;
-        }
+      for (const candBlockId of candidateBlockIds) {
+        const blockStrokes = contentState.penStrokes.filter((s) => s.blockId === candBlockId);
+        if (blockStrokes.length === 0) continue;
 
-        // 2. Check pixel proximity to projected points of this stroke on this device
-        for (const sp of stroke.points) {
-          const proj = projectPointToDevicePixels(sp, cache, stroke.tool === 'pen');
-          const distPx = Math.hypot(proj.px - localX, proj.py - localY);
-          if (distPx <= 22) {
+        const candEl = blockRefs.current[candBlockId];
+        const candRect =
+          candBlockId === blockId && liveRect
+            ? liveRect
+            : candEl?.getBoundingClientRect() || cache.blockRect;
+        const candCache =
+          candBlockId === blockId
+            ? cache
+            : getFreshBlockLayout(candBlockId) ||
+              (candEl ? measureBlockDomLayout(candBlockId, candEl) : cache);
+
+        const localX = clientX - candRect.left;
+        const localY = clientY - candRect.top;
+        const pt = captureStrokePoint(clientX, clientY, candCache, candRect);
+
+        for (const stroke of blockStrokes) {
+          // 1. Check if pointer hit a word token that belongs to this stroke
+          if (
+            pt.tokenId &&
+            ((Array.isArray(stroke.anchorTokens) &&
+              stroke.anchorTokens.includes(pt.tokenId)) ||
+              stroke.points.some((p: any) => p.tokenId === pt.tokenId))
+          ) {
             onDeleteStroke(stroke.id);
-            break;
+            continue;
+          }
+
+          // 2. Check pixel proximity to projected points of this stroke on this device
+          for (const sp of stroke.points) {
+            const proj = projectPointToDevicePixels(sp, candCache, stroke.tool === 'pen');
+            const distPx = Math.hypot(proj.px - localX, proj.py - localY);
+            if (distPx <= 22) {
+              onDeleteStroke(stroke.id);
+              break;
+            }
           }
         }
       }
     },
-    [contentState.penStrokes, onDeleteStroke]
+    [contentState.penStrokes, onDeleteStroke, getFreshBlockLayout]
   );
 
   // Pointer handlers on each block for Pen and Eraser
@@ -621,7 +660,15 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     e: React.PointerEvent<HTMLDivElement>,
     blockId: string
   ) => {
-    if (!canAnnotate || activeTool === 'cursor' || activeTool === 'laser') return;
+    if (!canAnnotate || activeTool === 'cursor') return;
+    // Prevent native text selection whenever any non-cursor tool (pen, laser, eraser) is active
+    e.preventDefault();
+    try {
+      window.getSelection()?.removeAllRanges();
+    } catch {
+      // ignore
+    }
+    if (activeTool === 'laser') return;
     const blockEl = blockRefs.current[blockId];
     if (!blockEl) return;
 
@@ -782,6 +829,16 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   // Sheet-Wide Cursor & Laser Pointer Handlers: tracks exact cursor coordinates across the entire content sheet
   const handleSheetPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!canAnnotate) return;
+    if (activeTool !== 'cursor' && (e.type === 'pointerdown' || e.buttons === 1)) {
+      if (e.type === 'pointerdown') {
+        e.preventDefault();
+      }
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch {
+        // ignore
+      }
+    }
     const sheetEl = pageSheetRef.current;
     if (!sheetEl) return;
     const sheetRect = sheetEl.getBoundingClientRect();
@@ -1050,9 +1107,26 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
   const isSelectionEnabled = !canAnnotate || activeTool === 'cursor';
 
+  // Block native browser selectstart event whenever activeTool is not 'cursor'
+  useEffect(() => {
+    const el = outerContainerRef.current;
+    if (!el || isSelectionEnabled) return;
+    const preventSelect = (e: Event) => {
+      e.preventDefault();
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch {
+        // ignore
+      }
+    };
+    el.addEventListener('selectstart', preventSelect);
+    return () => el.removeEventListener('selectstart', preventSelect);
+  }, [isSelectionEnabled]);
+
   return (
     <div
       ref={outerContainerRef}
+      data-selection-enabled={isSelectionEnabled ? 'true' : 'false'}
       data-active-content-tool={canAnnotate ? activeTool : 'cursor'}
       className={`relative flex-1 h-full flex flex-col bg-[#f8fafc] overflow-hidden ${
         isSelectionEnabled ? 'select-text' : 'select-none'
@@ -1197,7 +1271,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         </div>
       )}
 
-      {/* Main Scrollable Viewport matching /learn page layout */}
+      {/* Main Scrollable Viewport matching /learn page layout (Whole-Page Pen, Laser & Eraser Canvas) */}
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
@@ -1205,23 +1279,136 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         onTouchStart={handleUserScrollIntent}
         onTouchMove={handleUserScrollIntent}
         onPointerDown={(e) => {
-          if (role === 'student' && e.pointerType !== 'mouse') {
+          if (role === 'student' && !canAnnotate && e.pointerType !== 'mouse') {
             handleUserScrollIntent();
           }
+          handleSheetPointerMove(e);
+          if (canAnnotate && (activeTool === 'pen' || activeTool === 'eraser')) {
+            handleBlockPointerDown(e, 'blk_page_canvas');
+          }
         }}
+        onPointerMove={(e) => {
+          handleSheetPointerMove(e);
+          if (canAnnotate && (activeTool === 'pen' || activeTool === 'eraser')) {
+            handleBlockPointerMove(e, activeDrawingBlockIdRef.current || 'blk_page_canvas');
+          }
+        }}
+        onPointerUp={(e) => {
+          handleSheetPointerUp();
+          if (canAnnotate && (activeTool === 'pen' || activeTool === 'eraser')) {
+            handleBlockPointerUp(e, activeDrawingBlockIdRef.current || 'blk_page_canvas');
+          }
+        }}
+        onPointerLeave={handleSheetPointerLeave}
         data-testid="content-scroll-container"
-        className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 sm:py-6 sm:px-6 flex justify-center items-start"
+        className={`flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 sm:py-6 sm:px-6 flex justify-center items-start ${
+          canAnnotate && activeTool !== 'cursor' && activeTool !== 'laser'
+            ? 'cursor-crosshair touch-none'
+            : canAnnotate && activeTool === 'laser'
+            ? 'cursor-none'
+            : 'cursor-auto'
+        }`}
       >
         {/* Full-Width Responsive Content Sheet matching /learn page container */}
         <div
-          ref={pageSheetRef}
+          ref={(el) => {
+            pageSheetRef.current = el;
+            blockRefs.current['blk_page_canvas'] = el;
+          }}
+          data-block-id="blk_page_canvas"
           data-testid="virtual-content-sheet"
-          onPointerMove={handleSheetPointerMove}
-          onPointerDown={handleSheetPointerMove}
-          onPointerUp={handleSheetPointerUp}
+          onPointerMove={(e) => {
+            handleSheetPointerMove(e);
+            if (canAnnotate && (activeTool === 'pen' || activeTool === 'eraser')) {
+              handleBlockPointerMove(e, activeDrawingBlockIdRef.current || 'blk_page_canvas');
+            }
+          }}
+          onPointerDown={(e) => {
+            handleSheetPointerMove(e);
+            if (canAnnotate && (activeTool === 'pen' || activeTool === 'eraser')) {
+              handleBlockPointerDown(e, 'blk_page_canvas');
+            }
+          }}
+          onPointerUp={(e) => {
+            handleSheetPointerUp();
+            if (canAnnotate && (activeTool === 'pen' || activeTool === 'eraser')) {
+              handleBlockPointerUp(e, activeDrawingBlockIdRef.current || 'blk_page_canvas');
+            }
+          }}
           onPointerLeave={handleSheetPointerLeave}
-          className="relative w-full max-w-4xl space-y-5 pb-16 min-h-full"
+          className={`relative w-full max-w-4xl space-y-5 pb-16 min-h-full ${
+            canAnnotate && activeTool !== 'cursor' && activeTool !== 'laser'
+              ? 'cursor-crosshair touch-none'
+              : 'cursor-auto'
+          }`}
         >
+          {/* Whole-Page SVG Vector Overlay for freehand strokes drawn anywhere on the Content Tab page */}
+          {(() => {
+            const pageCanvasId = 'blk_page_canvas';
+            const pageCanvasStrokes = contentState.penStrokes.filter(
+              (s) => s.blockId === pageCanvasId
+            );
+            const isDrawingOnPageCanvas =
+              activeDrawingBlockId === pageCanvasId && currentPoints.length > 0;
+            const allPageCanvasStrokes: ContentStroke[] = isDrawingOnPageCanvas
+              ? [
+                  ...pageCanvasStrokes,
+                  {
+                    id: 'temp-active-page-stroke',
+                    blockId: pageCanvasId,
+                    color: penColor,
+                    width: 3,
+                    tool: 'pen',
+                    opacity: 1,
+                    anchorTokens: currentAnchorTokens,
+                    points: currentPoints,
+                  },
+                ]
+              : pageCanvasStrokes;
+
+            if (allPageCanvasStrokes.length === 0) return null;
+
+            const pageLayoutCache = getFreshBlockLayout(pageCanvasId);
+            const pageSvgWidth = Math.max(
+              100,
+              Number((pageLayoutCache?.blockRect.width || 896).toFixed(2))
+            );
+            const pageSvgHeight = Math.max(
+              200,
+              Number((pageLayoutCache?.blockRect.height || 680).toFixed(2))
+            );
+
+            return (
+              <svg
+                data-testid="whole-page-content-svg-overlay"
+                viewBox={`0 0 ${pageSvgWidth} ${pageSvgHeight}`}
+                preserveAspectRatio="none"
+                className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-20"
+              >
+                {allPageCanvasStrokes.map((stroke) => {
+                  const dPath = buildResponsiveSvgPath(
+                    stroke.points || [],
+                    pageLayoutCache,
+                    stroke.tool === 'pen'
+                  );
+                  if (!dPath) return null;
+                  return (
+                    <path
+                      key={stroke.id}
+                      data-stroke-id={stroke.id}
+                      d={dPath}
+                      fill="none"
+                      stroke={stroke.color}
+                      strokeOpacity={stroke.opacity ?? 0.92}
+                      strokeWidth={stroke.width || 3}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  );
+                })}
+              </svg>
+            );
+          })()}
           {/* Topic / Lesson Title Header matching /learn page */}
           {(() => {
             const headerBlockId = 'blk_header';
@@ -1346,6 +1533,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
               </div>
             ) : (
               <div
+                data-active-content-tool={canAnnotate ? activeTool : 'cursor'}
+                data-selection-enabled={isSelectionEnabled ? 'true' : 'false'}
                 className={`content-main-container text-slate-800 space-y-3 ${
                   isSelectionEnabled ? 'select-text' : 'select-none'
                 }`}

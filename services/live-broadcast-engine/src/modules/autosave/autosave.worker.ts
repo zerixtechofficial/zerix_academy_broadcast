@@ -1,4 +1,5 @@
 import { Queue, Worker, Job } from 'bullmq';
+import type { Server as SocketIOServer } from 'socket.io';
 import { env } from '../../config/env';
 import { redis } from '../../config/redis';
 import { getDataProvider } from '../../adapters';
@@ -28,6 +29,32 @@ export class AutoSaveService {
 
   private static checkpointWorker: Worker;
   private static graceWorker: Worker;
+  private static ioServer: SocketIOServer | null = null;
+  private static inMemoryGraceTimers = new Map<string, NodeJS.Timeout>();
+  private static graceEndsAtMap = new Map<string, number>();
+
+  /**
+   * Attaches the active Socket.IO server instance so grace expiration can notify and disconnect all students.
+   */
+  public static setSocketServer(io: SocketIOServer | null): void {
+    this.ioServer = io;
+  }
+
+  /**
+   * Returns the unix timestamp (ms) when the active grace timer for a session expires, if armed.
+   */
+  public static getGraceEndsAt(sessionId: string): number | null {
+    return this.graceEndsAtMap.get(sessionId) ?? null;
+  }
+
+  private static clearInMemoryGraceTimer(sessionId: string): void {
+    const existingTimer = this.inMemoryGraceTimers.get(sessionId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      this.inMemoryGraceTimers.delete(sessionId);
+    }
+    this.graceEndsAtMap.delete(sessionId);
+  }
 
   /**
    * Initializes BullMQ queues and workers for checkpoints and teacher grace closing.
@@ -151,12 +178,35 @@ export class AutoSaveService {
   }
 
   /**
-   * Teacher lost connection: marks room TEACHER_RECONNECTING and arms the grace timer.
+   * Last Host/Co-Host left or lost connection: marks room TEACHER_RECONNECTING and arms the 5-minute grace timer.
    */
-  public static async startTeacherGraceTimer(sessionId: string): Promise<void> {
+  public static async startTeacherGraceTimer(
+    sessionId: string,
+    overrideTimeoutSeconds?: number
+  ): Promise<{ gracePeriodSeconds: number; graceEndsAt: number }> {
+    const gracePeriodSeconds =
+      typeof overrideTimeoutSeconds === 'number' && overrideTimeoutSeconds > 0
+        ? overrideTimeoutSeconds
+        : env.TEACHER_GRACE_TIMEOUT_SECONDS;
+    const delayMs = gracePeriodSeconds * 1000;
+    const graceEndsAt = Date.now() + delayMs;
+
     console.log(
-      `[AutoSaveService] Teacher disconnected from ${sessionId}. Starting grace timer (${env.TEACHER_GRACE_TIMEOUT_SECONDS}s)`
+      `[AutoSaveService] No active Host/Co-Host in ${sessionId}. Starting grace timer (${gracePeriodSeconds}s)`
     );
+
+    this.clearInMemoryGraceTimer(sessionId);
+    this.graceEndsAtMap.set(sessionId, graceEndsAt);
+
+    // Arm in-memory fallback timer alongside BullMQ so single-node / test / workerless environments also close cleanly
+    const memTimer = setTimeout(() => {
+      this.inMemoryGraceTimers.delete(sessionId);
+      void this.executeGraceFinalize(sessionId);
+    }, delayMs);
+    if (typeof memTimer.unref === 'function') {
+      memTimer.unref();
+    }
+    this.inMemoryGraceTimers.set(sessionId, memTimer);
 
     // Update room status
     await RoomManager.setTeacherStatus(sessionId, 'TEACHER_RECONNECTING');
@@ -178,18 +228,22 @@ export class AutoSaveService {
       'grace-close',
       { sessionId },
       {
-        delay: env.TEACHER_GRACE_TIMEOUT_SECONDS * 1000,
+        delay: delayMs,
         jobId,
         removeOnComplete: true,
         removeOnFail: true,
       }
     );
+
+    return { gracePeriodSeconds, graceEndsAt };
   }
 
   /**
-   * Teacher reconnected: cancels the pending grace close timer and resumes LIVE status.
+   * Host or Co-Host connected/reconnected: cancels the pending grace close timer and resumes LIVE status.
    */
   public static async cancelTeacherGraceTimer(sessionId: string): Promise<void> {
+    this.clearInMemoryGraceTimer(sessionId);
+
     const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
     const jobId = `grace_close_${safeSessionId}`;
     try {
@@ -242,14 +296,27 @@ export class AutoSaveService {
   }
 
   /**
-   * Grace timer expired: finalize VOD & whiteboard artifacts, finalize attendance,
-   * publish session summary, and end room.
+   * Grace timer expired: if no Host or Co-Host is active in the room, finalize VOD & whiteboard artifacts,
+   * finalize attendance, publish session summary, end room, and disconnect all remaining students.
    */
   public static async executeGraceFinalize(sessionId: string): Promise<void> {
+    this.clearInMemoryGraceTimer(sessionId);
     try {
       const room = await RoomManager.getOrInitRoom(sessionId);
       if (room.status === 'ENDED') {
         return;
+      }
+
+      // Verify no Host or Co-Host rejoined before closing the broadcast
+      if (this.ioServer) {
+        const currentSockets = await this.ioServer.in(sessionId).fetchSockets();
+        const hasActiveHostOrCoHost = currentSockets.some(
+          (s: any) => s.user?.role === 'teacher' && !s.data?.intentionalLeave
+        );
+        if (hasActiveHostOrCoHost) {
+          await RoomManager.setTeacherStatus(sessionId, 'LIVE');
+          return;
+        }
       }
 
       await this.ensureSessionVodFinalized(sessionId);
@@ -266,6 +333,31 @@ export class AutoSaveService {
       await provider.publishSessionCompleted(summary);
 
       await RoomManager.endSession(sessionId);
+
+      // Notify all connected students that the broadcast closed after 5-min Host/Co-Host inactivity and disconnect them
+      if (this.ioServer) {
+        const endedPayload = {
+          sessionId,
+          endedBy: 'System (5-Min Host/Co-Host Inactivity Timeout)',
+          endedByRole: 'system',
+          reason: 'NO_ACTIVE_HOST_OR_COHOST_TIMEOUT',
+          message:
+            'Broadcast closed automatically because no Host or Co-Host was active for 5 minutes.',
+          timestamp: Date.now(),
+        };
+        this.ioServer.to(sessionId).emit('SESSION_ENDED', endedPayload);
+
+        const roomSockets = await this.ioServer.in(sessionId).fetchSockets();
+        for (const s of roomSockets) {
+          s.data.intentionalLeave = true;
+        }
+        setTimeout(() => {
+          for (const s of roomSockets) {
+            s.disconnect(true);
+          }
+        }, 120);
+      }
+
       console.log(`[AutoSaveService] Session ${sessionId} cleanly finalized and archived.`);
     } catch (err: any) {
       console.error(`[AutoSaveService] Error in executeGraceFinalize for ${sessionId}:`, err.message);
@@ -281,6 +373,12 @@ export class AutoSaveService {
    * Graceful shutdown of workers.
    */
   public static async close(): Promise<void> {
+    for (const timer of this.inMemoryGraceTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.inMemoryGraceTimers.clear();
+    this.graceEndsAtMap.clear();
+    this.ioServer = null;
     if (this.checkpointWorker) await this.checkpointWorker.close();
     if (this.graceWorker) await this.graceWorker.close();
     if (this.checkpointQueue) await this.checkpointQueue.close();

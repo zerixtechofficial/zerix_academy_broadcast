@@ -431,8 +431,11 @@ export function captureStrokePoint(
   const localX = clientX - blockRect.left;
   const localY = clientY - blockRect.top;
 
-  const rawPctX = Math.max(0, Math.min(100, (localX / safeW) * 100));
-  const rawPctY = Math.max(0, Math.min(100, (localY / safeH) * 100));
+  const isWholePageCanvas = cache.blockId === 'blk_page_canvas';
+  const minPct = isWholePageCanvas ? -100 : 0;
+  const maxPct = isWholePageCanvas ? 200 : 100;
+  const rawPctX = Math.max(minPct, Math.min(maxPct, (localX / safeW) * 100));
+  const rawPctY = Math.max(minPct, Math.min(maxPct, (localY / safeH) * 100));
   const pctX = Math.round(rawPctX * 10) / 10;
   const pctY = Math.round(rawPctY * 10) / 10;
 

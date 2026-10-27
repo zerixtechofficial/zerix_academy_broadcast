@@ -5,13 +5,36 @@
   flex-direction: column;
   gap: 1.5rem;
   width: 100%;
+}
+
+.content-main-container[data-selection-enabled="true"],
+.content-main-container[data-active-content-tool="cursor"] {
   user-select: text !important;
   -webkit-user-select: text !important;
 }
 
-.content-main-container * {
+.content-main-container[data-selection-enabled="true"] *,
+.content-main-container[data-active-content-tool="cursor"] * {
   user-select: text;
   -webkit-user-select: text;
+}
+
+.content-main-container[data-selection-enabled="false"],
+.content-main-container[data-active-content-tool="pen"],
+.content-main-container[data-active-content-tool="laser"],
+.content-main-container[data-active-content-tool="eraser"],
+.content-main-container.select-none {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+.content-main-container[data-selection-enabled="false"] *,
+.content-main-container[data-active-content-tool="pen"] *,
+.content-main-container[data-active-content-tool="laser"] *,
+.content-main-container[data-active-content-tool="eraser"] *,
+.content-main-container.select-none * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
 }
 
 /* Sections rendered as cards */

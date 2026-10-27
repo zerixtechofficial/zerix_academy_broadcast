@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { WifiOff, RefreshCw, Clock } from 'lucide-react';
 
 interface ReconnectModalProps {
@@ -8,6 +8,7 @@ interface ReconnectModalProps {
   teacherDisconnected: {
     active: boolean;
     gracePeriodSeconds: number;
+    graceEndsAt?: number;
     message: string;
   };
   lastSeqId: number;
@@ -20,17 +21,58 @@ export const ReconnectModal: React.FC<ReconnectModalProps> = ({
   lastSeqId,
   onManualReconnect,
 }) => {
+  const [remainingSeconds, setRemainingSeconds] = useState<number>(
+    teacherDisconnected.gracePeriodSeconds || 300
+  );
+
+  useEffect(() => {
+    if (!teacherDisconnected.active) {
+      setRemainingSeconds(teacherDisconnected.gracePeriodSeconds || 300);
+      return;
+    }
+    const computeRemaining = () => {
+      if (teacherDisconnected.graceEndsAt && teacherDisconnected.graceEndsAt > Date.now()) {
+        return Math.max(0, Math.ceil((teacherDisconnected.graceEndsAt - Date.now()) / 1000));
+      }
+      return teacherDisconnected.gracePeriodSeconds || 300;
+    };
+    setRemainingSeconds(computeRemaining());
+    const interval = setInterval(() => {
+      setRemainingSeconds((prev) => {
+        if (teacherDisconnected.graceEndsAt) {
+          return Math.max(0, Math.ceil((teacherDisconnected.graceEndsAt - Date.now()) / 1000));
+        }
+        return prev > 0 ? prev - 1 : 0;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [
+    teacherDisconnected.active,
+    teacherDisconnected.gracePeriodSeconds,
+    teacherDisconnected.graceEndsAt,
+  ]);
+
   if (!isDisconnected && !teacherDisconnected.active) {
     return null;
   }
 
-  // Non-blocking compact floating banner when only Teacher is reconnecting
+  const mins = Math.floor(remainingSeconds / 60)
+    .toString()
+    .padStart(2, '0');
+  const secs = (remainingSeconds % 60).toString().padStart(2, '0');
+
+  // Non-blocking compact floating banner when no Host or Co-Host is active
   if (!isDisconnected && teacherDisconnected.active) {
     return (
       <div className="pointer-events-none fixed top-16 left-1/2 -translate-x-1/2 z-40 px-4">
-        <div className="pointer-events-auto flex items-center gap-2.5 px-3.5 py-2 rounded-full bg-amber-50/95 backdrop-blur-md border border-amber-200 shadow-md text-xs text-amber-800">
+        <div
+          data-testid="teacher-grace-banner"
+          className="pointer-events-auto flex items-center gap-2.5 px-3.5 py-2 rounded-full bg-amber-50/95 backdrop-blur-md border border-amber-200 shadow-md text-xs text-amber-800"
+        >
           <Clock className="w-3.5 h-3.5 text-amber-600 animate-spin shrink-0" />
-          <span className="font-semibold">Teacher reconnecting (5-min grace active)</span>
+          <span className="font-semibold">
+            No Host/Co-Host active (Closing in {mins}:{secs})
+          </span>
           <span className="text-amber-500 hidden sm:inline">•</span>
           <span className="text-amber-700 hidden sm:inline">
             Live Whiteboard &amp; Content remain active (Seq #{lastSeqId})

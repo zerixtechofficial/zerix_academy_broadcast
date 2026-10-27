@@ -766,8 +766,15 @@ export function useBroadcastSocket({
 
     socket.on('AUDIO_MIC_GRANTED', (data: any) => {
       setActiveStudentMics((prev) => {
-        let updated = prev.filter((id) => id !== data.evictedStudentId);
-        if (data.studentId && !updated.includes(data.studentId)) {
+        const cleanTarget = String(data.studentId || '').replace(/^student_/, '');
+        const cleanEvicted = String(data.evictedStudentId || '').replace(/^student_/, '');
+        let updated = prev.filter((id) => {
+          const cleanExisting = String(id).replace(/^student_/, '');
+          if (cleanEvicted && cleanExisting === cleanEvicted) return false;
+          if (cleanTarget && cleanExisting === cleanTarget) return false;
+          return true;
+        });
+        if (data.studentId) {
           updated = [...updated, data.studentId];
         }
         return updated;
@@ -798,8 +805,15 @@ export function useBroadcastSocket({
     });
 
     socket.on('AUDIO_MIC_REVOKED', (data: any) => {
-      if (!data?.deviceId) {
-        setActiveStudentMics((prev) => prev.filter((id) => id !== data.studentId));
+      if (!data?.anyDeviceMicActive) {
+        const cleanTarget = String(data?.studentId || '').replace(/^student_/, '');
+        setActiveStudentMics((prev) =>
+          prev.filter(
+            (id) =>
+              id !== data.studentId &&
+              String(id).replace(/^student_/, '') !== cleanTarget
+          )
+        );
       }
       if (role === 'student' && data?.studentId) {
         const isTargetMe =
@@ -840,8 +854,11 @@ export function useBroadcastSocket({
       }
     );
 
-    socket.on('AUDIO_MUTE_ALL', () => {
+    socket.on('AUDIO_MUTE_ALL', (data?: { allowStudentUnmute?: boolean }) => {
       setActiveStudentMics([]);
+      if (data?.allowStudentUnmute === false || data?.allowStudentUnmute === undefined) {
+        setAllowStudentUnmute(false);
+      }
       if (role === 'student') {
         onStudentMicRevokedRef.current?.();
       }

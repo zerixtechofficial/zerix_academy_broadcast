@@ -439,6 +439,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           contentState,
           audioStage,
           attendance: liveAttendance,
+          videoState: getStorageProvider().getSessionVideoState(body.sessionId),
           livekit: {
             token: livekit.token,
             url: livekit.url,
@@ -845,6 +846,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           lessonTitle: room.sessionContext?.lessonTitle || '',
           onlineCount,
           seqId: room.seqId,
+          videoState: getStorageProvider().getSessionVideoState(sessionId),
         },
       };
     }
@@ -896,6 +898,14 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
       headers['x-reset-recording'] === '1' ||
       headers['x-reset-recording'] === 'true' ||
       Boolean((request.body as any)?.reset);
+
+    const resumeRecording =
+      query.resume === '1' ||
+      query.resume === 'true' ||
+      query.resume === true ||
+      headers['x-resume-recording'] === '1' ||
+      headers['x-resume-recording'] === 'true' ||
+      Boolean((request.body as any)?.resume);
 
     if (Buffer.isBuffer(request.body)) {
       chunkBuffer = request.body;
@@ -1006,6 +1016,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         mimeType,
         relationalContext: cleanRelCtx,
         reset: resetRecording,
+        resume: resumeRecording,
       });
     } catch (err: any) {
       return reply.status(422).send({

@@ -6,6 +6,7 @@ import * as os from 'node:os';
 
 import { createBroadcastServer } from '../../src/index';
 import { redis, pubClient, subClient } from '../../src/config/redis';
+import { JwtVerifier } from '../../src/utils/jwtVerifier';
 import { StorageProvider, setStorageProvider } from '../../src/adapters/storage.provider';
 import { setSessionTimelineTracker, SessionTimelineTracker } from '../../src/modules/session-timeline/sessionTimeline.tracker';
 import { FileCache } from '../../src/utils/fileCache';
@@ -81,7 +82,15 @@ describe('Phase 4 End-to-End Cross-System Test: Broadcast Engine -> Laravel VOD 
   });
 
   it('executes full lifecycle: multi-topic 720p recording -> gzipped whiteboard -> finalization -> /learn page HTTP 206 video segment & read-only whiteboard revision', async () => {
-    const teacherHeaders = { authorization: 'Bearer DEV_TOKEN_TEACHER_501' };
+    const teacherToken = JwtVerifier.sign({
+      userId: 501,
+      role: 'teacher',
+      sessionId,
+      branchId: 4,
+      batchId: 105,
+      courseId: 12,
+    });
+    const teacherHeaders = { authorization: `Bearer ${teacherToken}` };
 
     // 1. Upload Chunk 0 & Chunk 1 while teaching Lesson 19 / Topic 301 (0s -> 180s)
     const chunk0 = Buffer.alloc(1024, 0x41);

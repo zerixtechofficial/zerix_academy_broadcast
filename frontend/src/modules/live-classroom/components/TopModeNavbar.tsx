@@ -998,11 +998,31 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
           >
             {/* Drawer Header */}
             <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50/70">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <Users className="w-4 h-4 text-[#12a3ff]" />
                 <h2 className="text-sm font-bold text-slate-900">
                   Classroom Participants
                 </h2>
+                <span
+                  data-testid="participants-active-mic-count"
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold border ${
+                    activeMicsCount > 0
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : 'bg-slate-100 text-slate-600 border-slate-200'
+                  }`}
+                  title="Active Student Microphones in Classroom"
+                >
+                  <Mic
+                    className={`w-3 h-3 ${
+                      activeMicsCount > 0
+                        ? 'text-emerald-600 animate-pulse'
+                        : 'text-slate-400'
+                    }`}
+                  />
+                  <span>
+                    {activeMicsCount} Active {activeMicsCount === 1 ? 'Mic' : 'Mics'}
+                  </span>
+                </span>
               </div>
               <button
                 type="button"
@@ -1032,6 +1052,16 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                   <span className="px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-700 text-[10px] font-bold">
                     {Math.max(participantsCount, sortedAttendanceList.length)}
                   </span>
+                  {activeMicsCount > 0 && (
+                    <span
+                      data-testid="student-tab-active-mics-badge"
+                      className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-emerald-600 text-white text-[10px] font-bold"
+                      title={`${activeMicsCount} active student microphone(s)`}
+                    >
+                      <Mic className="w-2.5 h-2.5" />
+                      <span>{activeMicsCount}</span>
+                    </span>
+                  )}
                   {raisedHandsCount > 0 && (
                     <span className="px-1.5 py-0.2 rounded-full bg-amber-500 text-white text-[10px] font-bold">
                       {raisedHandsCount}
@@ -1113,17 +1143,23 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                     )}
                   </div>
 
-                  {role === 'teacher' && activeMicsCount > 0 && (
-                    <button
-                      type="button"
-                      data-testid="mute-all-students-btn"
-                      onClick={onMuteAllStudents}
-                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs font-semibold transition-colors"
-                    >
-                      <VolumeX className="w-3.5 h-3.5" />
-                      <span>Mute All ({activeMicsCount})</span>
-                    </button>
-                  )}
+                  {role === 'teacher' &&
+                    (activeMicsCount > 0 || Boolean(audioStage.allowStudentUnmute)) && (
+                      <button
+                        type="button"
+                        data-testid="mute-all-students-btn"
+                        onClick={onMuteAllStudents}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs font-semibold transition-colors cursor-pointer"
+                        title="Mute all student microphones and disable unmute permission"
+                      >
+                        <VolumeX className="w-3.5 h-3.5" />
+                        <span>
+                          {activeMicsCount > 0
+                            ? `Mute All (${activeMicsCount})`
+                            : 'Mute All'}
+                        </span>
+                      </button>
+                    )}
                 </div>
 
                 {/* Validation Error Banner when >10 Student Mics attempted */}
@@ -1358,9 +1394,12 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
                             userId,
                             role
                           );
+                          const cleanStId = student.studentId.replace(/^student_/, '');
                           const isMicGranted = audioStage.activeStudentMics.some(
                             (m) =>
-                              m.studentId === student.studentId || m.studentId === normStId
+                              m.studentId === student.studentId ||
+                              m.studentId === normStId ||
+                              m.studentId.replace(/^student_/, '') === cleanStId
                           );
                           const hasStudentWbAccess =
                             whiteboardEditors.includes(student.studentId) ||

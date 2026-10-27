@@ -329,19 +329,24 @@ export class CurriculumClient {
       lessonId?: string | number;
       token?: string;
       reset?: boolean;
+      resume?: boolean;
     }
   ) {
     const baseUrl = getApiBaseUrl();
-    const resetQuery = options.reset ? '?reset=1' : '';
+    const queryParts: string[] = [];
+    if (options.reset) queryParts.push('reset=1');
+    if (options.resume) queryParts.push('resume=1');
+    const queryStr = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
     const endpoint = options.lessonId
-      ? `/api/v1/sessions/${sessionId}/lessons/${options.lessonId}/video-chunk${resetQuery}`
-      : `/api/v1/sessions/${sessionId}/video-chunk${resetQuery}`;
+      ? `/api/v1/sessions/${sessionId}/lessons/${options.lessonId}/video-chunk${queryStr}`
+      : `/api/v1/sessions/${sessionId}/video-chunk${queryStr}`;
 
     const authToken = getStoredAuthToken(options.token);
     const headers: Record<string, string> = {
       'Content-Type': options.mimeType || 'video/webm;codecs=vp9,opus',
       'x-chunk-index': String(options.chunkIndex),
       ...(options.reset ? { 'x-reset-recording': '1' } : {}),
+      ...(options.resume ? { 'x-resume-recording': '1' } : {}),
       ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
     };
 

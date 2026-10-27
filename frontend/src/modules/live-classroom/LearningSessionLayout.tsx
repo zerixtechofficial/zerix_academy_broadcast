@@ -250,6 +250,21 @@ export default function LearningSessionLayout() {
   const [studentZoomMultiplier, setStudentZoomMultiplier] = useState<number>(1.0);
   const [isContentToolboxVisible, setIsContentToolboxVisible] = useState<boolean>(true);
   const [isVerifiedCoTeacher, setIsVerifiedCoTeacher] = useState<boolean>(false);
+  const [initialVideoState, setInitialVideoState] = useState<any>(null);
+  const [isRecordingModalOpen, setIsRecordingModalOpen] = useState<boolean>(false);
+  const [recordingModalMode, setRecordingModalMode] = useState<'start' | 'restart'>('start');
+  const [recordingModalForm, setRecordingModalForm] = useState({
+    courseTitle: '',
+    subjectName: '',
+    batchName: '',
+    chapterTitle: '',
+    lessonTitle: '',
+    topicTitle: '',
+    teacherName: '',
+    academicYear: String(new Date().getFullYear()),
+    version: '1',
+    recordVoice: true,
+  });
 
   // Global Keyboard Shortcut: Alt+T / Option+T or single key 'T' (when not typing in an input) to toggle Content Toolbox
   useEffect(() => {
@@ -469,6 +484,9 @@ export default function LearningSessionLayout() {
 
         const ctx = initData.sessionContext || {};
         setSessionMetadata(ctx);
+        if ((initData as any).videoState) {
+          setInitialVideoState((initData as any).videoState);
+        }
         const resolvedLang = initialParams.languageId || ctx.languageId || 1;
         setLanguageId(resolvedLang);
         setIsAuthVerifying(false);
@@ -836,6 +854,13 @@ export default function LearningSessionLayout() {
     raiseHand();
   }, [ensureMicrophonePermission, raiseHand, unlockAudioPlayback]);
 
+  // Automatically turn off local microphone when the session ends or participant leaves
+  useEffect(() => {
+    if ((teacherStatus === 'ENDED' || hasLeftSession) && isMicrophoneEnabled) {
+      setMicrophoneActive(false).catch(() => {});
+    }
+  }, [teacherStatus, hasLeftSession, isMicrophoneEnabled, setMicrophoneActive]);
+
   // Handle local microphone toggle for ALL user types (Host Teacher, Co-Host Teacher, Student):
   // - Checks browser microphone permission in real time whenever unmuting
   // - Students notify server per-device on mute/unmute so multi-device mics operate independently
@@ -850,7 +875,7 @@ export default function LearningSessionLayout() {
         if (!perm.granted) {
           return;
         }
-        if (allowStudentUnmute && !canPublishAudio) {
+        if (allowStudentUnmute) {
           studentSelfUnmute();
         }
         await setMicrophoneActive(true);
@@ -868,7 +893,6 @@ export default function LearningSessionLayout() {
     role,
     isMicrophoneEnabled,
     allowStudentUnmute,
-    canPublishAudio,
     ensureMicrophonePermission,
     setMicrophoneActive,
     studentSelfMute,
@@ -1141,7 +1165,11 @@ export default function LearningSessionLayout() {
     isFinalizing: isFinalizingRecording,
     recordingDurationSec,
     chunksUploaded,
+    offlineQueuedChunksCount,
+    hasResumableRecording,
+    resumableDurationSec,
     startRecording,
+    resumeRecording,
     stopAndFinalizeRecording,
     restartRecording,
     getCurrentVideoOffsetSec,
@@ -1154,17 +1182,65 @@ export default function LearningSessionLayout() {
     activeMode,
     teachingMode,
     courseTitle: resolvedCourseTitle,
+    subjectName: (sessionMetadata as any)?.subjectName || (curriculum as any)?.subjectName || '',
+    batchName: (sessionMetadata as any)?.batchName || (sessionMetadata as any)?.title || '',
     chapterTitle,
     lessonTitle,
     topicTitle,
     teacherName: currentTeacherDisplayName,
     isLocalMicOn: isMicrophoneEnabled,
+    initialVideoState,
     getWhiteboardSnapshot: () => ({
       elements: incomingWhiteboardDelta || [],
       appState: { viewBackgroundColor: '#ffffff' },
       files: whiteboardFiles || {},
     }),
   });
+
+  const openRecordingSetupModal = useCallback(
+    (modeToOpen: 'start' | 'restart' = 'start') => {
+      setRecordingModalMode(modeToOpen);
+      setRecordingModalForm({
+        courseTitle: resolvedCourseTitle || 'Live Classroom Course',
+        subjectName:
+          (sessionMetadata as any)?.subjectName || (curriculum as any)?.subjectName || 'General',
+        batchName:
+          (sessionMetadata as any)?.batchName || (sessionMetadata as any)?.title || sessionId,
+        chapterTitle: chapterTitle || 'Chapter 1',
+        lessonTitle: lessonTitle || 'Live Lesson',
+        topicTitle: topicTitle || '',
+        teacherName: currentTeacherDisplayName || 'Instructor',
+        academicYear: String(initialParams.academicYear || new Date().getFullYear()),
+        version: String(initialParams.version || 1),
+        recordVoice: true,
+      });
+      setIsRecordingModalOpen(true);
+    },
+    [
+      resolvedCourseTitle,
+      sessionMetadata,
+      curriculum,
+      sessionId,
+      chapterTitle,
+      lessonTitle,
+      topicTitle,
+      currentTeacherDisplayName,
+      initialParams.academicYear,
+      initialParams.version,
+    ]
+  );
+
+  const handleConfirmRecordingModal = useCallback(async () => {
+    setIsRecordingModalOpen(false);
+    if (recordingModalMode === 'restart') {
+      await restartRecording('display_media', recordingModalForm);
+    } else {
+      await startRecording('display_media', recordingModalForm, {
+        resume: false,
+        forceReset: true,
+      });
+    }
+  }, [recordingModalMode, recordingModalForm, restartRecording, startRecording]);
 
   // Synchronously update Course Curriculum sidebar default visibility whenever the active view mode changes:
   // - Whiteboard: hide Course Curriculum sidebar by default (isSidebarCollapsed = true)
@@ -1259,19 +1335,34 @@ export default function LearningSessionLayout() {
     const nameMap = new Map<string, string>();
     for (const s of normalizedAttendanceList) {
       nameMap.set(s.studentId, s.studentName);
+      const cleanId = String(s.studentId).replace(/^student_/, '');
+      if (cleanId) {
+        nameMap.set(cleanId, s.studentName);
+        nameMap.set(`student_${cleanId}`, s.studentName);
+      }
+    }
+
+    const seenStudentMics = new Set<string>();
+    const dedupedActiveMics: Array<{ studentId: string; studentName: string; grantedAt: number }> = [];
+    for (const id of activeStudentMics) {
+      const cleanId = String(id).replace(/^student_/, '');
+      if (!cleanId || seenStudentMics.has(cleanId)) continue;
+      seenStudentMics.add(cleanId);
+      dedupedActiveMics.push({
+        studentId: id,
+        studentName:
+          nameMap.get(id) ||
+          nameMap.get(cleanId) ||
+          `Student #${cleanId}`,
+        grantedAt: Date.now(),
+      });
     }
 
     return {
       teacherMicActive:
         role === 'teacher' && isHostTeacher ? isMicrophoneEnabled : teacherMicActive,
       maxAllowedStudentMics: sessionMetadata?.maxStudentMics || 10,
-      activeStudentMics: activeStudentMics.map((id) => ({
-        studentId: id,
-        studentName:
-          nameMap.get(id) ||
-          `Student #${id.replace(/^student_/, '')}`,
-        grantedAt: Date.now(),
-      })),
+      activeStudentMics: dedupedActiveMics,
       raisedHands: raisedHands.map((h: any) => ({
         studentId: h.userId || h.studentId,
         studentName: h.name || h.userName || h.studentName || `Student #${h.userId}`,
@@ -1553,6 +1644,9 @@ export default function LearningSessionLayout() {
         token,
         deviceId: clientDeviceId,
       });
+      if ((initData as any).videoState) {
+        setInitialVideoState((initData as any).videoState);
+      }
       if (initData.livekit) {
         setLivekitToken(initData.livekit.token);
         setCanPublishAudio(initData.livekit.canPublishAudio);
@@ -1657,19 +1751,25 @@ export default function LearningSessionLayout() {
         recordingDurationSec={recordingDurationSec}
         chunksUploaded={chunksUploaded}
         onStartRecording={() => {
-          startRecording('display_media').catch(() => {});
+          if (hasResumableRecording) {
+            startRecording('display_media').catch(() => {});
+          } else {
+            openRecordingSetupModal('start');
+          }
         }}
         onStopRecording={() => {
           stopAndFinalizeRecording().catch(() => {});
         }}
         onRestartRecording={() => {
-          restartRecording('display_media').catch(() => {});
+          openRecordingSetupModal('restart');
         }}
         onToggleRecording={() => {
           if (isRecording) {
             stopAndFinalizeRecording().catch(() => {});
-          } else {
+          } else if (hasResumableRecording) {
             startRecording('display_media').catch(() => {});
+          } else {
+            openRecordingSetupModal('start');
           }
         }}
         onToggleContentToolbox={() => setIsContentToolboxVisible((prev) => !prev)}
@@ -1807,6 +1907,53 @@ export default function LearningSessionLayout() {
           </button>
         </div>
       )}
+
+      {/* 1c. Resumable Session Recording & Offline Chunk Queue Banner (Instructor Rejoin / Network Recovery) */}
+      {role === 'teacher' &&
+        isHostTeacher &&
+        ((!isRecording && hasResumableRecording) || offlineQueuedChunksCount > 0) && (
+          <div
+            data-testid="resume-recording-banner"
+            className="z-40 px-4 py-2 bg-indigo-50 border-b border-indigo-200 text-indigo-950 flex flex-wrap items-center justify-between gap-2 text-xs font-medium shrink-0"
+          >
+            <div className="flex items-center gap-2">
+              <span className="inline-flex h-2.5 w-2.5 rounded-full bg-indigo-600 animate-pulse" />
+              <span>
+                {!isRecording && hasResumableRecording
+                  ? `Session recording is already in progress (${Math.floor(
+                      resumableDurationSec / 60
+                    )
+                      .toString()
+                      .padStart(2, '0')}:${(resumableDurationSec % 60)
+                      .toString()
+                      .padStart(2, '0')} recorded). Resume to continue the same video without restarting.`
+                  : `${offlineQueuedChunksCount} video chunk(s) buffered during network drop. Auto-syncing on reconnect...`}
+              </span>
+            </div>
+            {!isRecording && hasResumableRecording && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  data-testid="resume-recording-btn"
+                  onClick={() => {
+                    resumeRecording('display_media').catch(() => {});
+                  }}
+                  className="px-3 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold shadow-2xs transition-colors"
+                >
+                  Resume Recording
+                </button>
+                <button
+                  type="button"
+                  data-testid="start-fresh-recording-btn"
+                  onClick={() => openRecordingSetupModal('restart')}
+                  className="px-2.5 py-1 rounded-lg border border-indigo-300 bg-white hover:bg-indigo-100 text-indigo-800 font-semibold transition-colors"
+                >
+                  Start Fresh
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
       {/* 2. Main Studio Workspace (Collapsible 260px Sidebar + 90%+ Canvas/Content Area) */}
       <div className="flex flex-1 min-h-0 w-full overflow-hidden relative">
@@ -2043,6 +2190,263 @@ export default function LearningSessionLayout() {
           void recoverAudioStageRef.current();
         }}
       />
+
+      {/* 5. Pre-Start / Restart Session Recording Course & Intro Details Modal */}
+      {isRecordingModalOpen && role === 'teacher' && isHostTeacher && (
+        <div
+          data-testid="start-recording-modal"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/75 backdrop-blur-sm"
+        >
+          <div className="w-full max-w-lg rounded-2xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
+            <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-bold">
+                  {recordingModalMode === 'restart'
+                    ? 'Restart Session Recording Details'
+                    : 'Start Session Recording Details'}
+                </h2>
+                <p className="text-xs text-slate-300 mt-0.5">
+                  Review or edit course details shown on the starting video card. Switching lessons or chapters mid-session will keep recording in one continuous video.
+                </p>
+              </div>
+              <button
+                type="button"
+                data-testid="close-start-recording-modal-btn"
+                onClick={() => setIsRecordingModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+                aria-label="Close recording setup modal"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 space-y-3.5 max-h-[75vh] overflow-y-auto text-xs sm:text-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Course Title *
+                  </label>
+                  <input
+                    type="text"
+                    data-testid="recording-modal-course-input"
+                    value={recordingModalForm.courseTitle}
+                    onChange={(e) =>
+                      setRecordingModalForm((prev) => ({
+                        ...prev,
+                        courseTitle: e.target.value,
+                      }))
+                    }
+                    placeholder="Enter course title"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Subject Name
+                  </label>
+                  <input
+                    type="text"
+                    data-testid="recording-modal-subject-input"
+                    value={recordingModalForm.subjectName}
+                    onChange={(e) =>
+                      setRecordingModalForm((prev) => ({
+                        ...prev,
+                        subjectName: e.target.value,
+                      }))
+                    }
+                    placeholder="Enter subject name"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Batch / Classroom Name
+                  </label>
+                  <input
+                    type="text"
+                    data-testid="recording-modal-batch-input"
+                    value={recordingModalForm.batchName}
+                    onChange={(e) =>
+                      setRecordingModalForm((prev) => ({
+                        ...prev,
+                        batchName: e.target.value,
+                      }))
+                    }
+                    placeholder="Enter batch name"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Instructor Name *
+                  </label>
+                  <input
+                    type="text"
+                    data-testid="recording-modal-teacher-input"
+                    value={recordingModalForm.teacherName}
+                    onChange={(e) =>
+                      setRecordingModalForm((prev) => ({
+                        ...prev,
+                        teacherName: e.target.value,
+                      }))
+                    }
+                    placeholder="Enter instructor name"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Starting Chapter *
+                  </label>
+                  <input
+                    type="text"
+                    data-testid="recording-modal-chapter-input"
+                    value={recordingModalForm.chapterTitle}
+                    onChange={(e) =>
+                      setRecordingModalForm((prev) => ({
+                        ...prev,
+                        chapterTitle: e.target.value,
+                      }))
+                    }
+                    placeholder="Enter chapter title"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Starting Lesson *
+                  </label>
+                  <input
+                    type="text"
+                    data-testid="recording-modal-lesson-input"
+                    value={recordingModalForm.lessonTitle}
+                    onChange={(e) =>
+                      setRecordingModalForm((prev) => ({
+                        ...prev,
+                        lessonTitle: e.target.value,
+                      }))
+                    }
+                    placeholder="Enter lesson title"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-1">
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Topic Title
+                  </label>
+                  <input
+                    type="text"
+                    data-testid="recording-modal-topic-input"
+                    value={recordingModalForm.topicTitle}
+                    onChange={(e) =>
+                      setRecordingModalForm((prev) => ({
+                        ...prev,
+                        topicTitle: e.target.value,
+                      }))
+                    }
+                    placeholder="Topic title"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Academic Year
+                  </label>
+                  <input
+                    type="number"
+                    data-testid="recording-modal-year-input"
+                    value={recordingModalForm.academicYear}
+                    onChange={(e) =>
+                      setRecordingModalForm((prev) => ({
+                        ...prev,
+                        academicYear: e.target.value,
+                      }))
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    VOD Version
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    data-testid="recording-modal-version-input"
+                    value={recordingModalForm.version}
+                    onChange={(e) =>
+                      setRecordingModalForm((prev) => ({
+                        ...prev,
+                        version: e.target.value,
+                      }))
+                    }
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
+                  />
+                </div>
+              </div>
+
+              <label className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  data-testid="recording-modal-voice-checkbox"
+                  checked={recordingModalForm.recordVoice}
+                  onChange={(e) =>
+                    setRecordingModalForm((prev) => ({
+                      ...prev,
+                      recordVoice: e.target.checked,
+                    }))
+                  }
+                  className="w-4 h-4 rounded border-slate-300 text-[#12a3ff] focus:ring-[#12a3ff]"
+                />
+                <span className="text-xs font-semibold text-slate-800">
+                  Record Instructor Microphone &amp; Classroom Two-Way Voice Audio (48 kbps Opus)
+                </span>
+              </label>
+            </div>
+
+            <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                data-testid="cancel-start-recording-btn"
+                onClick={() => setIsRecordingModalOpen(false)}
+                className="px-4 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs sm:text-sm font-semibold transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                data-testid="confirm-start-recording-btn"
+                onClick={() => {
+                  if (!recordingModalForm.courseTitle && !recordingModalForm.lessonTitle) {
+                    if (recordingModalMode === 'restart') {
+                      restartRecording('display_media').catch(() => {});
+                    } else {
+                      startRecording('display_media').catch(() => {});
+                    }
+                    setIsRecordingModalOpen(false);
+                    return;
+                  }
+                  handleConfirmRecordingModal().catch(() => {});
+                }}
+                className="px-5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs sm:text-sm font-bold shadow-sm transition-colors"
+              >
+                {recordingModalMode === 'restart'
+                  ? 'Confirm & Restart Recording'
+                  : 'Confirm & Start Recording'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

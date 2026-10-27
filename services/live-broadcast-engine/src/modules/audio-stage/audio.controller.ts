@@ -516,6 +516,13 @@ export class AudioStageController {
 
     const activeDevices = await this.getStudentActiveDevices(sessionId, studentId);
     const anyDeviceMicActive = activeDevices.some((d) => d.micActive);
+
+    if (!micActive && !anyDeviceMicActive) {
+      const norm = this.normalizeStudentId(studentId);
+      const rawClean = String(studentId || '').replace(/^student_/, '');
+      await redis.srem(this.activeMicsKey(sessionId), studentId, norm, rawClean);
+    }
+
     return { anyDeviceMicActive };
   }
 
@@ -1045,18 +1052,35 @@ export class AudioStageController {
 
   /**
    * Teacher executes emergency "Mute All Students".
+   * Mutes all active student microphones, resets per-device mic state,
+   * and disables "Allow Students to Unmute" so students cannot remain unmuted.
    */
   public static async muteAllStudents(sessionId: string): Promise<string[]> {
     const micsKey = this.activeMicsKey(sessionId);
     const mutedStudents = await redis.smembers(micsKey);
 
     await redis.del(micsKey);
+    await redis.set(this.allowStudentUnmuteKey(sessionId), '0');
 
     for (const studentId of mutedStudents) {
       try {
-        await livekitRoomService.updateParticipant(sessionId, studentId, undefined, {
-          canPublish: false,
-        });
+        const activeDevices = await this.getStudentActiveDevices(sessionId, studentId);
+        for (const dev of activeDevices) {
+          await this.setStudentDeviceMicState(sessionId, studentId, dev.deviceId, false);
+        }
+        const identitiesToMute = [
+          studentId,
+          ...activeDevices.map((d) => this.buildParticipantIdentity(studentId, d.deviceId)),
+        ];
+        for (const identity of identitiesToMute) {
+          try {
+            await livekitRoomService.updateParticipant(sessionId, identity, undefined, {
+              canPublish: false,
+            });
+          } catch {
+            // Silently continue
+          }
+        }
       } catch {
         // Silently continue
       }
@@ -1064,6 +1088,7 @@ export class AudioStageController {
 
     await RoomManager.appendPacket(sessionId, 'AUDIO_MUTE_ALL', {
       mutedStudents,
+      allowStudentUnmute: false,
       timestamp: Date.now(),
     });
 

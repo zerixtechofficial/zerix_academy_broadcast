@@ -122,10 +122,36 @@ export type CaptureSourceMode = 'workspace_canvas' | 'display_media';
 
 export interface IntroBrandingSceneMetadata {
   courseTitle?: string;
+  subjectName?: string;
+  batchName?: string;
   chapterTitle: string;
   lessonTitle: string;
   topicTitle: string;
   teacherName?: string;
+  academicYear?: string | number;
+  version?: string | number;
+}
+
+export interface StartRecordingDetailsInput {
+  courseTitle?: string;
+  subjectName?: string;
+  batchName?: string;
+  chapterTitle?: string;
+  lessonTitle?: string;
+  topicTitle?: string;
+  teacherName?: string;
+  academicYear?: string | number;
+  version?: string | number;
+  recordVoice?: boolean;
+}
+
+export interface SessionVideoStateSnapshot {
+  videoKey?: string;
+  totalBytesWritten?: number;
+  nextExpectedChunkIndex?: number;
+  finalized?: boolean;
+  durationSec?: number;
+  startingRelationalContext?: Partial<RelationalLessonContext>;
 }
 
 /**
@@ -185,11 +211,16 @@ export function renderIntroBrandingScene(
     ctx.fillText(`Topic: ${topicLabel}`, 180, 435);
   }
 
-  // Instructor Footer
-  if (meta.teacherName) {
+  // Instructor & Metadata Footer
+  if (meta.teacherName || meta.subjectName || meta.batchName) {
     ctx.fillStyle = '#94a3b8';
     ctx.font = '500 18px sans-serif';
-    ctx.fillText(`Instructor: ${meta.teacherName}`, 180, 540);
+    const footerParts = [
+      meta.teacherName ? `Instructor: ${meta.teacherName}` : '',
+      meta.subjectName ? `Subject: ${meta.subjectName}` : '',
+      meta.batchName ? `Batch: ${meta.batchName}` : '',
+    ].filter(Boolean);
+    ctx.fillText(footerParts.join('  •  '), 180, 540);
   }
 }
 
@@ -202,11 +233,14 @@ export interface UseCompressedClassRecorderParams {
   activeMode: 'content' | 'whiteboard';
   teachingMode: CurriculumTeachingMode;
   courseTitle?: string;
+  subjectName?: string;
+  batchName?: string;
   chapterTitle: string;
   lessonTitle: string;
   topicTitle: string;
   teacherName?: string;
   isLocalMicOn: boolean;
+  initialVideoState?: SessionVideoStateSnapshot | null;
   getWhiteboardSnapshot?: () => {
     elements: any[];
     appState?: Record<string, any>;
@@ -223,11 +257,14 @@ export function useCompressedClassRecorder({
   activeMode,
   teachingMode,
   courseTitle,
+  subjectName,
+  batchName,
   chapterTitle,
   lessonTitle,
   topicTitle,
   teacherName,
   isLocalMicOn,
+  initialVideoState,
   getWhiteboardSnapshot,
 }: UseCompressedClassRecorderParams) {
   const [isRecording, setIsRecording] = useState<boolean>(false);
@@ -235,25 +272,33 @@ export function useCompressedClassRecorder({
   const [recordingDurationSec, setRecordingDurationSec] = useState<number>(0);
   const [chunksUploaded, setChunksUploaded] = useState<number>(0);
   const [pendingChunksCount, setPendingChunksCount] = useState<number>(0);
+  const [offlineQueuedChunksCount, setOfflineQueuedChunksCount] = useState<number>(0);
   const [totalBytesUploaded, setTotalBytesUploaded] = useState<number>(0);
   const [lastJitterMs, setLastJitterMs] = useState<number>(0);
   const [activeMimeType, setActiveMimeType] = useState<string>(PREFERRED_CODECS[0]);
   const [recorderError, setRecorderError] = useState<string | null>(null);
+  const [hasResumableRecording, setHasResumableRecording] = useState<boolean>(false);
+  const [resumableDurationSec, setResumableDurationSec] = useState<number>(0);
 
   // Latest metadata refs so continuous canvas compositor & chunk uploader never restart on lesson navigation
   const sessionIdRef = useRef(sessionId);
   const tokenRef = useRef(token);
   const relationalContextRef = useRef(relationalContext);
+  const startingRelationalContextRef = useRef<RelationalLessonContext | null>(null);
   const activeModeRef = useRef(activeMode);
   const teachingModeRef = useRef(teachingMode);
-  const titlesRef = useRef({
+  const lockedIntroTitlesRef = useRef<IntroBrandingSceneMetadata | null>(null);
+  const titlesRef = useRef<IntroBrandingSceneMetadata>({
     courseTitle: courseTitle || relationalContext.courseTitle || 'Live Classroom Course',
+    subjectName,
+    batchName,
     chapterTitle,
     lessonTitle,
     topicTitle,
     teacherName,
   });
   const isLocalMicOnRef = useRef(isLocalMicOn);
+  const recordVoiceRef = useRef<boolean>(true);
   const getWhiteboardSnapshotRef = useRef(getWhiteboardSnapshot);
 
   useEffect(() => {
@@ -262,13 +307,18 @@ export function useCompressedClassRecorder({
     relationalContextRef.current = relationalContext;
     activeModeRef.current = activeMode;
     teachingModeRef.current = teachingMode;
-    titlesRef.current = {
-      courseTitle: courseTitle || relationalContext.courseTitle || 'Live Classroom Course',
-      chapterTitle,
-      lessonTitle,
-      topicTitle,
-      teacherName,
-    };
+    // If recording is already running with locked starting details, preserve the starting intro metadata
+    if (!lockedIntroTitlesRef.current) {
+      titlesRef.current = {
+        courseTitle: courseTitle || relationalContext.courseTitle || 'Live Classroom Course',
+        subjectName,
+        batchName,
+        chapterTitle,
+        lessonTitle,
+        topicTitle,
+        teacherName,
+      };
+    }
     isLocalMicOnRef.current = isLocalMicOn;
     getWhiteboardSnapshotRef.current = getWhiteboardSnapshot;
   });
@@ -282,11 +332,114 @@ export function useCompressedClassRecorder({
   const recordingStartEpochRef = useRef<number | null>(null);
   const nextChunkIndexRef = useRef<number>(0);
   const resetNextFirstChunkRef = useRef<boolean>(false);
+  const resumeSessionRef = useRef<boolean>(false);
+  const hasResumableRecordingRef = useRef<boolean>(false);
   const activeUploadPromisesRef = useRef<Set<Promise<void>>>(new Set());
+  const pendingOfflineChunksRef = useRef<
+    Array<{
+      blob: Blob;
+      chunkIndex: number;
+      mimeType: string;
+      shouldReset: boolean;
+      shouldResume: boolean;
+    }>
+  >([]);
+  const isFlushingOfflineRef = useRef<boolean>(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const attachedAudioElementIdsRef = useRef<Set<string>>(new Set());
   const audioStudentScanTimerRef = useRef<number | null>(null);
   const rawStreamsToCleanupRef = useRef<MediaStream[]>([]);
+
+  const getRecordingStorageKey = useCallback((sid: string) => {
+    return `broadcast_active_recording_${sid}`;
+  }, []);
+
+  const persistActiveRecordingSessionState = useCallback(
+    (patch?: Partial<{ active: boolean; nextChunkIndex: number; durationSec: number }>) => {
+      if (typeof window === 'undefined' || !sessionIdRef.current) return;
+      try {
+        const key = getRecordingStorageKey(sessionIdRef.current);
+        if (patch && patch.active === false) {
+          window.sessionStorage.removeItem(key);
+          return;
+        }
+        const payload = {
+          active: patch?.active ?? true,
+          nextChunkIndex: patch?.nextChunkIndex ?? nextChunkIndexRef.current,
+          durationSec: patch?.durationSec ?? recordingDurationSec,
+          titles: titlesRef.current,
+          startingRelationalContext:
+            startingRelationalContextRef.current || relationalContextRef.current,
+          updatedAt: Date.now(),
+        };
+        window.sessionStorage.setItem(key, JSON.stringify(payload));
+      } catch {
+        // Ignore storage quota errors
+      }
+    },
+    [getRecordingStorageKey, recordingDurationSec]
+  );
+
+  // Hydrate resumable recording state from backend videoState or sessionStorage on mount / rejoin
+  useEffect(() => {
+    if (!sessionId) return;
+    let stored: any = null;
+    if (typeof window !== 'undefined') {
+      try {
+        const raw = window.sessionStorage.getItem(getRecordingStorageKey(sessionId));
+        if (raw) stored = JSON.parse(raw);
+      } catch {
+        stored = null;
+      }
+    }
+
+    const backendActive =
+      initialVideoState &&
+      !initialVideoState.finalized &&
+      ((initialVideoState.totalBytesWritten ?? 0) > 0 ||
+        (initialVideoState.nextExpectedChunkIndex ?? 0) > 0);
+
+    if (backendActive || (stored && stored.active && (stored.nextChunkIndex ?? 0) > 0)) {
+      const nextIdx = Math.max(
+        initialVideoState?.nextExpectedChunkIndex ?? 0,
+        stored?.nextChunkIndex ?? 0
+      );
+      const durSec = Math.max(
+        initialVideoState?.durationSec ?? 0,
+        stored?.durationSec ?? 0,
+        nextIdx * 10
+      );
+      hasResumableRecordingRef.current = true;
+      setHasResumableRecording(true);
+      setResumableDurationSec(durSec);
+      if (!isRecording) {
+        setRecordingDurationSec(durSec);
+        setChunksUploaded(nextIdx);
+        if (initialVideoState?.totalBytesWritten) {
+          setTotalBytesUploaded(initialVideoState.totalBytesWritten);
+        }
+      }
+      if (initialVideoState?.startingRelationalContext && !startingRelationalContextRef.current) {
+        startingRelationalContextRef.current = {
+          ...relationalContextRef.current,
+          ...initialVideoState.startingRelationalContext,
+        };
+      } else if (stored?.startingRelationalContext && !startingRelationalContextRef.current) {
+        startingRelationalContextRef.current = {
+          ...relationalContextRef.current,
+          ...stored.startingRelationalContext,
+        };
+      }
+      if (stored?.titles && !lockedIntroTitlesRef.current) {
+        lockedIntroTitlesRef.current = stored.titles;
+        titlesRef.current = stored.titles;
+      }
+    } else if (initialVideoState?.finalized) {
+      hasResumableRecordingRef.current = false;
+      setHasResumableRecording(false);
+      setResumableDurationSec(0);
+    }
+  }, [sessionId, initialVideoState, isRecording, getRecordingStorageKey]);
 
   /**
    * Returns the current elapsed seconds in the continuous session recording.
@@ -300,8 +453,57 @@ export function useCompressedClassRecorder({
   }, [recordingDurationSec]);
 
   /**
+   * Flushes any offline-buffered video chunks in ascending chunkIndex order once network connectivity returns.
+   */
+  const flushOfflineQueuedChunks = useCallback(async (): Promise<void> => {
+    if (isFlushingOfflineRef.current || pendingOfflineChunksRef.current.length === 0) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+
+    isFlushingOfflineRef.current = true;
+    try {
+      pendingOfflineChunksRef.current.sort((a, b) => a.chunkIndex - b.chunkIndex);
+      while (pendingOfflineChunksRef.current.length > 0) {
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) break;
+        const item = pendingOfflineChunksRef.current[0];
+        const effectiveRelCtx =
+          startingRelationalContextRef.current || relationalContextRef.current;
+        try {
+          await CurriculumClient.uploadVideoChunk(sessionIdRef.current, item.blob, {
+            chunkIndex: item.chunkIndex,
+            mimeType: item.mimeType,
+            relationalContext: effectiveRelCtx,
+            token: tokenRef.current,
+            reset: item.shouldReset,
+            resume: item.shouldResume,
+          });
+          pendingOfflineChunksRef.current.shift();
+          setOfflineQueuedChunksCount(pendingOfflineChunksRef.current.length);
+          setChunksUploaded((prev) => prev + 1);
+          setTotalBytesUploaded((prev) => prev + item.blob.size);
+        } catch {
+          break;
+        }
+      }
+    } finally {
+      isFlushingOfflineRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => {
+      flushOfflineQueuedChunks().catch(() => {});
+    };
+    window.addEventListener('online', handleOnline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [flushOfflineQueuedChunks]);
+
+  /**
    * Queues a single 10s compressed video chunk with a random 150ms-1850ms jitter delay
    * and up to 3 automatic exponential-backoff retries on transient failure.
+   * If network is disconnected, buffers the chunk in memory and flushes automatically on reconnect.
    */
   const enqueueChunkUploadWithJitter = useCallback(
     (chunkBlob: Blob, chunkIndex: number, mimeType: string, skipJitter = false): Promise<void> => {
@@ -315,31 +517,68 @@ export function useCompressedClassRecorder({
             await new Promise((resolve) => setTimeout(resolve, jitterMs));
           }
 
-          let attempt = 0;
-          let uploaded = false;
           const shouldReset = chunkIndex === 0 && resetNextFirstChunkRef.current;
           if (shouldReset) {
             resetNextFirstChunkRef.current = false;
           }
+          const shouldResume = !shouldReset && resumeSessionRef.current;
+          const effectiveRelCtx =
+            startingRelationalContextRef.current || relationalContextRef.current;
+
+          if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+            if (!pendingOfflineChunksRef.current.some((c) => c.chunkIndex === chunkIndex)) {
+              pendingOfflineChunksRef.current.push({
+                blob: chunkBlob,
+                chunkIndex,
+                mimeType,
+                shouldReset,
+                shouldResume,
+              });
+              setOfflineQueuedChunksCount(pendingOfflineChunksRef.current.length);
+            }
+            return;
+          }
+
+          await flushOfflineQueuedChunks();
+
+          let attempt = 0;
+          let uploaded = false;
           while (!uploaded && attempt < RECORDER_CONFIG.MAX_UPLOAD_RETRIES) {
             attempt++;
             try {
               await CurriculumClient.uploadVideoChunk(sessionIdRef.current, chunkBlob, {
                 chunkIndex,
                 mimeType,
-                relationalContext: relationalContextRef.current,
+                relationalContext: effectiveRelCtx,
                 token: tokenRef.current,
                 reset: shouldReset,
+                resume: shouldResume,
               });
               uploaded = true;
+              hasResumableRecordingRef.current = true;
+              setHasResumableRecording(true);
               setChunksUploaded((prev) => prev + 1);
               setTotalBytesUploaded((prev) => prev + chunkBlob.size);
+              persistActiveRecordingSessionState({
+                active: true,
+                nextChunkIndex: Math.max(nextChunkIndexRef.current, chunkIndex + 1),
+              });
             } catch (err: any) {
               if (attempt >= RECORDER_CONFIG.MAX_UPLOAD_RETRIES) {
                 console.warn(
-                  `[720pRecorder] Chunk #${chunkIndex} failed after ${attempt} attempts:`,
+                  `[720pRecorder] Chunk #${chunkIndex} failed after ${attempt} attempts, queuing for reconnect:`,
                   err?.message
                 );
+                if (!pendingOfflineChunksRef.current.some((c) => c.chunkIndex === chunkIndex)) {
+                  pendingOfflineChunksRef.current.push({
+                    blob: chunkBlob,
+                    chunkIndex,
+                    mimeType,
+                    shouldReset,
+                    shouldResume,
+                  });
+                  setOfflineQueuedChunksCount(pendingOfflineChunksRef.current.length);
+                }
               } else {
                 const backoffMs = attempt * 600 + computeRandomUploadJitterMs(50, 350);
                 await new Promise((resolve) => setTimeout(resolve, backoffMs));
@@ -358,14 +597,15 @@ export function useCompressedClassRecorder({
 
       return uploadPromise;
     },
-    []
+    [flushOfflineQueuedChunks, persistActiveRecordingSessionState]
   );
 
   /**
    * Builds the Two-Way AudioContext mixer combining:
-   * 1. Teacher Microphone (if permitted/available)
-   * 2. Approved Student Microphones from LiveKit `<audio id="audio_*">` elements in the DOM
-   * 3. Ultra-quiet clock keepalive oscillator so Opus frames remain continuous even when mics are muted
+   * 1. Teacher Microphone (ALWAYS captured when recordVoice !== false, even if LiveKit mic toggle was initially off)
+   * 2. Shared Tab / System Audio from displayStream (if shared)
+   * 3. Approved Student / Co-Host Microphones from LiveKit `<audio id="audio_*">` elements in the DOM
+   * 4. Ultra-quiet clock keepalive oscillator so Opus frames remain continuous
    */
   const createMixedTwoWayAudioStream = useCallback(
     async (displayStream?: MediaStream | null): Promise<MediaStream | null> => {
@@ -401,65 +641,82 @@ export function useCompressedClassRecorder({
           }
         }
 
-        // 2. Teacher Microphone capture (if available in browser environment)
-      if (
-        navigator.mediaDevices &&
-        typeof navigator.mediaDevices.getUserMedia === 'function' &&
-        isLocalMicOnRef.current
-      ) {
-        try {
-          const micStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-              channelCount: 1,
-              sampleRate: 48000,
-            },
-            video: false,
-          });
-          rawStreamsToCleanupRef.current.push(micStream);
-          const micSource = audioCtx.createMediaStreamSource(micStream);
-          micSource.connect(destination);
-        } catch {
-          // Non-blocking in headless / muted environments
-        }
-      }
-
-      // 3. Periodically attach any LiveKit remote student/co-teacher <audio id="audio_*"> elements
-      const scanAndAttachRemoteStudentAudio = () => {
-        if (!audioContextRef.current || audioContextRef.current.state === 'closed') return;
-        const audioEls = document.querySelectorAll<HTMLAudioElement>('audio[id^="audio_"]');
-        audioEls.forEach((audioEl) => {
-          if (!audioEl.id || attachedAudioElementIdsRef.current.has(audioEl.id)) return;
+        // 2. Teacher Microphone capture (always capture voice for screen recording unless explicitly disabled)
+        if (
+          recordVoiceRef.current !== false &&
+          typeof navigator !== 'undefined' &&
+          navigator.mediaDevices &&
+          typeof navigator.mediaDevices.getUserMedia === 'function'
+        ) {
           try {
-            const captureFn =
-              (audioEl as any).captureStream || (audioEl as any).mozCaptureStream;
-            if (typeof captureFn === 'function') {
-              const remoteStream: MediaStream = captureFn.call(audioEl);
-              if (remoteStream && remoteStream.getAudioTracks().length > 0) {
-                const remoteSource = audioCtx.createMediaStreamSource(remoteStream);
-                remoteSource.connect(destination);
-                attachedAudioElementIdsRef.current.add(audioEl.id);
-              }
-            }
+            const micStream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                channelCount: 1,
+                sampleRate: 48000,
+              },
+              video: false,
+            });
+            rawStreamsToCleanupRef.current.push(micStream);
+            const micSource = audioCtx.createMediaStreamSource(micStream);
+            micSource.connect(destination);
           } catch {
-            // Ignore cross-origin or unready audio element attachment
+            // Non-blocking in headless / permission-denied environments
           }
-        });
-      };
+        }
 
-      scanAndAttachRemoteStudentAudio();
-      audioStudentScanTimerRef.current = window.setInterval(
-        scanAndAttachRemoteStudentAudio,
-        2500
-      );
+        // 3. Periodically attach any LiveKit remote student/co-teacher <audio id="audio_*"> elements
+        attachedAudioElementIdsRef.current.clear();
+        const scanAndAttachRemoteStudentAudio = () => {
+          if (!audioContextRef.current || audioContextRef.current.state === 'closed') return;
+          if (audioContextRef.current.state === 'suspended' && typeof audioContextRef.current.resume === 'function') {
+            audioContextRef.current.resume().catch(() => {});
+          }
+          const audioEls = document.querySelectorAll<HTMLAudioElement>('audio[id^="audio_"], audio[data-lk-source]');
+          audioEls.forEach((audioEl, idx) => {
+            const key = audioEl.id || `lk_audio_${idx}`;
+            if (attachedAudioElementIdsRef.current.has(key)) return;
+            try {
+              const srcObj = (audioEl as any).srcObject as MediaStream | undefined;
+              if (srcObj && typeof srcObj.getAudioTracks === 'function' && srcObj.getAudioTracks().length > 0) {
+                const remoteSource = audioCtx.createMediaStreamSource(
+                  new MediaStream(srcObj.getAudioTracks())
+                );
+                remoteSource.connect(destination);
+                attachedAudioElementIdsRef.current.add(key);
+                return;
+              }
+              const captureFn =
+                (audioEl as any).captureStream || (audioEl as any).mozCaptureStream;
+              if (typeof captureFn === 'function') {
+                const remoteStream: MediaStream = captureFn.call(audioEl);
+                if (remoteStream && remoteStream.getAudioTracks().length > 0) {
+                  const remoteSource = audioCtx.createMediaStreamSource(remoteStream);
+                  remoteSource.connect(destination);
+                  attachedAudioElementIdsRef.current.add(key);
+                }
+              }
+            } catch {
+              // Ignore cross-origin or unready audio element attachment
+            }
+          });
+        };
 
-      return destination.stream;
-    } catch {
-      return null;
-    }
-  }, []);
+        scanAndAttachRemoteStudentAudio();
+        audioStudentScanTimerRef.current = window.setInterval(
+          scanAndAttachRemoteStudentAudio,
+          2000
+        );
+
+        return destination.stream;
+      } catch {
+        return null;
+      }
+    },
+    []
+  );
 
   /**
    * Creates a 1280x720 @ 15fps Canvas Stream that:
@@ -556,11 +813,19 @@ export function useCompressedClassRecorder({
   );
 
   /**
-   * Starts the manual 720p session recording.
-   * Captures the user's original screen (with all tabs/windows) preceded by a 3-second intro branding scene.
+   * Starts or resumes the manual 720p session recording.
+   * - Accepts optional `customDetails` from the Pre-Start Course & Session Info Modal so the 3s intro branding
+   *   scene and primary storage key use the confirmed/edited details.
+   * - Locks `startingRelationalContextRef` so navigating lessons/chapters mid-session NEVER splits the video.
+   * - If an unfinalized recording already exists for this session (e.g. after network disconnect, refresh, or
+   *   instructor rejoin), seamlessly resumes appending to the existing recording instead of starting from 00:00.
    */
   const startRecording = useCallback(
-    async (captureMode: CaptureSourceMode = 'display_media'): Promise<boolean> => {
+    async (
+      captureMode: CaptureSourceMode = 'display_media',
+      customDetails?: StartRecordingDetailsInput,
+      options?: { resume?: boolean; forceReset?: boolean }
+    ): Promise<boolean> => {
       if (role !== 'teacher' || !isHostTeacher) return false;
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         return true;
@@ -569,6 +834,42 @@ export function useCompressedClassRecorder({
       setRecorderError(null);
 
       try {
+        if (customDetails) {
+          recordVoiceRef.current = customDetails.recordVoice !== false;
+          const mergedTitles: IntroBrandingSceneMetadata = {
+            courseTitle:
+              customDetails.courseTitle?.trim() ||
+              titlesRef.current.courseTitle ||
+              'Live Classroom Course',
+            subjectName: customDetails.subjectName?.trim() || titlesRef.current.subjectName,
+            batchName: customDetails.batchName?.trim() || titlesRef.current.batchName,
+            chapterTitle:
+              customDetails.chapterTitle?.trim() || titlesRef.current.chapterTitle || 'Chapter',
+            lessonTitle:
+              customDetails.lessonTitle?.trim() || titlesRef.current.lessonTitle || 'Live Lesson',
+            topicTitle: customDetails.topicTitle?.trim() ?? titlesRef.current.topicTitle ?? '',
+            teacherName: customDetails.teacherName?.trim() || titlesRef.current.teacherName,
+            academicYear: customDetails.academicYear ?? titlesRef.current.academicYear,
+            version: customDetails.version ?? titlesRef.current.version,
+          };
+          lockedIntroTitlesRef.current = mergedTitles;
+          titlesRef.current = mergedTitles;
+          startingRelationalContextRef.current = {
+            ...relationalContextRef.current,
+            courseTitle: mergedTitles.courseTitle,
+            ...(customDetails.academicYear !== undefined &&
+            !Number.isNaN(Number(customDetails.academicYear))
+              ? { academicYear: Number(customDetails.academicYear) }
+              : {}),
+            ...(customDetails.version !== undefined && !Number.isNaN(Number(customDetails.version))
+              ? { version: Number(customDetails.version) }
+              : {}),
+          };
+        } else if (!startingRelationalContextRef.current) {
+          startingRelationalContextRef.current = { ...relationalContextRef.current };
+          lockedIntroTitlesRef.current = { ...titlesRef.current };
+        }
+
         let displayStream: MediaStream | null = null;
 
         if (
@@ -605,13 +906,47 @@ export function useCompressedClassRecorder({
           }
         }
 
-        // Reset recording epoch and chunk counters for a fresh recording take
-        recordingStartEpochRef.current = Date.now();
-        nextChunkIndexRef.current = 0;
-        resetNextFirstChunkRef.current = true;
-        setRecordingDurationSec(0);
-        setChunksUploaded(0);
-        setTotalBytesUploaded(0);
+        const isResuming =
+          !options?.forceReset && Boolean(options?.resume ?? hasResumableRecordingRef.current);
+
+        if (isResuming) {
+          const baseChunkIdx = Math.max(
+            nextChunkIndexRef.current,
+            initialVideoState?.nextExpectedChunkIndex ?? 0,
+            chunksUploaded,
+            1
+          );
+          const baseDurSec = Math.max(
+            recordingDurationSec,
+            resumableDurationSec,
+            initialVideoState?.durationSec ?? 0,
+            baseChunkIdx * 10
+          );
+          // Offset startEpoch by at least INTRO_BRANDING_DURATION_MS so resumed video does NOT re-draw the 3s intro screen
+          recordingStartEpochRef.current =
+            Date.now() -
+            Math.max(RECORDER_CONFIG.INTRO_BRANDING_DURATION_MS, baseDurSec * 1000);
+          nextChunkIndexRef.current = baseChunkIdx;
+          resetNextFirstChunkRef.current = false;
+          resumeSessionRef.current = true;
+          setRecordingDurationSec(baseDurSec);
+          setChunksUploaded(baseChunkIdx);
+        } else {
+          // Reset recording epoch and chunk counters for a fresh recording take
+          recordingStartEpochRef.current = Date.now();
+          nextChunkIndexRef.current = 0;
+          resetNextFirstChunkRef.current = true;
+          resumeSessionRef.current = false;
+          setRecordingDurationSec(0);
+          setChunksUploaded(0);
+          setTotalBytesUploaded(0);
+        }
+
+        persistActiveRecordingSessionState({
+          active: true,
+          nextChunkIndex: nextChunkIndexRef.current,
+          durationSec: isResuming ? recordingDurationSec : 0,
+        });
 
         const videoStream =
           createBrandedScreenCanvasStream(displayStream) || displayStream;
@@ -673,9 +1008,16 @@ export function useCompressedClassRecorder({
         }
         durationTimerRef.current = window.setInterval(() => {
           if (recordingStartEpochRef.current) {
-            setRecordingDurationSec(
-              Math.max(0, Math.floor((Date.now() - recordingStartEpochRef.current) / 1000))
+            const elapsedSec = Math.max(
+              0,
+              Math.floor((Date.now() - recordingStartEpochRef.current) / 1000)
             );
+            setRecordingDurationSec(elapsedSec);
+            persistActiveRecordingSessionState({
+              active: true,
+              nextChunkIndex: nextChunkIndexRef.current,
+              durationSec: elapsedSec,
+            });
           }
         }, 1000);
 
@@ -688,10 +1030,25 @@ export function useCompressedClassRecorder({
     [
       role,
       isHostTeacher,
+      initialVideoState,
+      chunksUploaded,
+      recordingDurationSec,
+      resumableDurationSec,
+      persistActiveRecordingSessionState,
       createBrandedScreenCanvasStream,
       createMixedTwoWayAudioStream,
       enqueueChunkUploadWithJitter,
     ]
+  );
+
+  /**
+   * Explicitly resumes an already-started recording after network disconnect, browser refresh, or instructor rejoin.
+   */
+  const resumeRecording = useCallback(
+    async (captureMode: CaptureSourceMode = 'display_media'): Promise<boolean> => {
+      return await startRecording(captureMode, undefined, { resume: true });
+    },
+    [startRecording]
   );
 
   /**
@@ -731,6 +1088,8 @@ export function useCompressedClassRecorder({
         });
       }
       mediaRecorderRef.current = null;
+
+      await flushOfflineQueuedChunks();
 
       // Ensure at least 1 valid WebM header chunk was uploaded if the teacher ended the class before 10s elapsed
       if (nextChunkIndexRef.current === 0 && role === 'teacher' && isHostTeacher) {
@@ -776,9 +1135,12 @@ export function useCompressedClassRecorder({
           ? getWhiteboardSnapshotRef.current()
           : undefined;
 
+      const effectiveRelCtx =
+        startingRelationalContextRef.current || relationalContextRef.current;
+
       const finalizeRes = await CurriculumClient.finalizeSession(sessionIdRef.current, {
         totalDurationSec: Math.max(1, finalDurationSec),
-        relationalContext: relationalContextRef.current,
+        relationalContext: effectiveRelCtx,
         whiteboard: wbSnapshot,
         token: tokenRef.current,
       }).catch((err) => {
@@ -787,6 +1149,13 @@ export function useCompressedClassRecorder({
       });
 
       setIsRecording(false);
+      hasResumableRecordingRef.current = false;
+      setHasResumableRecording(false);
+      setResumableDurationSec(0);
+      resumeSessionRef.current = false;
+      startingRelationalContextRef.current = null;
+      lockedIntroTitlesRef.current = null;
+      persistActiveRecordingSessionState({ active: false });
       recordingStartEpochRef.current = null;
       return finalizeRes;
     } finally {
@@ -796,8 +1165,10 @@ export function useCompressedClassRecorder({
     role,
     isHostTeacher,
     activeMimeType,
+    flushOfflineQueuedChunks,
     enqueueChunkUploadWithJitter,
     getCurrentVideoOffsetSec,
+    persistActiveRecordingSessionState,
   ]);
 
   const stopAndFinalizeRef = useRef<(() => Promise<any>) | null>(null);
@@ -808,7 +1179,10 @@ export function useCompressedClassRecorder({
    * with the 3-second intro branding scene and chunkIndex=0 (reset=true).
    */
   const restartRecording = useCallback(
-    async (captureMode: CaptureSourceMode = 'display_media'): Promise<boolean> => {
+    async (
+      captureMode: CaptureSourceMode = 'display_media',
+      customDetails?: StartRecordingDetailsInput
+    ): Promise<boolean> => {
       if (role !== 'teacher' || !isHostTeacher) return false;
 
       if (durationTimerRef.current) {
@@ -853,6 +1227,12 @@ export function useCompressedClassRecorder({
       }
 
       setIsRecording(false);
+      hasResumableRecordingRef.current = false;
+      setHasResumableRecording(false);
+      setResumableDurationSec(0);
+      resumeSessionRef.current = false;
+      pendingOfflineChunksRef.current = [];
+      setOfflineQueuedChunksCount(0);
       recordingStartEpochRef.current = null;
       nextChunkIndexRef.current = 0;
       resetNextFirstChunkRef.current = true;
@@ -860,7 +1240,10 @@ export function useCompressedClassRecorder({
       setChunksUploaded(0);
       setTotalBytesUploaded(0);
 
-      return await startRecording(captureMode);
+      return await startRecording(captureMode, customDetails, {
+        resume: false,
+        forceReset: true,
+      });
     },
     [role, isHostTeacher, startRecording]
   );
@@ -880,11 +1263,15 @@ export function useCompressedClassRecorder({
     recordingDurationSec,
     chunksUploaded,
     pendingChunksCount,
+    offlineQueuedChunksCount,
     totalBytesUploaded,
     lastJitterMs,
     activeMimeType,
     recorderError,
+    hasResumableRecording,
+    resumableDurationSec,
     startRecording,
+    resumeRecording,
     stopAndFinalizeRecording,
     restartRecording,
     getCurrentVideoOffsetSec,

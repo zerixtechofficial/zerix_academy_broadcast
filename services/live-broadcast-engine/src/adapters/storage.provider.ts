@@ -56,6 +56,7 @@ interface SessionVideoRecordingState {
   startedAt: number;
   lastChunkAt: number;
   finalized: boolean;
+  startingRelationalContext?: Partial<RelationalLessonContext>;
 }
 
 export interface StorageProviderConfig {
@@ -795,6 +796,74 @@ export class StorageProvider {
     return `courses/course_${norm.courseId}/board_${boardSegment}_lang_${norm.languageId}/ch_${norm.chapterId}/lesson_${norm.lessonId}/v${norm.version}_${norm.academicYear}/whiteboard.json`;
   }
 
+  private getVideoRecordingStateMetaPath(sessionId: string): string {
+    return this.resolveCachePath(`sessions/${sessionId}/video_recording_state.json`);
+  }
+
+  private persistVideoRecordingStateSync(state: SessionVideoRecordingState): void {
+    try {
+      const metaPath = this.getVideoRecordingStateMetaPath(state.sessionId);
+      const dir = path.dirname(metaPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const payload = {
+        sessionId: state.sessionId,
+        videoKey: state.videoKey,
+        cachePath: state.cachePath,
+        mirrorPath: state.mirrorPath,
+        mimeType: state.mimeType,
+        extension: state.extension,
+        nextExpectedChunkIndex: state.nextExpectedChunkIndex,
+        processedChunks: Array.from(state.processedChunks),
+        totalBytesWritten: state.totalBytesWritten,
+        startedAt: state.startedAt,
+        lastChunkAt: state.lastChunkAt,
+        finalized: state.finalized,
+        startingRelationalContext: state.startingRelationalContext,
+      };
+      fs.writeFileSync(metaPath, JSON.stringify(payload, null, 2), 'utf-8');
+    } catch {
+      // Non-blocking metadata persistence
+    }
+  }
+
+  private rehydrateVideoRecordingStateSync(sessionId: string): SessionVideoRecordingState | undefined {
+    const inMemory = this.videoRecordings.get(sessionId);
+    if (inMemory) return inMemory;
+    try {
+      const metaPath = this.getVideoRecordingStateMetaPath(sessionId);
+      if (!fs.existsSync(metaPath)) return undefined;
+      const raw = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      if (!raw || typeof raw !== 'object' || !raw.videoKey) return undefined;
+      const cachePath = this.resolveCachePath(raw.videoKey);
+      const mirrorPath = this.resolveWorkspaceMirrorPath(raw.videoKey);
+      const diskBytes = fs.existsSync(cachePath) ? fs.statSync(cachePath).size : 0;
+      const restored: SessionVideoRecordingState = {
+        sessionId,
+        videoKey: String(raw.videoKey),
+        cachePath,
+        mirrorPath,
+        mimeType: String(raw.mimeType || 'video/webm;codecs=vp9,opus'),
+        extension: raw.extension === 'mp4' ? 'mp4' : 'webm',
+        nextExpectedChunkIndex: Number(raw.nextExpectedChunkIndex || 0),
+        processedChunks: new Set<number>(
+          Array.isArray(raw.processedChunks) ? raw.processedChunks.map(Number) : []
+        ),
+        pendingChunks: new Map<number, Buffer>(),
+        totalBytesWritten: diskBytes > 0 ? diskBytes : Number(raw.totalBytesWritten || 0),
+        startedAt: Number(raw.startedAt || Date.now()),
+        lastChunkAt: Number(raw.lastChunkAt || Date.now()),
+        finalized: Boolean(raw.finalized),
+        startingRelationalContext: raw.startingRelationalContext,
+      };
+      this.videoRecordings.set(sessionId, restored);
+      return restored;
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
    * Appends a compressed 720p video chunk (`10000ms` + random `150ms–1850ms` jitter)
    * into the session's single continuous recording (`video_720p.webm` or `.mp4`).
@@ -805,7 +874,9 @@ export class StorageProvider {
    * 2. **Out-of-Order Reassembly:** If network jitter causes `chunkIndex=2` to arrive before
    *    `chunkIndex=1`, `chunkIndex=2` is buffered in memory and flushed immediately once
    *    `chunkIndex=1` arrives.
-   * 3. **Idempotent Retry Handling:** Duplicate `chunkIndex` uploads are safely ignored.
+   * 3. **Idempotent Retry & Rejoin Resume Handling:** Duplicate `chunkIndex` uploads are safely
+   *    ignored, while rejoined instructors (`resume: true`) seamlessly append to the existing
+   *    continuous session recording without restarting from 00:00.
    */
   public async appendVideoChunk(
     sessionId: string,
@@ -816,20 +887,21 @@ export class StorageProvider {
       relationalContext?: Partial<RelationalLessonContext>;
       videoKeyOverride?: string;
       reset?: boolean;
+      resume?: boolean;
     }
   ): Promise<VideoChunkAppendResult> {
     if (!Buffer.isBuffer(chunkBuffer) || chunkBuffer.length === 0) {
       throw new Error('Video chunk payload must be a non-empty binary Buffer');
     }
-    const chunkIndex = Number(options.chunkIndex);
-    if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+    const rawChunkIndex = Number(options.chunkIndex);
+    if (!Number.isInteger(rawChunkIndex) || rawChunkIndex < 0) {
       throw new Error(`Invalid chunkIndex "${options.chunkIndex}": must be a non-negative integer`);
     }
 
     return this.withSessionLock(sessionId, async () => {
-      let state = this.videoRecordings.get(sessionId);
+      let state = this.rehydrateVideoRecordingStateSync(sessionId);
       const shouldResetExistingState =
-        Boolean(options.reset) || (chunkIndex === 0 && Boolean(state?.finalized));
+        Boolean(options.reset) || (rawChunkIndex === 0 && Boolean(state?.finalized) && !options.resume);
 
       if (state && shouldResetExistingState) {
         if (fs.existsSync(state.cachePath)) {
@@ -837,6 +909,10 @@ export class StorageProvider {
         }
         if (state.mirrorPath !== state.cachePath && fs.existsSync(state.mirrorPath)) {
           await fs.promises.unlink(state.mirrorPath).catch(() => {});
+        }
+        const metaPath = this.getVideoRecordingStateMetaPath(sessionId);
+        if (fs.existsSync(metaPath)) {
+          await fs.promises.unlink(metaPath).catch(() => {});
         }
         FileCache.invalidate(state.cachePath);
         if (state.mirrorPath !== state.cachePath) {
@@ -849,11 +925,14 @@ export class StorageProvider {
       if (!state) {
         const mimeType = options.mimeType || 'video/webm;codecs=vp9,opus';
         const extension: 'webm' | 'mp4' = mimeType.includes('mp4') ? 'mp4' : 'webm';
+        const lockedRelCtx = options.relationalContext
+          ? { ...options.relationalContext }
+          : undefined;
         const videoKey =
           options.videoKeyOverride ||
-          (options.relationalContext
+          (lockedRelCtx
             ? StorageProvider.buildLessonVideoKey(
-                { ...options.relationalContext, sessionId },
+                { ...lockedRelCtx, sessionId },
                 extension
               )
             : `sessions/${sessionId}/video_720p.${extension}`);
@@ -865,8 +944,8 @@ export class StorageProvider {
         if (!fs.existsSync(dir)) {
           await fs.promises.mkdir(dir, { recursive: true });
         }
-        // Reset file on chunk 0 of a newly started session recording
-        if (chunkIndex === 0 && fs.existsSync(cachePath)) {
+        // Reset file on chunk 0 of a newly started session recording (unless resuming an existing file)
+        if (rawChunkIndex === 0 && !options.resume && fs.existsSync(cachePath)) {
           await fs.promises.unlink(cachePath).catch(() => {});
         }
         if (mirrorPath !== cachePath) {
@@ -874,10 +953,13 @@ export class StorageProvider {
           if (!fs.existsSync(mirrorDir)) {
             await fs.promises.mkdir(mirrorDir, { recursive: true });
           }
-          if (chunkIndex === 0 && fs.existsSync(mirrorPath)) {
+          if (rawChunkIndex === 0 && !options.resume && fs.existsSync(mirrorPath)) {
             await fs.promises.unlink(mirrorPath).catch(() => {});
           }
         }
+
+        const existingFileBytes =
+          options.resume && fs.existsSync(cachePath) ? fs.statSync(cachePath).size : 0;
 
         state = {
           sessionId,
@@ -889,13 +971,23 @@ export class StorageProvider {
           nextExpectedChunkIndex: 0,
           processedChunks: new Set<number>(),
           pendingChunks: new Map<number, Buffer>(),
-          totalBytesWritten: 0,
+          totalBytesWritten: existingFileBytes,
           startedAt: Date.now(),
           lastChunkAt: Date.now(),
           finalized: false,
+          startingRelationalContext: lockedRelCtx,
         };
         this.videoRecordings.set(sessionId, state);
+      } else if (state.finalized && options.resume) {
+        state.finalized = false;
       }
+
+      // If instructor rejoined and resumed recording (`options.resume === true`) and sent chunk 0..N
+      // from a newly created MediaRecorder instance, seamlessly map to `nextExpectedChunkIndex`
+      const chunkIndex =
+        options.resume && rawChunkIndex < state.nextExpectedChunkIndex
+          ? state.nextExpectedChunkIndex
+          : rawChunkIndex;
 
       // Idempotently ignore duplicate chunk retries
       if (state.processedChunks.has(chunkIndex) || chunkIndex < state.nextExpectedChunkIndex) {
@@ -951,6 +1043,8 @@ export class StorageProvider {
         state.lastChunkAt = Date.now();
       }
 
+      this.persistVideoRecordingStateSync(state);
+
       return {
         sessionId,
         chunkIndex,
@@ -978,8 +1072,10 @@ export class StorageProvider {
     nextExpectedChunkIndex: number;
     bufferedOutOfOrderCount: number;
     finalized: boolean;
+    durationSec?: number;
+    startingRelationalContext?: Partial<RelationalLessonContext>;
   } {
-    const state = this.videoRecordings.get(sessionId);
+    const state = this.rehydrateVideoRecordingStateSync(sessionId);
     if (!state) {
       return {
         exists: false,
@@ -988,6 +1084,7 @@ export class StorageProvider {
         nextExpectedChunkIndex: 0,
         bufferedOutOfOrderCount: 0,
         finalized: false,
+        durationSec: 0,
       };
     }
     return {
@@ -999,6 +1096,8 @@ export class StorageProvider {
       nextExpectedChunkIndex: state.nextExpectedChunkIndex,
       bufferedOutOfOrderCount: state.pendingChunks.size,
       finalized: state.finalized,
+      durationSec: Math.max(0, state.processedChunks.size * 10),
+      startingRelationalContext: state.startingRelationalContext,
     };
   }
 
@@ -1091,8 +1190,16 @@ export class StorageProvider {
     }
   > {
     return this.withSessionLock(sessionId, async () => {
-      const state = this.videoRecordings.get(sessionId);
-      const primaryLessonKey = StorageProvider.buildLessonVideoKey(ctx, state?.extension || 'webm');
+      const state = this.rehydrateVideoRecordingStateSync(sessionId);
+      const effectivePrimaryCtx =
+        state?.startingRelationalContext && Object.keys(state.startingRelationalContext).length > 0
+          ? { ...ctx, ...state.startingRelationalContext, sessionId: ctx.sessionId || sessionId }
+          : ctx;
+      const primaryLessonKey = StorageProvider.buildLessonVideoKey(
+        effectivePrimaryCtx,
+        state?.extension || 'webm'
+      );
+      const currentLessonKey = StorageProvider.buildLessonVideoKey(ctx, state?.extension || 'webm');
 
       if (!state) {
         // Check if file already exists at primaryLessonKey
@@ -1147,10 +1254,11 @@ export class StorageProvider {
       }
 
       state.finalized = true;
+      this.persistVideoRecordingStateSync(state);
       FileCache.invalidate(state.cachePath);
 
       // 3. Ensure primary lesson key and any additional taught lesson keys point to the finalized video
-      const targetKeys = new Set<string>([state.videoKey, primaryLessonKey]);
+      const targetKeys = new Set<string>([state.videoKey, primaryLessonKey, currentLessonKey]);
       if (options?.additionalLessonContexts) {
         for (const extraCtx of options.additionalLessonContexts) {
           targetKeys.add(StorageProvider.buildLessonVideoKey(extraCtx, state.extension));

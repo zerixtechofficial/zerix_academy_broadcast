@@ -1228,4 +1228,113 @@ describe('Phase 1 Integration Tests: End-to-End Fastify REST & Streaming Pipelin
     );
     assert.ok(authStudentFrame, 'Authorized student AUDIO_VOICE_FRAME must be relayed to room participants');
   });
+
+  it('18. supports Mute All when allowStudentUnmute is enabled or student mics are active, tracks device mic active counts, and closes broadcast after 5-min Host/Co-Host grace timeout', async () => {
+    const { AudioStageController } = await import('../../src/modules/audio-stage/audio.controller');
+    const { AutoSaveService } = await import('../../src/modules/autosave/autosave.worker');
+    const { RoomManager } = await import('../../src/modules/room/room.manager');
+    const roomGrace = `sess_grace_mute_all_${Date.now()}`;
+
+    // 1. Enable allowStudentUnmute and verify student mic activation via AUDIO_DEVICE_MIC_ACTIVE / self-unmute
+    await AudioStageController.setAllowStudentUnmute(roomGrace, true);
+    let stageState = await AudioStageController.getStageState(roomGrace);
+    assert.equal(stageState.allowStudentUnmute, true);
+
+    await AudioStageController.setStudentDeviceMicState(roomGrace, 'student_201', 'dev_mob_1', true);
+    stageState = await AudioStageController.getStageState(roomGrace);
+    assert.equal(stageState.activeStudentMics.includes('student_201'), true);
+
+    // 2. Mute All Students -> clears activeStudentMics AND resets allowStudentUnmute to false
+    const mutedIds = await AudioStageController.muteAllStudents(roomGrace);
+    assert.equal(mutedIds.includes('student_201'), true);
+    stageState = await AudioStageController.getStageState(roomGrace);
+    assert.equal(stageState.activeStudentMics.length, 0);
+    assert.equal(stageState.allowStudentUnmute, false, 'muteAllStudents must reset allowStudentUnmute to false');
+
+    // 3. Verify 5-minute (300s) grace timer and automatic session close + student disconnect when no Host/Co-Host is active
+    await RoomManager.getOrInitRoom(roomGrace);
+    await RoomManager.setTeacherStatus(roomGrace, 'LIVE');
+
+    const timerInfo = await AutoSaveService.startTeacherGraceTimer(roomGrace, 300);
+    assert.equal(timerInfo.gracePeriodSeconds, 300);
+    assert.ok(timerInfo.graceEndsAt > Date.now());
+    const reconnectingRoom = await RoomManager.getOrInitRoom(roomGrace);
+    assert.equal(reconnectingRoom.status, 'TEACHER_RECONNECTING');
+
+    // Simulate grace period expiration when no Host or Co-Host has rejoined
+    await AutoSaveService.executeGraceFinalize(roomGrace);
+    const endedRoom = await RoomManager.getOrInitRoom(roomGrace);
+    assert.equal(endedRoom.status, 'ENDED', 'Broadcast status must be marked ENDED after 5-min grace timeout expires with no Host/Co-Host');
+  });
+
+  it('19. keeps a single continuous recording across lesson/chapter changes and resumes existing video after engine restart or instructor rejoin without resetting', async () => {
+    const { getStorageProvider } = await import('../../src/adapters/storage.provider');
+    const storage = getStorageProvider();
+    const resumeSessionId = `sess_continuous_resume_${Date.now()}`;
+    const resumeTeacherJwt = JwtVerifier.sign({
+      userId: 'teacher_501',
+      name: 'Prof. S. Verma',
+      role: 'teacher',
+      sessionId: resumeSessionId,
+      batchId: '105',
+    });
+    const resumeTeacherHeaders = {
+      authorization: `Bearer ${resumeTeacherJwt}`,
+    };
+
+    // 1. Upload Chunk #0 on Chapter 1 / Lesson 301
+    const chunk0 = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x10, 0x20, 0x30, 0x40]);
+    const res0 = await server.fastify.inject({
+      method: 'POST',
+      url: `/api/v1/sessions/${resumeSessionId}/video-chunk?chunkIndex=0&courseId=77&boardId=1&languageId=1&chapterId=1&lessonId=301&version=1&academicYear=2026&reset=1`,
+      headers: {
+        ...resumeTeacherHeaders,
+        'content-type': 'video/webm;codecs=vp9,opus',
+      },
+      payload: chunk0,
+    });
+    assert.equal(res0.statusCode, 200);
+
+    // 2. Instructor changes Chapter & Lesson mid-session (Chapter 2 / Lesson 302) -> Chunk #1 appends to the SAME continuous video
+    const chunk1 = Buffer.from([0x1f, 0x43, 0xb6, 0x75, 0x50, 0x60, 0x70, 0x80]);
+    const res1 = await server.fastify.inject({
+      method: 'POST',
+      url: `/api/v1/sessions/${resumeSessionId}/video-chunk?chunkIndex=1&courseId=77&boardId=1&languageId=1&chapterId=2&lessonId=302&version=1&academicYear=2026`,
+      headers: {
+        ...resumeTeacherHeaders,
+        'content-type': 'video/webm;codecs=vp9,opus',
+      },
+      payload: chunk1,
+    });
+    assert.equal(res1.statusCode, 200);
+    assert.equal(res1.json().data.totalBytesWritten, chunk0.length + chunk1.length);
+
+    // 3. Simulate server restart by clearing in-memory videoRecordings map, then check getSessionVideoState rehydration from disk
+    (storage as any).videoRecordings.delete(resumeSessionId);
+    const rehydratedState = storage.getSessionVideoState(resumeSessionId);
+    assert.ok(rehydratedState, 'Video recording state must rehydrate from disk after server restart');
+    assert.equal(rehydratedState?.totalBytesWritten, chunk0.length + chunk1.length);
+    assert.equal(rehydratedState?.nextExpectedChunkIndex, 2);
+    assert.equal(rehydratedState?.startingRelationalContext?.lessonId, 301);
+
+    // 4. Instructor rejoins after browser reload (MediaRecorder emits chunkIndex=0 with resume=1) -> must append as chunk #2 instead of overwriting
+    const chunkRejoin = Buffer.from([0x1f, 0x43, 0xb6, 0x75, 0x90, 0xa0, 0xb0, 0xc0]);
+    const resRejoin = await server.fastify.inject({
+      method: 'POST',
+      url: `/api/v1/sessions/${resumeSessionId}/video-chunk?chunkIndex=0&courseId=77&boardId=1&languageId=1&chapterId=2&lessonId=302&version=1&academicYear=2026&resume=1`,
+      headers: {
+        ...resumeTeacherHeaders,
+        'content-type': 'video/webm;codecs=vp9,opus',
+        'x-resume-recording': '1',
+      },
+      payload: chunkRejoin,
+    });
+    assert.equal(resRejoin.statusCode, 200);
+    assert.equal(
+      resRejoin.json().data.totalBytesWritten,
+      chunk0.length + chunk1.length + chunkRejoin.length,
+      'Rejoined instructor video chunk with resume=1 must append to existing recording instead of starting from scratch'
+    );
+    assert.equal(resRejoin.json().data.nextExpectedChunkIndex, 3);
+  });
 });

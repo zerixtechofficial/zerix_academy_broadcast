@@ -1617,5 +1617,170 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
         'Student mobile phone must scroll all the way to maxScroll (2000px) when Teacher reaches the end of content'
       );
     });
+
+    it('verifies Mute All visibility when allowStudentUnmute or student mic is active, active mic count badge in Classroom Participants, 5-min Host/Co-Host grace countdown, and strict Content Tab cursor-only text selection', () => {
+      const navbarSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/TopModeNavbar.tsx'),
+        'utf8'
+      );
+      const stageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/VirtualContentStage.tsx'),
+        'utf8'
+      );
+      const cssSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/styles/learning-content.css'),
+        'utf8'
+      );
+      const reconnectModalSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/ReconnectModal.tsx'),
+        'utf8'
+      );
+
+      // 1. Mute All shown when activeMicsCount > 0 OR audioStage.allowStudentUnmute is enabled, plus active mic count badges
+      assert.equal(
+        navbarSource.includes('data-testid="participants-active-mic-count"') &&
+          navbarSource.includes('data-testid="student-tab-active-mics-badge"') &&
+          navbarSource.includes('(activeMicsCount > 0 || Boolean(audioStage.allowStudentUnmute))'),
+        true,
+        'TopModeNavbar must display active student mic count in Classroom Participants and show Mute All when any student mic is on or allowStudentUnmute is true'
+      );
+
+      // 2. 5-minute grace countdown banner in ReconnectModal
+      assert.equal(
+        reconnectModalSource.includes('data-testid="teacher-grace-banner"') &&
+          reconnectModalSource.includes('graceEndsAt'),
+        true,
+        'ReconnectModal must display live 5-minute grace countdown when no Host or Co-Host is active'
+      );
+
+      // 3. Content tab text selection strictly allowed ONLY when activeTool === cursor
+      assert.equal(
+        stageSource.includes('const isSelectionEnabled = !canAnnotate || activeTool === \'cursor\';') &&
+          stageSource.includes('data-active-content-tool={canAnnotate ? activeTool : \'cursor\'}') &&
+          stageSource.includes("el.addEventListener('selectstart', preventSelect)"),
+        true,
+        'VirtualContentStage must restrict text selection strictly to cursor/select tool and block selectstart on pen/laser/eraser'
+      );
+      assert.equal(
+        cssSource.includes('.content-main-container[data-active-content-tool="pen"]') &&
+          cssSource.includes('user-select: none !important;'),
+        true,
+        'learning-content.css must enforce user-select: none !important when pen, laser, or eraser tool is active'
+      );
+    });
+  });
+
+  describe('15. Whole-Page Content Annotation (Pen/Laser/Eraser), Voice Screen Recording, Pre-Start Details Modal & Rejoin Video Resume', () => {
+    it('allows Pen, Laser, and Eraser across the entire Content Tab page (including header, gaps, and page gutters via blk_page_canvas)', () => {
+      const stageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/VirtualContentStage.tsx'),
+        'utf8'
+      );
+      const mathSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/utils/contentSyncMath.ts'),
+        'utf8'
+      );
+
+      assert.equal(
+        stageSource.includes("blockRefs.current['blk_page_canvas'] = el;") &&
+          stageSource.includes('data-testid="whole-page-content-svg-overlay"') &&
+          stageSource.includes("handleBlockPointerDown(e, 'blk_page_canvas')"),
+        true,
+        'VirtualContentStage must register blk_page_canvas on the full page sheet and render a whole-page SVG vector overlay'
+      );
+
+      // Verify ContentSyncMath.captureStrokePoint allows negative/overflow X percentages [-100, 200] on blk_page_canvas for left/right page gutters
+      const pageCache: any = {
+        blockId: 'blk_page_canvas',
+        blockRect: { left: 200, top: 50, width: 800, height: 1600, right: 1000, bottom: 1650 },
+        tokens: new Map(),
+        tokenList: [],
+        lines: [],
+        regions: new Map(),
+      };
+      // Pointer at clientX=100 is 100px in the left gutter outside the 800px centered sheet (-12.5% X)
+      const gutterPoint = ContentSyncMath.captureStrokePoint(100, 450, pageCache);
+      assert.equal(
+        gutterPoint.x < 0,
+        true,
+        'blk_page_canvas must preserve negative X percentage in left page margin/gutter so user can draw anywhere on the page'
+      );
+      assert.equal(gutterPoint.y, 25);
+      assert.equal(
+        mathSource.includes("const isWholePageCanvas = cache.blockId === 'blk_page_canvas';"),
+        true
+      );
+    });
+
+    it('captures instructor voice regardless of initial LiveKit mic toggle, locks starting lesson context across chapter/lesson changes, and opens prefilled Start Recording modal', () => {
+      const recorderSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/hooks/useCompressedClassRecorder.ts'),
+        'utf8'
+      );
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+
+      // 1. Voice recording is captured unless recordVoiceRef.current === false (not blocked when isLocalMicOnRef is initially false)
+      assert.equal(
+        recorderSource.includes('recordVoiceRef.current !== false') &&
+          !recorderSource.includes('typeof navigator.mediaDevices.getUserMedia === \'function\' &&\n        isLocalMicOnRef.current'),
+        true,
+        'createMixedTwoWayAudioStream must always capture microphone audio for screen recording unless explicitly disabled in modal'
+      );
+
+      // 2. Single continuous recording across lesson/chapter changes via startingRelationalContextRef
+      assert.equal(
+        recorderSource.includes('startingRelationalContextRef.current || relationalContextRef.current'),
+        true,
+        'useCompressedClassRecorder must lock startingRelationalContextRef so switching lessons/chapters never creates separate recordings'
+      );
+
+      // 3. Pre-Start Recording Course & Session Details Modal in LearningSessionLayout
+      assert.equal(
+        layoutSource.includes('data-testid="start-recording-modal"') &&
+          layoutSource.includes('data-testid="recording-modal-course-input"') &&
+          layoutSource.includes('data-testid="recording-modal-chapter-input"') &&
+          layoutSource.includes('data-testid="recording-modal-lesson-input"') &&
+          layoutSource.includes('data-testid="recording-modal-voice-checkbox"') &&
+          layoutSource.includes('data-testid="confirm-start-recording-btn"'),
+        true,
+        'LearningSessionLayout must render prefilled Start Recording Details modal when instructor clicks Record'
+      );
+    });
+
+    it('queues chunks during network disconnect and resumes existing recording on instructor rejoin without restarting from 00:00', () => {
+      const recorderSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/hooks/useCompressedClassRecorder.ts'),
+        'utf8'
+      );
+      const clientSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/services/curriculumClient.ts'),
+        'utf8'
+      );
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+
+      assert.equal(
+        recorderSource.includes('pendingOfflineChunksRef') &&
+          recorderSource.includes('flushOfflineQueuedChunks') &&
+          recorderSource.includes("window.addEventListener('online', handleOnline)"),
+        true,
+        'useCompressedClassRecorder must queue chunks during network drops and auto-flush on reconnect'
+      );
+
+      assert.equal(
+        recorderSource.includes('hasResumableRecording') &&
+          recorderSource.includes('resumeRecording') &&
+          clientSource.includes("'x-resume-recording': '1'") &&
+          layoutSource.includes('data-testid="resume-recording-banner"') &&
+          layoutSource.includes('data-testid="resume-recording-btn"'),
+        true,
+        'Recorder and layout must detect already-started session recordings on rejoin and resume appending without resetting to 00:00'
+      );
+    });
   });
 });
