@@ -171,6 +171,86 @@ export class SessionTimelineTracker {
   }
 
   /**
+   * Resets the recording timeline for a session when the teacher restarts recording
+   * or starts a new recording after stopping mid-session.
+   */
+  public resetRecordingTimeline(
+    sessionId: string,
+    context?: Partial<RelationalLessonContext>
+  ): InternalSessionTimelineState {
+    const existing = this.sessions.get(sessionId);
+    const now = Date.now();
+    const activeSeg = existing?.segments[existing.segments.length - 1];
+    const mergedContext = StorageProvider.normalizeRelationalContext({
+      ...(existing?.relationalContext || {}),
+      ...(activeSeg
+        ? {
+            chapterId: activeSeg.chapterId,
+            chapterNumber: activeSeg.chapterNumber,
+            chapterTitle: activeSeg.chapterTitle,
+            lessonId: activeSeg.lessonId,
+            lessonNumber: activeSeg.lessonNumber,
+            lessonTitle: activeSeg.lessonTitle,
+            topicId: activeSeg.topicId,
+            topicTitle: activeSeg.topicTitle,
+          }
+        : {}),
+      ...(context || {}),
+      sessionId,
+    });
+
+    const initialSegment: InternalSegmentState = {
+      segmentIndex: 0,
+      chapterId: mergedContext.chapterId,
+      chapterNumber: mergedContext.chapterNumber,
+      chapterTitle: mergedContext.chapterTitle,
+      lessonId: mergedContext.lessonId,
+      lessonNumber: mergedContext.lessonNumber,
+      lessonTitle: mergedContext.lessonTitle,
+      topicId: mergedContext.topicId,
+      topicTitle: mergedContext.topicTitle,
+      startOffsetSec: 0,
+      endOffsetSec: 0,
+      durationSec: 0,
+      whiteboardModified: activeSeg?.whiteboardModified ?? false,
+      whiteboardPagesCount: activeSeg?.whiteboardPagesCount ?? 1,
+      whiteboardElementsCount: activeSeg?.whiteboardElementsCount ?? 0,
+      mode: 'taught',
+      explicitModeLock: false,
+    };
+
+    const resetState: InternalSessionTimelineState = {
+      sessionId,
+      relationalContext: mergedContext,
+      startedAtMs: now,
+      activeMode: existing?.activeMode || 'WHITEBOARD',
+      lastModeSwitchAtMs: now,
+      whiteboardModeMs: 0,
+      contentModeMs: 0,
+      peakConcurrentUsers: existing?.peakConcurrentUsers ?? 1,
+      micHandRaisesGranted: existing?.micHandRaisesGranted ?? 0,
+      videoChunksUploaded: 0,
+      totalVideoBytes: 0,
+      latestVideoOffsetSec: 0,
+      segments: [initialSegment],
+      timelineMarkers: [
+        {
+          timeSec: 0,
+          label: `Started ${mergedContext.lessonTitle}`,
+          markerType: 'topic_start',
+          chapterId: mergedContext.chapterId,
+          lessonId: mergedContext.lessonId,
+          topicId: mergedContext.topicId,
+        },
+      ],
+      dirtyWhiteboards: existing?.dirtyWhiteboards || new Map(),
+    };
+
+    this.sessions.set(sessionId, resetState);
+    return resetState;
+  }
+
+  /**
    * Records a video chunk upload metric and advances `latestVideoOffsetSec`.
    */
   public recordVideoChunkUploaded(

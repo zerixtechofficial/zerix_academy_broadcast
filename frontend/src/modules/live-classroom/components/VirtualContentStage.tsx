@@ -22,12 +22,16 @@ import {
   BlockDomLayoutCache,
   buildResponsiveSvgPath,
   captureStrokePoint,
+  computeFollowerTargetScrollTop,
+  computeScrollAnchorForViewport,
   extractAnchorTokensFromPoints,
   hitTestWordToken,
   measureBlockDomLayout,
   projectPointToDevicePixels,
   sanitizeSvgMarkup,
+  ScrollBlockMetric,
   TextTokenSegment,
+  tokenizeHtmlContent,
   tokenizeText,
 } from '../utils/contentSyncMath';
 
@@ -140,6 +144,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   const userScrollTimeoutRef = useRef<number | null>(null);
   const [isOutOfSync, setIsOutOfSync] = useState<boolean>(false);
   const lastLaserEmitRef = useRef<number>(0);
+  const lastEmittedLaserRef = useRef<LaserPointerState | null>(null);
   const lastScrollEmitRef = useRef<number>(0);
   const lastMatchedBlockIdRef = useRef<string>('blk_header');
   const lastOffsetRatioRef = useRef<number>(0);
@@ -178,7 +183,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         !cached ||
         cached.blockRect.width <= 0 ||
         Math.abs(cached.blockRect.width - liveRect.width) > 1.5 ||
-        Math.abs(cached.blockRect.height - liveRect.height) > 1.5
+        Math.abs(cached.blockRect.height - liveRect.height) > 1.5 ||
+        (cached.tokens.size === 0 && liveEl.querySelector('[data-token-id]') !== null)
       ) {
         if (liveRect.width > 0 && liveRect.height > 0) {
           return measureBlockDomLayout(blockId, liveEl);
@@ -375,6 +381,29 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     getFreshBlockLayout,
   ]);
 
+  const collectScrollBlockMetrics = useCallback(
+    (container: HTMLElement): ScrollBlockMetric[] => {
+      const containerTop = container.getBoundingClientRect().top;
+      const allElements: { blockId: string; el: HTMLElement | null }[] = [
+        { blockId: 'blk_header', el: blockRefs.current['blk_header'] },
+        ...blocks.map((block) => ({
+          blockId: block.blockId,
+          el: blockRefs.current[block.blockId],
+        })),
+      ];
+      const metrics: ScrollBlockMetric[] = [];
+      for (const item of allElements) {
+        if (!item.el) continue;
+        const rect = item.el.getBoundingClientRect();
+        const topInScroll = rect.top - containerTop + container.scrollTop;
+        const height = Math.max(1, item.el.offsetHeight || rect.height);
+        metrics.push({ blockId: item.blockId, topInScroll, height });
+      }
+      return metrics;
+    },
+    [blocks]
+  );
+
   // Scroll sync to Presenter's (blockId, offsetRatio) across Host, Co-Host & Students
   useEffect(() => {
     const isOwnScroll = Boolean(
@@ -413,16 +442,16 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       return;
     }
 
-    const targetBlock =
-      (anchorBlockId && blockRefs.current[anchorBlockId]) ||
-      (anchorBlockId === 'blk_header' ? blockRefs.current['blk_header'] : null);
-    if (!targetBlock) return;
+    const metrics = collectScrollBlockMetrics(container);
+    if (metrics.length === 0) return;
 
-    const containerRect = container.getBoundingClientRect();
-    const blockRect = targetBlock.getBoundingClientRect();
-    const relativeTop = blockRect.top - containerRect.top + container.scrollTop;
-    const blockHeight = Math.max(1, targetBlock.offsetHeight || blockRect.height);
-    const targetScrollTop = Math.max(0, relativeTop + blockHeight * offsetRatio);
+    const targetScrollTop = computeFollowerTargetScrollTop(
+      anchorBlockId,
+      offsetRatio,
+      container.clientHeight,
+      container.scrollHeight,
+      metrics
+    );
 
     if (Math.abs(container.scrollTop - targetScrollTop) <= 3) {
       setIsOutOfSync(false);
@@ -447,6 +476,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     currentUserId,
     canAnnotate,
     followTeacher,
+    collectScrollBlockMetrics,
     contentState.scrollAnchor?.blockId,
     contentState.scrollAnchor?.offsetRatio,
     contentState.scrollAnchor?.authorId,
@@ -488,21 +518,14 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     if (!canAnnotate) {
       const anchorBlockId = contentState.scrollAnchor?.blockId;
       const offsetRatio = contentState.scrollAnchor?.offsetRatio || 0;
-      let teacherTargetScrollTop = 0;
-      if ((anchorBlockId === 'blk_header' || !anchorBlockId) && Math.abs(offsetRatio) <= 0.02) {
-        teacherTargetScrollTop = 0;
-      } else {
-        const targetBlock =
-          (anchorBlockId && blockRefs.current[anchorBlockId]) ||
-          (anchorBlockId === 'blk_header' ? blockRefs.current['blk_header'] : null);
-        if (targetBlock) {
-          const containerRect = container.getBoundingClientRect();
-          const blockRect = targetBlock.getBoundingClientRect();
-          const relativeTop = blockRect.top - containerRect.top + container.scrollTop;
-          const blockHeight = Math.max(1, targetBlock.offsetHeight || blockRect.height);
-          teacherTargetScrollTop = Math.max(0, relativeTop + blockHeight * offsetRatio);
-        }
-      }
+      const metrics = collectScrollBlockMetrics(container);
+      const teacherTargetScrollTop = computeFollowerTargetScrollTop(
+        anchorBlockId,
+        offsetRatio,
+        container.clientHeight,
+        container.scrollHeight,
+        metrics
+      );
       const scrollDiff = Math.abs(container.scrollTop - teacherTargetScrollTop);
 
       // Only mark out-of-sync and unlock followTeacher if user actively wheeled/touched and scrolled away > 75px
@@ -530,53 +553,25 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     if (now - lastScrollEmitRef.current < 60) return;
     lastScrollEmitRef.current = now;
 
-    // If presenter is at top (scrollTop <= 8), anchor to heading directly
-    if (container.scrollTop <= 8) {
-      lastMatchedBlockIdRef.current = 'blk_header';
-      lastOffsetRatioRef.current = 0;
-      onScrollSync('blk_header', 0);
-      return;
-    }
-
-    const containerTop = container.getBoundingClientRect().top;
-    let matchedBlockId = lastMatchedBlockIdRef.current || 'blk_header';
-    let offsetRatio = lastOffsetRatioRef.current || 0;
-    let found = false;
-
-    const allElements: { blockId: string; el: HTMLElement | null }[] = [
-      { blockId: 'blk_header', el: blockRefs.current['blk_header'] },
-      ...blocks.map((block) => ({ blockId: block.blockId, el: blockRefs.current[block.blockId] })),
-    ];
-
-    for (const item of allElements) {
-      const el = item.el;
-      if (!el) continue;
-      const rect = el.getBoundingClientRect();
-      const blockTopInScroll = rect.top - containerTop + container.scrollTop;
-      const height = Math.max(1, el.offsetHeight || rect.height);
-
-      if (blockTopInScroll + height > container.scrollTop + 8) {
-        matchedBlockId = item.blockId;
-        const rawRatio = (container.scrollTop - blockTopInScroll) / height;
-        offsetRatio = Math.max(-0.5, Math.min(1.5, rawRatio));
-        found = true;
-        break;
-      }
-    }
-
-    // If presenter is scrolled down past all measured tops (e.g. at the bottom of the page),
-    // default to the last content block rather than reverting to blk_header
-    if (!found && container.scrollTop > 30) {
-      if (blocks.length > 0) {
-        matchedBlockId = blocks[blocks.length - 1].blockId;
-        offsetRatio = 1;
-      }
-    }
+    const metrics = collectScrollBlockMetrics(container);
+    const { blockId: matchedBlockId, offsetRatio } = computeScrollAnchorForViewport(
+      container.scrollTop,
+      container.clientHeight,
+      container.scrollHeight,
+      metrics
+    );
 
     lastMatchedBlockIdRef.current = matchedBlockId;
     lastOffsetRatioRef.current = offsetRatio;
     onScrollSync(matchedBlockId, Number(offsetRatio.toFixed(4)));
-  }, [canAnnotate, followTeacher, onToggleFollow, blocks, onScrollSync, contentState.scrollAnchor]);
+  }, [
+    canAnnotate,
+    followTeacher,
+    onToggleFollow,
+    collectScrollBlockMetrics,
+    onScrollSync,
+    contentState.scrollAnchor,
+  ]);
 
   // Erase strokes near a pointer coordinate or matching a touched word token
   const eraseStrokeAtPointer = useCallback(
@@ -876,7 +871,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       const sheetYPct = Math.round(((sheetY / Math.max(1, sheetRect.height)) * 100) * 10) / 10;
       const sheetYPx = Math.round(sheetY);
 
-      onLaserMove({
+      const emittedPayload: LaserPointerState = {
         blockId: targetBlockId,
         x: targetBlockEl ? Math.round(blockRelX * 10) / 10 : 0,
         y: targetBlockEl ? Math.round(blockRelY * 10) / 10 : 0,
@@ -892,7 +887,9 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         sheetXPct,
         sheetYPct,
         sheetYPx,
-      } as any);
+      } as any;
+      lastEmittedLaserRef.current = emittedPayload;
+      onLaserMove(emittedPayload);
     }
   };
 
@@ -905,10 +902,18 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       if (currentCoord && currentCoord.active) {
         const sheetXPct = Math.round(((currentCoord.x / Math.max(1, sheetRect.width)) * 100) * 10) / 10;
         const sheetYPct = Math.round(((currentCoord.y / Math.max(1, sheetRect.height)) * 100) * 10) / 10;
+        const prevPayload = lastEmittedLaserRef.current;
         onLaserMove({
-          blockId: undefined,
-          x: 0,
-          y: 0,
+          ...(prevPayload || {}),
+          blockId: prevPayload?.blockId,
+          x: prevPayload?.x ?? 0,
+          y: prevPayload?.y ?? 0,
+          tokenId: prevPayload?.tokenId,
+          rx: prevPayload?.rx,
+          ry: prevPayload?.ry,
+          regionId: prevPayload?.regionId,
+          regionRx: prevPayload?.regionRx,
+          regionRy: prevPayload?.regionRy,
           active: true,
           isDragging: false,
           tool: activeTool,
@@ -1435,7 +1440,9 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                         <div
                           data-region-id="content"
                           className="content-html-fragment"
-                          dangerouslySetInnerHTML={{ __html: block.contentHtml }}
+                          dangerouslySetInnerHTML={{
+                            __html: tokenizeHtmlContent(block.contentHtml, 'content'),
+                          }}
                         />
                       ) : (
                         <section data-region-id="content">

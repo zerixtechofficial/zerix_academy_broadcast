@@ -249,6 +249,7 @@ export default function LearningSessionLayout() {
   const [followTeacher, setFollowTeacher] = useState<boolean>(true);
   const [studentZoomMultiplier, setStudentZoomMultiplier] = useState<number>(1.0);
   const [isContentToolboxVisible, setIsContentToolboxVisible] = useState<boolean>(true);
+  const [isVerifiedCoTeacher, setIsVerifiedCoTeacher] = useState<boolean>(false);
 
   // Global Keyboard Shortcut: Alt+T / Option+T or single key 'T' (when not typing in an input) to toggle Content Toolbox
   useEffect(() => {
@@ -459,8 +460,10 @@ export default function LearningSessionLayout() {
           if (initData.user.role === 'teacher' && initData.user.userId) {
             const rawTId = String(initData.user.userId);
             setTeacherId(rawTId.startsWith('teacher_') ? rawTId : `teacher_${rawTId}`);
+            setIsVerifiedCoTeacher(Boolean(initData.user.isCoTeacher));
           } else if (initData.user.role === 'student' && initData.user.userId) {
             setStudentId(String(initData.user.userId).replace(/^student_/, ''));
+            setIsVerifiedCoTeacher(false);
           }
         }
 
@@ -698,6 +701,7 @@ export default function LearningSessionLayout() {
   }, [curriculum, lessonContent, activeLessonId, activeTopicId, setActiveLessonId, setActiveTopicId]);
 
   // Compute current user ID, Host/Co-Teacher status, Whiteboard edit permission & Mic permissions
+  // Any course/batch teacher is ALWAYS the Primary Host Teacher unless they explicitly joined via a Co-Host invite link.
   const currentUserId = role === 'teacher' ? teacherId : `student_${studentId}`;
   const isCoHostTeacher = useMemo(() => {
     if (role !== 'teacher') return false;
@@ -707,6 +711,9 @@ export default function LearningSessionLayout() {
         return true;
       }
     }
+    if (isVerifiedCoTeacher) {
+      return true;
+    }
     if (
       ['teacher_502', 'teacher_503', 'teacher_504'].includes(teacherId) ||
       teacherId.startsWith('teacher_cohost') ||
@@ -714,22 +721,8 @@ export default function LearningSessionLayout() {
     ) {
       return true;
     }
-    const cleanCurrentId = String(teacherId).replace(/^teacher_/, '');
-    const cleanSessionOwnerId = sessionMetadata?.teacherId
-      ? String(sessionMetadata.teacherId).replace(/^teacher_/, '')
-      : null;
-    if (
-      invitedTeachers.some(
-        (t) =>
-          t.teacherId === teacherId ||
-          String(t.teacherId).replace(/^teacher_/, '') === cleanCurrentId
-      ) &&
-      cleanSessionOwnerId !== cleanCurrentId
-    ) {
-      return true;
-    }
     return false;
-  }, [role, teacherId, invitedTeachers, sessionMetadata]);
+  }, [role, teacherId, isVerifiedCoTeacher]);
 
   const isHostTeacher = role === 'teacher' && !isCoHostTeacher;
 
@@ -1116,13 +1109,41 @@ export default function LearningSessionLayout() {
     ]
   );
 
-  // Browser-Side 720p Hardware Encoder & Jittered Chunk Uploader Hook
+  const currentTeacherDisplayName = useMemo(() => {
+    if (role === 'teacher' && isHostTeacher && verifiedUserName) return verifiedUserName;
+    return (
+      sessionMetadata?.teacherName ||
+      (role === 'teacher' && isHostTeacher ? verifiedUserName : '') ||
+      'Instructor'
+    );
+  }, [role, isHostTeacher, verifiedUserName, sessionMetadata]);
+
+  const currentUserDisplayName = useMemo(() => {
+    if (verifiedUserName) return verifiedUserName;
+    if (role === 'teacher') {
+      return isHostTeacher ? currentTeacherDisplayName : 'Co-Host';
+    }
+    return studentId ? `Student #${studentId}` : 'Student';
+  }, [verifiedUserName, role, isHostTeacher, currentTeacherDisplayName, studentId]);
+
+  const resolvedCourseTitle = useMemo(
+    () =>
+      (sessionMetadata as any)?.courseTitle ||
+      (curriculum as any)?.courseTitle ||
+      (curriculum as any)?.title ||
+      'Live Classroom Course',
+    [sessionMetadata, curriculum]
+  );
+
+  // Browser-Side 720p Hardware Encoder & Jittered Chunk Uploader Hook (Manual Start/Stop/Restart)
   const {
     isRecording,
+    isFinalizing: isFinalizingRecording,
     recordingDurationSec,
     chunksUploaded,
     startRecording,
     stopAndFinalizeRecording,
+    restartRecording,
     getCurrentVideoOffsetSec,
   } = useCompressedClassRecorder({
     sessionId,
@@ -1132,9 +1153,11 @@ export default function LearningSessionLayout() {
     relationalContext,
     activeMode,
     teachingMode,
+    courseTitle: resolvedCourseTitle,
     chapterTitle,
     lessonTitle,
     topicTitle,
+    teacherName: currentTeacherDisplayName,
     isLocalMicOn: isMicrophoneEnabled,
     getWhiteboardSnapshot: () => ({
       elements: incomingWhiteboardDelta || [],
@@ -1254,7 +1277,13 @@ export default function LearningSessionLayout() {
         studentName: h.name || h.userName || h.studentName || `Student #${h.userId}`,
         raisedAt: h.raisedAt || Date.now(),
       })),
-      invitedTeachers,
+      invitedTeachers: isHostTeacher
+        ? invitedTeachers.filter((t) => {
+            const cleanT = String(t.teacherId).replace(/^teacher_/, '');
+            const cleanHost = String(teacherId).replace(/^teacher_/, '');
+            return t.teacherId !== teacherId && cleanT !== cleanHost;
+          })
+        : invitedTeachers,
       whiteboardEditors,
       multiDeviceStudents,
       allowStudentUnmute: Boolean(allowStudentUnmute),
@@ -1281,22 +1310,6 @@ export default function LearningSessionLayout() {
       ),
     [audioStageState.raisedHands, currentUserId, studentId]
   );
-
-  // Auto-start 720p Continuous Session Recording for Host Teacher when connected
-  const autoStartedRecorderRef = useRef<boolean>(false);
-  useEffect(() => {
-    if (
-      role === 'teacher' &&
-      isHostTeacher &&
-      isConnected &&
-      teacherStatus === 'LIVE' &&
-      !hasLeftSession &&
-      !autoStartedRecorderRef.current
-    ) {
-      autoStartedRecorderRef.current = true;
-      startRecording('workspace_canvas').catch(() => {});
-    }
-  }, [role, isHostTeacher, isConnected, teacherStatus, hasLeftSession, startRecording]);
 
   // Toggle between 'taught' (Record & Save WB to VOD) and 'reference_only' (Protect existing VOD & WB)
   const handleToggleTeachingMode = useCallback(() => {
@@ -1425,23 +1438,6 @@ export default function LearningSessionLayout() {
     // Session selection is governed strictly by the signed classroom token from Zerix Academy
   };
 
-  const currentTeacherDisplayName = useMemo(() => {
-    if (role === 'teacher' && isHostTeacher && verifiedUserName) return verifiedUserName;
-    return (
-      sessionMetadata?.teacherName ||
-      (role === 'teacher' && isHostTeacher ? verifiedUserName : '') ||
-      'Instructor'
-    );
-  }, [role, isHostTeacher, verifiedUserName, sessionMetadata]);
-
-  const currentUserDisplayName = useMemo(() => {
-    if (verifiedUserName) return verifiedUserName;
-    if (role === 'teacher') {
-      return isHostTeacher ? currentTeacherDisplayName : 'Co-Host';
-    }
-    return studentId ? `Student #${studentId}` : 'Student';
-  }, [verifiedUserName, role, isHostTeacher, currentTeacherDisplayName, studentId]);
-
   // Disconnect LiveKit audio automatically when the broadcast ends
   useEffect(() => {
     if (teacherStatus === 'ENDED' || hasLeftSession) {
@@ -1504,14 +1500,16 @@ export default function LearningSessionLayout() {
     setLivekitToken('');
     setCanPublishAudio(false);
 
-    // Flush final 720p video chunk, save active taught lesson's Whiteboard JSON, and finalize session BEFORE ending room & redirecting
-    try {
-      await Promise.race([
-        stopAndFinalizeRecording(),
-        new Promise((resolve) => setTimeout(resolve, 4000)),
-      ]);
-    } catch {
-      // Ignore finalization error during teardown
+    // If recording is active when ending class, flush final video chunk, save active taught lesson's Whiteboard JSON, and finalize session BEFORE ending room & redirecting
+    if (isRecording) {
+      try {
+        await Promise.race([
+          stopAndFinalizeRecording(),
+          new Promise((resolve) => setTimeout(resolve, 4000)),
+        ]);
+      } catch {
+        // Ignore finalization error during teardown
+      }
     }
 
     endSession();
@@ -1534,6 +1532,7 @@ export default function LearningSessionLayout() {
   }, [
     isMicrophoneEnabled,
     toggleMicrophone,
+    isRecording,
     stopAndFinalizeRecording,
     endSession,
     sessionId,
@@ -1654,11 +1653,23 @@ export default function LearningSessionLayout() {
         teachingMode={teachingMode}
         onToggleTeachingMode={handleToggleTeachingMode}
         isRecording={isRecording}
+        isFinalizingRecording={isFinalizingRecording}
         recordingDurationSec={recordingDurationSec}
         chunksUploaded={chunksUploaded}
+        onStartRecording={() => {
+          startRecording('display_media').catch(() => {});
+        }}
+        onStopRecording={() => {
+          stopAndFinalizeRecording().catch(() => {});
+        }}
+        onRestartRecording={() => {
+          restartRecording('display_media').catch(() => {});
+        }}
         onToggleRecording={() => {
-          if (!isRecording) {
-            startRecording('workspace_canvas').catch(() => {});
+          if (isRecording) {
+            stopAndFinalizeRecording().catch(() => {});
+          } else {
+            startRecording('display_media').catch(() => {});
           }
         }}
         onToggleContentToolbox={() => setIsContentToolboxVisible((prev) => !prev)}

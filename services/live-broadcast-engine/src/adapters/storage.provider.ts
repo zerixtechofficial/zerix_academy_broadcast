@@ -815,6 +815,7 @@ export class StorageProvider {
       mimeType?: string;
       relationalContext?: Partial<RelationalLessonContext>;
       videoKeyOverride?: string;
+      reset?: boolean;
     }
   ): Promise<VideoChunkAppendResult> {
     if (!Buffer.isBuffer(chunkBuffer) || chunkBuffer.length === 0) {
@@ -827,6 +828,24 @@ export class StorageProvider {
 
     return this.withSessionLock(sessionId, async () => {
       let state = this.videoRecordings.get(sessionId);
+      const shouldResetExistingState =
+        Boolean(options.reset) || (chunkIndex === 0 && Boolean(state?.finalized));
+
+      if (state && shouldResetExistingState) {
+        if (fs.existsSync(state.cachePath)) {
+          await fs.promises.unlink(state.cachePath).catch(() => {});
+        }
+        if (state.mirrorPath !== state.cachePath && fs.existsSync(state.mirrorPath)) {
+          await fs.promises.unlink(state.mirrorPath).catch(() => {});
+        }
+        FileCache.invalidate(state.cachePath);
+        if (state.mirrorPath !== state.cachePath) {
+          FileCache.invalidate(state.mirrorPath);
+        }
+        this.videoRecordings.delete(sessionId);
+        state = undefined;
+      }
+
       if (!state) {
         const mimeType = options.mimeType || 'video/webm;codecs=vp9,opus';
         const extension: 'webm' | 'mp4' = mimeType.includes('mp4') ? 'mp4' : 'webm';
@@ -1143,7 +1162,7 @@ export class StorageProvider {
         ? (await fs.promises.stat(state.cachePath)).size
         : 0;
 
-      for (const targetKey of targetKeys) {
+      for (const targetKey of Array.from(targetKeys)) {
         const targetCachePath = this.resolveCachePath(targetKey);
         const targetMirrorPath = this.resolveWorkspaceMirrorPath(targetKey);
 

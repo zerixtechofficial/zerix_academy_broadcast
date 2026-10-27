@@ -340,6 +340,24 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         });
       }
 
+      // Ensure any regular Course/Batch Teacher (non-Co-Host) is registered as the Primary Host Teacher
+      // and never left in Redis `invited_teachers` from a stale session state.
+      if (user.role === 'teacher' && !isCoHostJoin && !AudioStageController.isExplicitCoTeacher(user)) {
+        await AudioStageController.removeCoTeacher(body.sessionId, user.userId);
+        const normalizedHostId = String(user.userId).replace(/^teacher_/, '') || '1';
+        const currentTeacherId = String(room.sessionContext?.teacherId || '').replace(/^teacher_/, '');
+        if (currentTeacherId !== normalizedHostId || !room.sessionContext?.teacherName || room.sessionContext?.teacherName === 'Instructor') {
+          room.sessionContext = {
+            ...(room.sessionContext || ({} as any)),
+            teacherId: normalizedHostId,
+            teacherName: user.name || room.sessionContext?.teacherName || 'Instructor',
+          };
+          await RoomManager.updateSnapshot(body.sessionId, {
+            sessionContext: room.sessionContext,
+          });
+        }
+      }
+
       // If the Host Teacher launches from a specific lesson/topic on /learn, sync the active lesson/topic
       if (user.role === 'teacher' && !isCoHostJoin && (user.lessonId || user.topicId)) {
         const currentContent = await ContentEngine.getState(body.sessionId);
@@ -861,22 +879,57 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
       (headers['x-video-mime-type'] as string) ||
       'video/webm;codecs=vp9,opus';
     let relationalContext: Partial<RelationalLessonContext> = {};
+    let headerRelationalContext: Partial<RelationalLessonContext> = {};
+    const rawHeaderCtx = headers['x-relational-context'];
+    if (typeof rawHeaderCtx === 'string' && rawHeaderCtx.trim().length > 0) {
+      try {
+        headerRelationalContext = JSON.parse(rawHeaderCtx);
+      } catch {
+        // Ignore malformed header JSON
+      }
+    }
+
+    const resetRecording =
+      query.reset === '1' ||
+      query.reset === 'true' ||
+      query.reset === true ||
+      headers['x-reset-recording'] === '1' ||
+      headers['x-reset-recording'] === 'true' ||
+      Boolean((request.body as any)?.reset);
 
     if (Buffer.isBuffer(request.body)) {
       chunkBuffer = request.body;
       relationalContext = {
-        courseId: query.courseId ? Number(query.courseId) : undefined,
-        boardId: query.boardId !== undefined ? Number(query.boardId) : undefined,
-        languageId: query.languageId ? Number(query.languageId) : undefined,
-        chapterId: query.chapterId ? Number(query.chapterId) : undefined,
+        ...headerRelationalContext,
+        courseId:
+          query.courseId !== undefined
+            ? Number(query.courseId)
+            : headerRelationalContext.courseId,
+        boardId:
+          query.boardId !== undefined
+            ? Number(query.boardId)
+            : headerRelationalContext.boardId,
+        languageId:
+          query.languageId !== undefined
+            ? Number(query.languageId)
+            : headerRelationalContext.languageId,
+        chapterId:
+          query.chapterId !== undefined
+            ? Number(query.chapterId)
+            : headerRelationalContext.chapterId,
         lessonId: paramLessonId
           ? Number(paramLessonId)
-          : query.lessonId
+          : query.lessonId !== undefined
           ? Number(query.lessonId)
-          : undefined,
-        topicId: query.topicId !== undefined ? Number(query.topicId) : undefined,
-        version: query.version ? Number(query.version) : undefined,
-        academicYear: query.academicYear ? Number(query.academicYear) : undefined,
+          : headerRelationalContext.lessonId,
+        topicId:
+          query.topicId !== undefined
+            ? Number(query.topicId)
+            : headerRelationalContext.topicId,
+        version: query.version ? Number(query.version) : headerRelationalContext.version,
+        academicYear: query.academicYear
+          ? Number(query.academicYear)
+          : headerRelationalContext.academicYear,
       };
     } else if (request.body && typeof request.body === 'object') {
       const body = request.body as Record<string, any>;
@@ -889,18 +942,19 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         chunkBuffer = Buffer.from(body.chunkBytes);
       }
       relationalContext = {
+        ...headerRelationalContext,
         ...(body.relationalContext || {}),
-        courseId: body.courseId ?? body.relationalContext?.courseId,
-        boardId: body.boardId ?? body.relationalContext?.boardId,
-        languageId: body.languageId ?? body.relationalContext?.languageId,
-        chapterId: body.chapterId ?? body.relationalContext?.chapterId,
+        courseId: body.courseId ?? body.relationalContext?.courseId ?? headerRelationalContext.courseId,
+        boardId: body.boardId ?? body.relationalContext?.boardId ?? headerRelationalContext.boardId,
+        languageId: body.languageId ?? body.relationalContext?.languageId ?? headerRelationalContext.languageId,
+        chapterId: body.chapterId ?? body.relationalContext?.chapterId ?? headerRelationalContext.chapterId,
         lessonId:
           paramLessonId !== undefined
             ? Number(paramLessonId)
-            : body.lessonId ?? body.relationalContext?.lessonId,
-        topicId: body.topicId ?? body.relationalContext?.topicId,
-        version: body.version ?? body.relationalContext?.version,
-        academicYear: body.academicYear ?? body.relationalContext?.academicYear,
+            : body.lessonId ?? body.relationalContext?.lessonId ?? headerRelationalContext.lessonId,
+        topicId: body.topicId ?? body.relationalContext?.topicId ?? headerRelationalContext.topicId,
+        version: body.version ?? body.relationalContext?.version ?? headerRelationalContext.version,
+        academicYear: body.academicYear ?? body.relationalContext?.academicYear ?? headerRelationalContext.academicYear,
       };
     }
 
@@ -941,12 +995,17 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
       Object.entries(relationalContext).filter(([, v]) => v !== undefined && !Number.isNaN(v))
     ) as Partial<RelationalLessonContext>;
 
+    if (chunkIndex === 0 && resetRecording) {
+      tracker.resetRecordingTimeline(sessionId, cleanRelCtx);
+    }
+
     let appendResult;
     try {
       appendResult = await storageProvider.appendVideoChunk(sessionId, chunkBuffer, {
         chunkIndex,
         mimeType,
         relationalContext: cleanRelCtx,
+        reset: resetRecording,
       });
     } catch (err: any) {
       return reply.status(422).send({

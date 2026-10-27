@@ -7,6 +7,7 @@ import {
   InvitedTeacherEntry,
   StudentAttendanceSummary,
 } from '../hooks/useBroadcastSocket';
+export type { InvitedTeacherEntry, StudentAttendanceSummary };
 import {
   PanelLeftClose,
   PanelLeftOpen,
@@ -38,6 +39,8 @@ import {
   Maximize2,
   Minimize2,
   LogOut,
+  Circle,
+  Square,
 } from 'lucide-react';
 
 export interface BatchOption {
@@ -281,9 +284,13 @@ interface TopModeNavbarProps {
   teachingMode?: 'taught' | 'reference_only';
   onToggleTeachingMode?: () => void;
   isRecording?: boolean;
+  isFinalizingRecording?: boolean;
   recordingDurationSec?: number;
   chunksUploaded?: number;
   onToggleRecording?: () => void;
+  onStartRecording?: () => void;
+  onStopRecording?: () => void;
+  onRestartRecording?: () => void;
   coHostInviteToken?: string;
   onRefreshCoHostInviteToken?: (canUseWhiteboard: boolean) => Promise<string | undefined>;
 }
@@ -341,9 +348,13 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
   teachingMode = 'taught',
   onToggleTeachingMode,
   isRecording = false,
+  isFinalizingRecording = false,
   recordingDurationSec = 0,
   chunksUploaded = 0,
   onToggleRecording,
+  onStartRecording,
+  onStopRecording,
+  onRestartRecording,
   coHostInviteToken = '',
   onRefreshCoHostInviteToken,
 }: TopModeNavbarProps) => {
@@ -620,40 +631,86 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
             </span>
           )}
 
-          {/* Teacher 720p Hardware Encoder Status Pill */}
-          {role === 'teacher' && isHostTeacher && onToggleRecording && (
-            <button
-              type="button"
-              data-testid="recorder-status-pill"
-              data-recording={isRecording ? 'true' : 'false'}
-              onClick={onToggleRecording}
-              title={
-                isRecording
-                  ? `720p Session Recording Active (${chunksUploaded} chunks uploaded). Continuous across topic changes.`
-                  : 'Start 720p Continuous Session Recording (500kbps VP9 + 48kbps Opus)'
-              }
-              className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all shrink-0 cursor-pointer ${
-                isRecording
-                  ? 'bg-white text-[#000000] border-[#12a3ff] shadow-xs'
-                  : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
-              }`}
-            >
-              <span
-                className={`w-2 h-2 rounded-full shrink-0 ${
-                  isRecording ? 'bg-rose-500 animate-pulse' : 'bg-slate-400'
-                }`}
-              />
-              <span className="font-mono">
-                {isRecording
-                  ? `720p ${Math.floor(recordingDurationSec / 60)
-                      .toString()
-                      .padStart(2, '0')}:${(recordingDurationSec % 60)
-                      .toString()
-                      .padStart(2, '0')}`
-                  : 'REC 720p'}
-              </span>
-            </button>
-          )}
+          {/* Teacher Manual Screen Recording Controls (Start / Stop / Restart) */}
+          {role === 'teacher' &&
+            isHostTeacher &&
+            (onToggleRecording || onStartRecording || onStopRecording) && (
+              <div
+                data-testid="recorder-status-pill"
+                data-recording={isRecording ? 'true' : 'false'}
+                className="flex items-center gap-1 bg-slate-100/90 border border-slate-200 rounded-lg p-0.5 shrink-0"
+              >
+                {!isRecording ? (
+                  <button
+                    type="button"
+                    data-testid="start-recording-btn"
+                    disabled={isFinalizingRecording}
+                    onClick={() => {
+                      if (onStartRecording) {
+                        onStartRecording();
+                      } else {
+                        onToggleRecording?.();
+                      }
+                    }}
+                    title="Start Screen Recording (Includes 3s Course/Chapter/Lesson Branding Intro + Unmodified Screen)"
+                    className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-md text-[11px] font-semibold bg-white hover:bg-rose-50 text-slate-700 hover:text-rose-600 border border-slate-200/80 shadow-2xs transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    <Circle className="w-3.5 h-3.5 fill-rose-500 text-rose-500 shrink-0" />
+                    <span className="hidden sm:inline">
+                      {isFinalizingRecording ? 'Saving...' : 'Record'}
+                    </span>
+                  </button>
+                ) : (
+                  <>
+                    <div
+                      className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-white border border-rose-200 text-slate-900 text-[11px] font-semibold"
+                      title={`Screen Recording Active (${chunksUploaded} chunks uploaded)`}
+                    >
+                      <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse shrink-0" />
+                      <span className="font-mono text-[11px]">
+                        {Math.floor(recordingDurationSec / 60)
+                          .toString()
+                          .padStart(2, '0')}
+                        :
+                        {(recordingDurationSec % 60).toString().padStart(2, '0')}
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      data-testid="stop-recording-btn"
+                      disabled={isFinalizingRecording}
+                      onClick={() => {
+                        if (onStopRecording) {
+                          onStopRecording();
+                        } else {
+                          onToggleRecording?.();
+                        }
+                      }}
+                      title="Stop & Save Recording to Course"
+                      aria-label="Stop Recording"
+                      className="flex items-center justify-center w-7 h-7 rounded-md bg-rose-600 hover:bg-rose-700 text-white shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <Square className="w-3 h-3 fill-white text-white shrink-0" />
+                    </button>
+
+                    {onRestartRecording && (
+                      <button
+                        type="button"
+                        data-testid="restart-recording-btn"
+                        disabled={isFinalizingRecording}
+                        onClick={onRestartRecording}
+                        title="Restart Recording from 00:00"
+                        aria-label="Restart Recording"
+                        className="flex items-center justify-center w-7 h-7 rounded-md bg-white hover:bg-amber-50 text-slate-700 hover:text-amber-700 border border-slate-200/80 transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5 shrink-0" />
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
 
           {/* Student Custom Zoom Pill (Desktop Whiteboard) */}
           {role === 'student' && activeMode === 'whiteboard' && (

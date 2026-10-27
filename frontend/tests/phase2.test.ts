@@ -11,6 +11,7 @@ import {
   selectSupportedMimeType,
   getRecorderOptions,
   computeRandomUploadJitterMs,
+  renderIntroBrandingScene,
 } from '../src/modules/live-classroom/hooks/useCompressedClassRecorder';
 
 import {
@@ -848,13 +849,13 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
     });
 
     it('moves the logged-in student to index 0 of the attendance list and preserves relative order of other students', () => {
-      const attendanceList: StudentAttendanceSummary[] = [
+      const attendanceList: any[] = [
         {
           studentId: '101',
           studentName: 'Aarav Sharma',
           isOnline: true,
           status: 'PRESENT',
-          totalActiveSeconds: 420,
+          totalJoinedSeconds: 420,
           attendancePercentage: 95,
         },
         {
@@ -862,7 +863,7 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
           studentName: 'Priya Patel',
           isOnline: true,
           status: 'PRESENT',
-          totalActiveSeconds: 380,
+          totalJoinedSeconds: 380,
           attendancePercentage: 90,
         },
         {
@@ -870,7 +871,7 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
           studentName: 'Student #103',
           isOnline: true,
           status: 'PRESENT',
-          totalActiveSeconds: 310,
+          totalJoinedSeconds: 310,
           attendancePercentage: 85,
         },
       ];
@@ -894,13 +895,13 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
     });
 
     it('prepends the logged-in student at index 0 when not yet present in attendanceList snapshot', () => {
-      const attendanceList: StudentAttendanceSummary[] = [
+      const attendanceList: any[] = [
         {
           studentId: '201',
           studentName: 'Ananya Gupta',
           isOnline: true,
           status: 'PRESENT',
-          totalActiveSeconds: 120,
+          totalJoinedSeconds: 120,
           attendancePercentage: 100,
         },
       ];
@@ -922,13 +923,13 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
     });
 
     it('does not inject or reorder students when the viewer is a teacher or co-host', () => {
-      const attendanceList: StudentAttendanceSummary[] = [
+      const attendanceList: any[] = [
         {
           studentId: '101',
           studentName: 'Aarav Sharma',
           isOnline: true,
           status: 'PRESENT',
-          totalActiveSeconds: 420,
+          totalJoinedSeconds: 420,
           attendancePercentage: 95,
         },
         {
@@ -936,7 +937,7 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
           studentName: 'Priya Patel',
           isOnline: true,
           status: 'PRESENT',
-          totalActiveSeconds: 380,
+          totalJoinedSeconds: 380,
           attendancePercentage: 90,
         },
       ];
@@ -1188,9 +1189,9 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
         'VirtualContentStage must wrap lesson/topic HTML inside .content-main-container'
       );
       assert.equal(
-        stageSource.includes('dangerouslySetInnerHTML={{ __html: block.contentHtml }}'),
+        stageSource.includes('tokenizeHtmlContent(block.contentHtml, \'content\')'),
         true,
-        'VirtualContentStage must render stored block.contentHtml directly as HTML'
+        'VirtualContentStage must render stored block.contentHtml with deterministic word-level data-token-id spans'
       );
       assert.equal(
         stageSource.includes("isSelectionEnabled ? 'select-text' : 'select-none'"),
@@ -1211,6 +1212,409 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
         cssSource.includes('user-select: text;'),
         true,
         'learning-content.css must allow text selection inside .content-main-container'
+      );
+    });
+  });
+
+  describe('13. Manual Screen Recording (Start / Stop / Restart), 3s Intro Branding Scene & Laravel Course Mapping', () => {
+    it('does not auto-start recording when broadcast starts and exposes Start, Stop, and Restart icons in TopModeNavbar', () => {
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+      const navbarSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/TopModeNavbar.tsx'),
+        'utf8'
+      );
+
+      // Recording must NEVER auto-start via autoStartedRecorderRef
+      assert.equal(
+        layoutSource.includes('autoStartedRecorderRef'),
+        false,
+        'LearningSessionLayout must not auto-start recording when broadcast starts'
+      );
+
+      // LearningSessionLayout must wire manual Start, Stop, and Restart handlers using display_media
+      assert.equal(
+        layoutSource.includes("startRecording('display_media')"),
+        true,
+        'LearningSessionLayout must start screen recording via display_media when teacher clicks Start Recording'
+      );
+      assert.equal(
+        layoutSource.includes("restartRecording('display_media')"),
+        true,
+        'LearningSessionLayout must restart screen recording via display_media when teacher clicks Restart Recording'
+      );
+
+      // TopModeNavbar must render Start, Stop, and Restart recording buttons
+      assert.equal(
+        navbarSource.includes('data-testid="start-recording-btn"'),
+        true,
+        'TopModeNavbar must render start-recording-btn icon button'
+      );
+      assert.equal(
+        navbarSource.includes('data-testid="stop-recording-btn"'),
+        true,
+        'TopModeNavbar must render stop-recording-btn icon button'
+      );
+      assert.equal(
+        navbarSource.includes('data-testid="restart-recording-btn"'),
+        true,
+        'TopModeNavbar must render restart-recording-btn icon button'
+      );
+    });
+
+    it('renders the 3-second intro branding scene with Course, Chapter, Lesson, Topic, and Instructor details and captures unmodified screen afterwards', () => {
+      assert.equal(RECORDER_CONFIG.INTRO_BRANDING_DURATION_MS, 3000);
+
+      const drawnTexts: string[] = [];
+      const mockCtx: any = {
+        createLinearGradient: () => ({ addColorStop: () => {} }),
+        fillRect: () => {},
+        strokeRect: () => {},
+        beginPath: () => {},
+        arc: () => {},
+        fill: () => {},
+        fillText: (text: string) => {
+          drawnTexts.push(String(text));
+        },
+        fillStyle: '',
+        strokeStyle: '',
+        lineWidth: 1,
+        font: '',
+      };
+
+      renderIntroBrandingScene(mockCtx, {
+        courseTitle: 'Class 10 Physics Mastery',
+        chapterTitle: 'Chapter 1: Electricity',
+        lessonTitle: "Lesson 1.1: Ohm's Law",
+        topicTitle: 'Potential Difference & Resistance',
+        teacherName: 'Dr. S. Verma',
+      });
+
+      const joinedText = drawnTexts.join(' | ');
+      assert.equal(joinedText.includes('ZERIX ACADEMY'), true);
+      assert.equal(joinedText.includes('Class 10 Physics Mastery'), true);
+      assert.equal(joinedText.includes('Chapter 1: Electricity'), true);
+      assert.equal(joinedText.includes("Lesson 1.1: Ohm's Law"), true);
+      assert.equal(joinedText.includes('Potential Difference & Resistance'), true);
+      assert.equal(joinedText.includes('Dr. S. Verma'), true);
+
+      const recorderSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../src/modules/live-classroom/hooks/useCompressedClassRecorder.ts'
+        ),
+        'utf8'
+      );
+
+      // Verify intro branding scene is rendered only for the first 3 seconds, followed by unmodified screenVideoEl drawImage
+      assert.equal(
+        recorderSource.includes('if (elapsedMs < RECORDER_CONFIG.INTRO_BRANDING_DURATION_MS) {') &&
+          recorderSource.includes('renderIntroBrandingScene(ctx, titlesRef.current);'),
+        true,
+        'Recorder must render the intro branding scene during the first 3 seconds'
+      );
+      assert.equal(
+        recorderSource.includes('ctx.drawImage(screenVideoEl, 0, 0, 1280, 720);'),
+        true,
+        'Recorder must draw unmodified full-frame user screen (1280x720) after the intro branding scene'
+      );
+    });
+
+    it('supports recording restart (chunkIndex=0 with reset=true) and maps completed recording to courses/lessons/topics in Laravel', () => {
+      const storageProviderSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../services/live-broadcast-engine/src/adapters/storage.provider.ts'
+        ),
+        'utf8'
+      );
+      const timelineTrackerSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../services/live-broadcast-engine/src/modules/session-timeline/sessionTimeline.tracker.ts'
+        ),
+        'utf8'
+      );
+      const laravelProviderSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../services/live-broadcast-engine/src/adapters/laravelApi.provider.ts'
+        ),
+        'utf8'
+      );
+
+      assert.equal(
+        storageProviderSource.includes('Boolean(options.reset)') &&
+          storageProviderSource.includes('this.videoRecordings.delete(sessionId);'),
+        true,
+        'StorageProvider.appendVideoChunk must wipe previous partial recording when reset=true is passed on restart'
+      );
+      assert.equal(
+        timelineTrackerSource.includes('public resetRecordingTimeline('),
+        true,
+        'SessionTimelineTracker must expose resetRecordingTimeline to reset segment offsets to 00:00 on restart'
+      );
+      assert.equal(
+        laravelProviderSource.includes('courseId: relCtx.courseId') &&
+          laravelProviderSource.includes('linkedVodCourseId: relCtx.linkedVodCourseId') &&
+          laravelProviderSource.includes('taughtSegments'),
+        true,
+        'LaravelApiDataProvider must send courseId, linkedVodCourseId, recording_url, and taughtSegments to Laravel on recording completion'
+      );
+    });
+
+    it('behaviorally resets StorageProvider video stream and SessionTimelineTracker offsets when recording is restarted', async () => {
+      const { StorageProvider } = await import(
+        '../../services/live-broadcast-engine/src/adapters/storage.provider'
+      );
+      const { SessionTimelineTracker } = await import(
+        '../../services/live-broadcast-engine/src/modules/session-timeline/sessionTimeline.tracker'
+      );
+
+      const tmpDir = path.join('/tmp', `test_rec_restart_${Date.now()}`);
+      const storage = new StorageProvider({
+        driver: 'local_disk',
+        cacheDir: tmpDir,
+      });
+      const tracker = new SessionTimelineTracker();
+      const testSessionId = `sess_restart_unit_${Date.now()}`;
+
+      try {
+        tracker.ensureSession(testSessionId, {
+          courseId: 4,
+          chapterId: 10,
+          lessonId: 25,
+          topicId: 56,
+        });
+
+        // Take 1: Upload chunk 0 (100 bytes) and chunk 1 (150 bytes)
+        const take1Chunk0 = await storage.appendVideoChunk(
+          testSessionId,
+          Buffer.alloc(100, 0xaa),
+          { chunkIndex: 0 }
+        );
+        tracker.recordVideoChunkUploaded(testSessionId, 0, 100);
+
+        const take1Chunk1 = await storage.appendVideoChunk(
+          testSessionId,
+          Buffer.alloc(150, 0xbb),
+          { chunkIndex: 1 }
+        );
+        tracker.recordVideoChunkUploaded(testSessionId, 1, 150);
+
+        assert.equal(take1Chunk0.totalBytesWritten, 100);
+        assert.equal(take1Chunk1.totalBytesWritten, 250);
+        assert.equal(take1Chunk1.chunksReceivedCount, 2);
+
+        // Teacher clicks Restart Recording -> chunk 0 with reset=true
+        const resetTimeline = tracker.resetRecordingTimeline(testSessionId, {
+          courseId: 4,
+          chapterId: 10,
+          lessonId: 25,
+          topicId: 56,
+        });
+        assert.equal(resetTimeline.videoChunksUploaded, 0);
+        assert.equal(resetTimeline.totalVideoBytes, 0);
+        assert.equal(resetTimeline.latestVideoOffsetSec, 0);
+        assert.equal(resetTimeline.segments.length, 1);
+        assert.equal(resetTimeline.segments[0].startOffsetSec, 0);
+
+        const take2Chunk0 = await storage.appendVideoChunk(
+          testSessionId,
+          Buffer.alloc(80, 0xcc),
+          { chunkIndex: 0, reset: true }
+        );
+        tracker.recordVideoChunkUploaded(testSessionId, 0, 80);
+
+        assert.equal(take2Chunk0.duplicateIgnored, false);
+        assert.equal(take2Chunk0.totalBytesWritten, 80);
+        assert.equal(take2Chunk0.chunksReceivedCount, 1);
+        assert.equal(take2Chunk0.nextExpectedChunkIndex, 1);
+      } finally {
+        await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      }
+    });
+  });
+
+  describe('14. Course/Batch Teacher Host Access, Exact Word-by-Word HTML Pen/Laser Sync & End-of-Content Mobile Scroll Sync', () => {
+    it('ensures any course/batch teacher is Primary Host Teacher with full Whiteboard/Content access and never demoted to Co-Host', () => {
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+
+      // Verify LearningSessionLayout does not demote a course/batch teacher based on cleanSessionOwnerId !== cleanCurrentId
+      assert.equal(
+        layoutSource.includes('cleanSessionOwnerId !== cleanCurrentId'),
+        false,
+        'LearningSessionLayout must never demote a course/batch teacher to Co-Host when sessionMetadata.teacherId differs'
+      );
+      assert.equal(
+        layoutSource.includes('const isHostTeacher = role === \'teacher\' && !isCoHostTeacher;') &&
+          layoutSource.includes('if (isHostTeacher) return true;'),
+        true,
+        'Host Teacher must always have full Whiteboard and Content editing access'
+      );
+    });
+
+    it('tokenizes raw HTML content (block.contentHtml) word-by-word so Pen strokes and Laser pointer anchor to exact words across Desktop and Mobile', () => {
+      const rawHtml =
+        '<h2>Ohm&#39;s Law</h2><p>Current is <strong>directly proportional</strong> to voltage&nbsp;V.</p>';
+      const tokenizedDesktop = ContentSyncMath.tokenizeHtmlContent(rawHtml, 'content');
+      const tokenizedMobile = ContentSyncMath.tokenizeHtmlContent(rawHtml, 'content');
+
+      assert.equal(
+        tokenizedDesktop,
+        tokenizedMobile,
+        'tokenizeHtmlContent must be 100% deterministic across Desktop and Mobile'
+      );
+      assert.equal(tokenizedDesktop.includes('data-token-id="content:0"'), true);
+      assert.equal(tokenizedDesktop.includes('>Ohm&#39;s</span>'), true);
+      assert.equal(tokenizedDesktop.includes('data-token-id="content:1"'), true);
+      assert.equal(tokenizedDesktop.includes('>Law</span>'), true);
+      assert.equal(tokenizedDesktop.includes('>directly</span>'), true);
+      assert.equal(tokenizedDesktop.includes('>proportional</span>'), true);
+      assert.equal(tokenizedDesktop.includes('&nbsp;'), true);
+
+      // Simulate Desktop (800px wide) vs Mobile (320px wide, wrapped lines) layout caches for "proportional" (content:5)
+      const desktopTokens = new Map<string, ContentSyncMath.CachedTokenBox>();
+      const desktopTokenBox: ContentSyncMath.CachedTokenBox = {
+        tokenId: 'content:5',
+        left: 240,
+        top: 48,
+        width: 96,
+        height: 22,
+      };
+      desktopTokens.set('content:5', desktopTokenBox);
+
+      const desktopCache: ContentSyncMath.BlockDomLayoutCache = {
+        blockId: 'blk_html_1',
+        blockRect: { left: 100, top: 200, width: 800, height: 180 } as DOMRect,
+        tokens: desktopTokens,
+        tokenList: [desktopTokenBox],
+        regions: new Map([
+          ['block', { regionId: 'block', left: 0, top: 0, width: 800, height: 180 }],
+          ['content', { regionId: 'content', left: 0, top: 0, width: 800, height: 180 }],
+        ]),
+      };
+
+      // Teacher points Laser / Pen at the exact middle of "proportional" on Desktop (localX = 288, localY = 59)
+      const captured = ContentSyncMath.captureStrokePoint(
+        100 + 288,
+        200 + 59,
+        desktopCache,
+        desktopCache.blockRect
+      );
+      assert.equal(captured.tokenId, 'content:5');
+      assert.equal(captured.rx, 0.5);
+      assert.equal(captured.ry, 0.5);
+
+      // On Student Mobile (320px wide), "proportional" wrapped onto line 3 at (left: 16, top: 112, width: 84, height: 20)
+      const mobileTokens = new Map<string, ContentSyncMath.CachedTokenBox>();
+      const mobileTokenBox: ContentSyncMath.CachedTokenBox = {
+        tokenId: 'content:5',
+        left: 16,
+        top: 112,
+        width: 84,
+        height: 20,
+      };
+      mobileTokens.set('content:5', mobileTokenBox);
+
+      const mobileCache: ContentSyncMath.BlockDomLayoutCache = {
+        blockId: 'blk_html_1',
+        blockRect: { left: 12, top: 140, width: 320, height: 420 } as DOMRect,
+        tokens: mobileTokens,
+        tokenList: [mobileTokenBox],
+        regions: new Map([
+          ['block', { regionId: 'block', left: 0, top: 0, width: 320, height: 420 }],
+          ['content', { regionId: 'content', left: 0, top: 0, width: 320, height: 420 }],
+        ]),
+      };
+
+      const projectedOnMobile = ContentSyncMath.projectPointToDevicePixels(
+        captured,
+        mobileCache,
+        true
+      );
+      assert.equal(projectedOnMobile.px, 16 + 0.5 * 84);
+      assert.equal(projectedOnMobile.py, 112 + 0.5 * 20);
+    });
+
+    it('scrolls Student Mobile viewport all the way to the end of content when Teacher scrolls to the end on Desktop', () => {
+      // Desktop viewport: clientHeight = 800, scrollHeight = 1100 (maxScroll = 300)
+      const desktopBlocks: ContentSyncMath.ScrollBlockMetric[] = [
+        { blockId: 'blk_header', topInScroll: 0, height: 90 },
+        { blockId: 'blk_topic_1', topInScroll: 100, height: 960 },
+      ];
+
+      // Mobile viewport (text wraps 2.5x taller): clientHeight = 620, scrollHeight = 2620 (maxScroll = 2000)
+      const mobileBlocks: ContentSyncMath.ScrollBlockMetric[] = [
+        { blockId: 'blk_header', topInScroll: 0, height: 130 },
+        { blockId: 'blk_topic_1', topInScroll: 140, height: 2440 },
+      ];
+
+      // 1. Teacher at top of content (scrollTop = 0)
+      const topAnchor = ContentSyncMath.computeScrollAnchorForViewport(
+        0,
+        800,
+        1100,
+        desktopBlocks
+      );
+      assert.equal(topAnchor.blockId, 'blk_header');
+      assert.equal(topAnchor.offsetRatio, 0);
+      const mobileTopScroll = ContentSyncMath.computeFollowerTargetScrollTop(
+        topAnchor.blockId,
+        topAnchor.offsetRatio,
+        620,
+        2620,
+        mobileBlocks
+      );
+      assert.equal(mobileTopScroll, 0);
+
+      // 2. Teacher at 50% scroll on Desktop (scrollTop = 150 of maxScroll = 300)
+      const midAnchor = ContentSyncMath.computeScrollAnchorForViewport(
+        150,
+        800,
+        1100,
+        desktopBlocks
+      );
+      assert.equal(midAnchor.blockId, 'blk_topic_1');
+      assert.ok(midAnchor.offsetRatio > 0.4 && midAnchor.offsetRatio < 0.6);
+      const mobileMidScroll = ContentSyncMath.computeFollowerTargetScrollTop(
+        midAnchor.blockId,
+        midAnchor.offsetRatio,
+        620,
+        2620,
+        mobileBlocks
+      );
+      assert.ok(
+        mobileMidScroll >= 900 && mobileMidScroll <= 1100,
+        `Expected mobile mid scroll near 1000px, got ${mobileMidScroll}`
+      );
+
+      // 3. Teacher scrolls to the end of content on Desktop (scrollTop = 300 = maxScroll)
+      const endAnchor = ContentSyncMath.computeScrollAnchorForViewport(
+        300,
+        800,
+        1100,
+        desktopBlocks
+      );
+      assert.equal(endAnchor.blockId, 'blk_topic_1');
+      assert.equal(endAnchor.offsetRatio, 1);
+
+      const mobileEndScroll = ContentSyncMath.computeFollowerTargetScrollTop(
+        endAnchor.blockId,
+        endAnchor.offsetRatio,
+        620,
+        2620,
+        mobileBlocks
+      );
+      assert.equal(
+        mobileEndScroll,
+        2000,
+        'Student mobile phone must scroll all the way to maxScroll (2000px) when Teacher reaches the end of content'
       );
     });
   });

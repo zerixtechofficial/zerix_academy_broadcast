@@ -470,12 +470,63 @@ export class LaravelApiDataProvider implements IDataProvider {
       summary
     );
 
+    const relCtx = summary.relationalContext || ({} as any);
+    const taughtSegments = (summary.publishedLessonArtifacts || summary.taughtArtifacts || []).map(
+      (item) => ({
+        chapterId: item.relationalContext?.chapterId,
+        chapterNumber: item.relationalContext?.chapterNumber,
+        chapterTitle: item.relationalContext?.chapterTitle,
+        lessonId: item.relationalContext?.lessonId,
+        lessonNumber: item.relationalContext?.lessonNumber,
+        lessonTitle: item.relationalContext?.lessonTitle,
+        topicId: item.relationalContext?.topicId,
+        topicTitle: item.relationalContext?.topicTitle,
+        mode: item.mode || 'taught',
+        videoRelativePath: item.videoRelativePath,
+        videoPublicUrl: item.videoPublicUrl,
+        videoMimeType: item.videoMimeType,
+        videoSizeBytes: item.videoSizeBytes,
+        durationSec: item.videoDurationSeconds,
+        startOffsetSec: item.videoStartOffsetSec,
+        endOffsetSec: item.videoEndOffsetSec,
+        whiteboardGzipRelativePath: item.whiteboardGzipRelativePath,
+        whiteboardPublicUrl: item.whiteboardPublicUrl,
+        whiteboardPagesCount: item.whiteboardPageCount,
+        whiteboardElementsCount: item.whiteboardElementCount,
+        timelineMarkers: item.timelineMarkers,
+        relationalContext: item.relationalContext,
+      })
+    );
+
+    const laravelPayload = {
+      ...summary,
+      courseId: relCtx.courseId,
+      linkedVodCourseId: relCtx.linkedVodCourseId,
+      languageId: relCtx.languageId,
+      boardId: relCtx.boardId,
+      version: relCtx.version,
+      academicYear: relCtx.academicYear,
+      publishToVodCourse: relCtx.publishToVodCourse ?? true,
+      isPrimaryVod: relCtx.isPrimaryVod ?? true,
+      recording_url: summary.sessionVideoRelativePath,
+      sessionVideo: {
+        relativePath: summary.sessionVideoRelativePath,
+        publicUrl: summary.sessionVideoPublicUrl,
+        mimeType: summary.videoMimeType,
+        sizeBytes: summary.videoSizeBytes,
+        durationSeconds: summary.videoDurationSeconds,
+        storageDriver: summary.storageDriver,
+      },
+      taughtSegments,
+      referenceOnlySegments: summary.referenceSegments || summary.skippedReferenceLessons || [],
+    };
+
     try {
       await this.request(
         `/api/v1/broadcast/sessions/${encodeURIComponent(summary.sessionId)}/complete`,
         {
           method: 'POST',
-          body: JSON.stringify(summary),
+          body: JSON.stringify(laravelPayload),
         }
       );
     } catch (err: any) {

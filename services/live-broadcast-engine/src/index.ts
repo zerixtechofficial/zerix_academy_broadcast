@@ -220,6 +220,23 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
             user,
             currentRoom?.sessionContext?.teacherId
           );
+          if (isHost) {
+            await AudioStageController.removeCoTeacher(targetSessionId, user.userId);
+            const normalizedHostId = String(user.userId).replace(/^teacher_/, '') || '1';
+            if (
+              currentRoom?.sessionContext &&
+              String(currentRoom.sessionContext.teacherId || '').replace(/^teacher_/, '') !== normalizedHostId
+            ) {
+              currentRoom.sessionContext = {
+                ...currentRoom.sessionContext,
+                teacherId: normalizedHostId,
+                teacherName: user.name || currentRoom.sessionContext.teacherName || 'Instructor',
+              };
+              await RoomManager.updateSnapshot(targetSessionId, {
+                sessionContext: currentRoom.sessionContext,
+              });
+            }
+          }
           if (isHost && !user.isCoTeacher && lastSeqId === 0 && (user.lessonId || user.topicId)) {
             const currentContent = await ContentEngine.getState(targetSessionId);
             const nextLessonId = String(
@@ -235,7 +252,7 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
             ) {
               await ContentEngine.updateNavigation(targetSessionId, nextLessonId, nextTopicId);
             }
-          } else if (!isHost) {
+          } else if (!isHost && AudioStageController.isExplicitCoTeacher(user)) {
             const currentCoTeachers = await AudioStageController.getInvitedTeachers(targetSessionId);
             const cleanCoId = user.userId.startsWith('teacher_')
               ? user.userId

@@ -22,6 +22,7 @@ export interface RelationalLessonContext {
   boardId: number | null;
   languageId: number;
   courseId: number;
+  courseTitle?: string;
   linkedVodCourseId: number;
   subjectId: number;
   chapterId: number | string;
@@ -327,17 +328,20 @@ export class CurriculumClient {
       relationalContext?: Partial<RelationalLessonContext>;
       lessonId?: string | number;
       token?: string;
+      reset?: boolean;
     }
   ) {
     const baseUrl = getApiBaseUrl();
+    const resetQuery = options.reset ? '?reset=1' : '';
     const endpoint = options.lessonId
-      ? `/api/v1/sessions/${sessionId}/lessons/${options.lessonId}/video-chunk`
-      : `/api/v1/sessions/${sessionId}/video-chunk`;
+      ? `/api/v1/sessions/${sessionId}/lessons/${options.lessonId}/video-chunk${resetQuery}`
+      : `/api/v1/sessions/${sessionId}/video-chunk${resetQuery}`;
 
     const authToken = getStoredAuthToken(options.token);
     const headers: Record<string, string> = {
       'Content-Type': options.mimeType || 'video/webm;codecs=vp9,opus',
       'x-chunk-index': String(options.chunkIndex),
+      ...(options.reset ? { 'x-reset-recording': '1' } : {}),
       ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
     };
 

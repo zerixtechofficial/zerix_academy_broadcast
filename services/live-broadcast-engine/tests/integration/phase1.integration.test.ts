@@ -11,6 +11,7 @@ import { StorageProvider, setStorageProvider } from '../../src/adapters/storage.
 import { setSessionTimelineTracker, SessionTimelineTracker } from '../../src/modules/session-timeline/sessionTimeline.tracker';
 import { FileCache } from '../../src/utils/fileCache';
 import { RelationalLessonContext } from '../../src/types/broadcast.types';
+import { JwtVerifier } from '../../src/utils/jwtVerifier';
 
 describe('Phase 1 Integration Tests: End-to-End Fastify REST & Streaming Pipeline', () => {
   let tempDir: string;
@@ -72,8 +73,23 @@ describe('Phase 1 Integration Tests: End-to-End Fastify REST & Streaming Pipelin
     subClient.disconnect();
   });
 
+  const signedTeacherJwt = JwtVerifier.sign({
+    userId: 'teacher_501',
+    name: 'Prof. S. Verma',
+    role: 'teacher',
+    sessionId,
+    batchId: '105',
+  });
+  const signedStudentJwt = JwtVerifier.sign({
+    userId: 'student_101',
+    name: 'Aarav Kumar',
+    role: 'student',
+    sessionId,
+    batchId: '105',
+  });
+
   const teacherHeaders = {
-    authorization: 'Bearer DEV_TOKEN_TEACHER_501',
+    authorization: `Bearer ${signedTeacherJwt}`,
   };
 
   it('1. validates video chunk upload inputs and returns structured 422 ValidationError on bad payloads', async () => {
@@ -429,7 +445,7 @@ describe('Phase 1 Integration Tests: End-to-End Fastify REST & Streaming Pipelin
 
   it('6. P0-4: blocks unauthenticated and student requests to session mutation endpoints (/video-chunk, /curriculum/navigate, /whiteboard/save, /finalize) with 401/403', async () => {
     const studentHeaders = {
-      authorization: 'Bearer DEV_TOKEN_STUDENT_101',
+      authorization: `Bearer ${signedStudentJwt}`,
     };
 
     // 1. Unauthenticated requests -> 401
@@ -649,7 +665,7 @@ describe('Phase 1 Integration Tests: End-to-End Fastify REST & Streaming Pipelin
       method: 'GET',
       url: `/api/v1/sessions/${sessionId}/attendance`,
       headers: {
-        authorization: 'Bearer DEV_TOKEN_STUDENT_101',
+        authorization: `Bearer ${signedStudentJwt}`,
       },
     });
     assert.equal(
@@ -1066,10 +1082,19 @@ describe('Phase 1 Integration Tests: End-to-End Fastify REST & Streaming Pipelin
     const { AudioStageController } = await import('../../src/modules/audio-stage/audio.controller');
 
     // 1. Verify POST /api/v1/sessions/init returns livekit.url alongside token & roomName
+    const voiceInitTeacherToken = JwtVerifier.sign({
+      userId: 'teacher_501',
+      name: 'Prof. S. Verma',
+      role: 'teacher',
+      sessionId: 'sess_voice_init_test',
+      batchId: 'batch_voice_1',
+    });
     const initRes = await server.fastify.inject({
       method: 'POST',
       url: '/api/v1/sessions/init',
-      headers: teacherHeaders,
+      headers: {
+        authorization: `Bearer ${voiceInitTeacherToken}`,
+      },
       payload: {
         sessionId: 'sess_voice_init_test',
         batchId: 'batch_voice_1',

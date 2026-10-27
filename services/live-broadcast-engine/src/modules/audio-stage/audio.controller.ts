@@ -806,8 +806,22 @@ export class AudioStageController {
   }
 
   /**
+   * Returns true ONLY when a teacher user explicitly joined via a Co-Host invite link
+   * or is one of the designated demo Co-Teacher accounts.
+   * Any normal course/batch teacher is the Primary Host Teacher, never a Co-Host.
+   */
+  public static isExplicitCoTeacher(user?: Partial<UserAuthPayload> | null): boolean {
+    if (!user || user.role !== 'teacher') return false;
+    if (user.isCoTeacher || (user as any).isCoHostInvite) return true;
+    const uid = String(user.userId || '').trim();
+    if (!uid) return false;
+    if (this.DEMO_CO_TEACHER_IDS.has(uid)) return true;
+    return uid.startsWith('teacher_cohost') || uid.startsWith('cohost');
+  }
+
+  /**
    * Determines whether a teacher user is the Primary Host Teacher for the session
-   * (supporting both real numeric Laravel teacher IDs and mock teacher_501),
+   * (supporting both real numeric Laravel course/batch teacher IDs and mock teacher_501),
    * versus an Invited Co-Teacher.
    */
   public static async isHostTeacher(
@@ -816,26 +830,9 @@ export class AudioStageController {
     sessionTeacherId?: string | number | null
   ): Promise<boolean> {
     if (!user || user.role !== 'teacher') return false;
-    if (user.isCoTeacher) return false;
-    if (this.DEMO_CO_TEACHER_IDS.has(user.userId)) return false;
+    if (this.isExplicitCoTeacher(user)) return false;
 
-    const cleanId = user.userId.startsWith('teacher_') ? user.userId : `teacher_${user.userId}`;
-    const invitedEntry =
-      (await redis.hget(this.invitedTeachersKey(sessionId), cleanId)) ||
-      (await redis.hget(this.invitedTeachersKey(sessionId), user.userId));
-
-    // If explicitly registered in the invited Co-Teachers map and not the session owner, they are a Co-Teacher
-    if (invitedEntry) {
-      if (sessionTeacherId && this.teacherIdsMatch(user.userId, sessionTeacherId)) {
-        return true;
-      }
-      return false;
-    }
-
-    if (sessionTeacherId) {
-      return this.teacherIdsMatch(user.userId, sessionTeacherId);
-    }
-
+    // Any authenticated course/batch teacher who did NOT join as a Co-Teacher is the Host Teacher
     return true;
   }
 

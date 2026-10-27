@@ -128,6 +128,144 @@ export function tokenizeText(
 }
 
 /**
+ * Deterministically wraps every word inside an HTML string (`block.contentHtml`) in an inline
+ * `<span data-token-id="${prefix}:${idx}" class="inline">word</span>` while preserving all
+ * HTML tags, attributes, entities (`&nbsp;`), and non-text containers (`<script>`, `<style>`, `<svg>`, `<math>`).
+ *
+ * This guarantees that raw HTML lesson/topic content rendered via `dangerouslySetInnerHTML`
+ * has 100% deterministic `[data-token-id]` word nodes across Teacher Desktop and Student Mobile
+ * for exact word-by-word Pen marking and Laser pointer synchronization.
+ */
+export function tokenizeHtmlContent(
+  html: string | undefined | null,
+  prefix: 'title' | 'content' | 'formula' = 'content'
+): string {
+  if (!html || typeof html !== 'string') return '';
+  if (html.includes('data-token-id=')) return html;
+
+  const parts = html.split(/(<[^>]+>)/g);
+  let wordCounter = 0;
+  let skipDepth = 0;
+
+  return parts
+    .map((part) => {
+      if (!part) return '';
+      if (part.startsWith('<') && part.endsWith('>')) {
+        const lower = part.toLowerCase();
+        if (/^<\s*(script|style|svg|math|textarea)\b/.test(lower) && !/\/>\s*$/.test(lower)) {
+          skipDepth++;
+        } else if (/^<\s*\/\s*(script|style|svg|math|textarea)\b/.test(lower)) {
+          skipDepth = Math.max(0, skipDepth - 1);
+        }
+        return part;
+      }
+
+      if (skipDepth > 0) return part;
+
+      // Split text node by whitespace and HTML non-breaking space entities while preserving separators
+      const subParts = part.split(/((?:\s+|(?:&nbsp;|&#160;|&#xa0;)+)+)/gi);
+      return subParts
+        .map((sub) => {
+          if (!sub) return '';
+          if (/^(?:\s+|(?:&nbsp;|&#160;|&#xa0;)+)+$/i.test(sub)) {
+            return sub;
+          }
+          const idx = wordCounter++;
+          return `<span data-token-id="${prefix}:${idx}" class="inline">${sub}</span>`;
+        })
+        .join('');
+    })
+    .join('');
+}
+
+export interface ScrollBlockMetric {
+  blockId: string;
+  topInScroll: number;
+  height: number;
+}
+
+/**
+ * Computes the semantic `(blockId, offsetRatio)` scroll anchor for the presenter's viewport.
+ * Smoothly interpolates the reading focal line from the top of the first block (`scrollTop = 0`)
+ * to the bottom of the last block (`scrollTop = maxScroll`) so scrolling to the end of content on
+ * Desktop always emits `{ blockId: lastBlockId, offsetRatio: 1 }`.
+ */
+export function computeScrollAnchorForViewport(
+  scrollTop: number,
+  clientHeight: number,
+  scrollHeight: number,
+  blocks: ScrollBlockMetric[]
+): { blockId: string; offsetRatio: number } {
+  if (scrollTop <= 8 || blocks.length === 0) {
+    return { blockId: 'blk_header', offsetRatio: 0 };
+  }
+
+  const maxScroll = Math.max(0, scrollHeight - clientHeight);
+  const lastBlock = blocks[blocks.length - 1];
+
+  if (maxScroll > 0 && scrollTop >= maxScroll - 6) {
+    return { blockId: lastBlock.blockId, offsetRatio: 1 };
+  }
+
+  const lastBottom = Math.max(1, lastBlock.topInScroll + Math.max(1, lastBlock.height));
+  const scrollProgress = maxScroll > 0 ? Math.min(1, Math.max(0, scrollTop / maxScroll)) : 0;
+  const focusYInScroll = scrollTop + scrollProgress * (lastBottom - maxScroll);
+
+  for (const item of blocks) {
+    const height = Math.max(1, item.height);
+    if (item.topInScroll + height >= focusYInScroll - 1) {
+      const rawRatio = (focusYInScroll - item.topInScroll) / height;
+      const offsetRatio = Number(Math.max(0, Math.min(1, rawRatio)).toFixed(4));
+      return { blockId: item.blockId, offsetRatio };
+    }
+  }
+
+  return { blockId: lastBlock.blockId, offsetRatio: 1 };
+}
+
+/**
+ * Inverse projection of `(anchorBlockId, offsetRatio)` to the follower device's `scrollTop`.
+ * Preserves per-block semantic alignment while guaranteeing that `{ blockId: lastBlockId, offsetRatio: 1 }`
+ * scrolls all the way to `maxScroll = scrollHeight - clientHeight` on narrow mobile screens.
+ */
+export function computeFollowerTargetScrollTop(
+  anchorBlockId: string | undefined,
+  offsetRatio: number,
+  clientHeight: number,
+  scrollHeight: number,
+  blocks: ScrollBlockMetric[]
+): number {
+  const maxScroll = Math.max(0, scrollHeight - clientHeight);
+  if (maxScroll <= 0) return 0;
+
+  if ((!anchorBlockId || anchorBlockId === 'blk_header') && Math.abs(offsetRatio) <= 0.02) {
+    return 0;
+  }
+
+  const lastBlock = blocks.length > 0 ? blocks[blocks.length - 1] : null;
+  if (lastBlock && anchorBlockId === lastBlock.blockId && offsetRatio >= 0.98) {
+    return maxScroll;
+  }
+
+  const targetBlock =
+    blocks.find((b) => b.blockId === anchorBlockId) ||
+    (anchorBlockId === 'blk_header' ? blocks[0] : null);
+  if (!targetBlock) {
+    return offsetRatio >= 0.98 ? maxScroll : 0;
+  }
+
+  const targetPointInScroll =
+    targetBlock.topInScroll + Math.max(1, targetBlock.height) * offsetRatio;
+  const lastBottom = lastBlock
+    ? Math.max(1, lastBlock.topInScroll + Math.max(1, lastBlock.height))
+    : Math.max(1, scrollHeight);
+  const docProgress = Math.max(0, Math.min(1, targetPointInScroll / lastBottom));
+  const rawScrollTop = targetPointInScroll - docProgress * (lastBottom - maxScroll);
+
+  return Math.max(0, Math.min(maxScroll, rawScrollTop));
+}
+
+/**
  * Builds a fast layout cache of all `[data-token-id]` and `[data-region-id]` elements
  * within a block DOM element. Called once on pointerDown or during layout measurement
  * to avoid per-frame `getBoundingClientRect` layout thrashing.
@@ -221,7 +359,7 @@ export function hitTestWordToken(
     if (
       localX >= t.left - 3 &&
       localX <= t.left + t.width + 3 &&
-      localY >= t.top + 1.5 &&
+      localY >= t.top - 1 &&
       localY <= t.top + t.height + 6
     ) {
       const rx = Math.max(-1.5, Math.min(2.5, (localX - t.left) / Math.max(1, t.width)));
@@ -245,7 +383,7 @@ export function hitTestWordToken(
     const dx =
       localX < t.left ? t.left - localX : localX > t.left + t.width ? localX - (t.left + t.width) : 0;
 
-    const effectiveTop = t.top + 1.5;
+    const effectiveTop = t.top - 1;
     const effectiveBottom = t.top + t.height + 6;
     const dy =
       localY < effectiveTop
@@ -586,7 +724,7 @@ export function buildResponsiveSvgPath(
         const currPt = workingPoints[i];
         projected[i] = {
           px: anchorProj.px + ((currPt.x - anchorPt.x) / 100) * blockW,
-          py: anchorProj.py + ((currPt.y - anchorPt.y) / 100) * Math.min(blockH, 220),
+          py: anchorProj.py + ((currPt.y - anchorPt.y) / 100) * blockH,
           tokenBox: anchorProj.tokenBox,
         };
       }

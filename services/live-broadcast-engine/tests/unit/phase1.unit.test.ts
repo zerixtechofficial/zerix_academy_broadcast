@@ -13,7 +13,6 @@ import {
   SessionTimelineTracker,
   getSessionTimelineTracker,
 } from '../../src/modules/session-timeline/sessionTimeline.tracker';
-import { MockJsonDataProvider } from '../../src/adapters/mockJson.provider';
 import { LaravelApiDataProvider } from '../../src/adapters/laravelApi.provider';
 import { RelationalLessonContext } from '../../src/types/broadcast.types';
 import { AudioStageController } from '../../src/modules/audio-stage/audio.controller';
@@ -147,8 +146,8 @@ describe('Phase 1 Unit Tests: JWT Verifier, StorageProvider, and SessionTimeline
       assert.match(result.reason || '', /sessionId mismatch/);
     });
 
-    it('integrates with MockJsonDataProvider.validateToken for both JWT and dev tokens', async () => {
-      const provider = new MockJsonDataProvider();
+    it('integrates with LaravelApiDataProvider.validateToken for signed classroom JWT tokens', async () => {
+      const provider = new LaravelApiDataProvider('http://127.0.0.1:59999');
       const jwtToken = JwtVerifier.sign({
         userId: 'stu_jwt_77',
         name: 'Priya Singh',
@@ -162,9 +161,16 @@ describe('Phase 1 Unit Tests: JWT Verifier, StorageProvider, and SessionTimeline
       assert.equal(jwtUser?.userId, 'stu_jwt_77');
       assert.equal(jwtUser?.role, 'student');
 
-      const devTeacher = await provider.validateToken('DEV_TOKEN_TEACHER_501', 'batch_physics_101');
-      assert.ok(devTeacher);
-      assert.equal(devTeacher?.role, 'teacher');
+      const teacherToken = JwtVerifier.sign({
+        userId: 'teacher_501',
+        name: 'Prof. S. Verma',
+        role: 'teacher',
+        sessionId: 'batch_physics_101',
+        batchId: '105',
+      });
+      const jwtTeacher = await provider.validateToken(teacherToken, 'batch_physics_101');
+      assert.ok(jwtTeacher);
+      assert.equal(jwtTeacher?.role, 'teacher');
     });
   });
 
@@ -557,6 +563,20 @@ describe('Phase 1 Unit Tests: JWT Verifier, StorageProvider, and SessionTimeline
       await AudioStageController.setCoTeacherWhiteboardAccess(sessionId, 'teacher_502', true);
       const canCoTeacherEditAfterGrant = await AudioStageController.canUserEditWhiteboard(sessionId, demoCoTeacher);
       assert.equal(canCoTeacherEditAfterGrant, true, 'Co-Teacher with canUseWhiteboard=true must be allowed to edit Whiteboard');
+
+      // 4. Course/Batch Teacher (e.g. userId "5333") joining a session whose fallback teacherId was "1"
+      // must STILL be recognized as the Primary Host Teacher with full Whiteboard access
+      const batchCourseTeacher = {
+        userId: '5333',
+        name: 'Course Batch Teacher',
+        role: 'teacher' as const,
+        batchId: '105',
+        sessionId,
+      };
+      const isBatchTeacherHost = await AudioStageController.isHostTeacher(sessionId, batchCourseTeacher, '1');
+      assert.equal(isBatchTeacherHost, true, 'Any non-cohost course/batch teacher must be recognized as Host Teacher even if fallback sessionTeacherId was 1');
+      const canBatchTeacherEditWb = await AudioStageController.canUserEditWhiteboard(sessionId, batchCourseTeacher);
+      assert.equal(canBatchTeacherEditWb, true, 'Course/batch teacher must always have Whiteboard edit access');
     });
   });
 
@@ -807,9 +827,9 @@ describe('Phase 1 Unit Tests: JWT Verifier, StorageProvider, and SessionTimeline
   // ==========================================================================
   // 7. P1-4: Reject 2-Part Base64 Forged Tokens, .mock_sig_* Bypasses & Production Dev Tokens
   // ==========================================================================
-  describe('7. P1-4: MockJsonDataProvider Rejects Forged Base64 Tokens & Production Dev Tokens', () => {
+  describe('7. P1-4: LaravelApiDataProvider Rejects Forged Base64 Tokens & Production Dev Tokens', () => {
     it('rejects 2-part forged base64 tokens, .mock_sig_* forged JWTs, and dev tokens in production', async () => {
-      const provider = new MockJsonDataProvider();
+      const provider = new LaravelApiDataProvider('http://127.0.0.1:59999');
 
       // 1. Forged 2-part token (header.payload without cryptographic signature)
       const forgedPayload = Buffer.from(
@@ -831,22 +851,16 @@ describe('Phase 1 Unit Tests: JWT Verifier, StorageProvider, and SessionTimeline
         '3-part forged token with .mock_sig_teacher_101 suffix must be rejected'
       );
 
-      // 3. In production mode, static DEV_TOKEN_* strings must be rejected
-      const prevNodeEnv = process.env.NODE_ENV;
-      process.env.NODE_ENV = 'production';
-      try {
-        const prodDevTokenResult = await provider.validateToken(
-          'DEV_TOKEN_TEACHER_501',
-          'batch_physics_101'
-        );
-        assert.equal(
-          prodDevTokenResult,
-          null,
-          'DEV_TOKEN_TEACHER_501 must be rejected when NODE_ENV=production'
-        );
-      } finally {
-        process.env.NODE_ENV = prevNodeEnv;
-      }
+      // 3. Static DEV_TOKEN_* strings must always be rejected
+      const prodDevTokenResult = await provider.validateToken(
+        'DEV_TOKEN_TEACHER_501',
+        'batch_physics_101'
+      );
+      assert.equal(
+        prodDevTokenResult,
+        null,
+        'DEV_TOKEN_TEACHER_501 must be rejected'
+      );
     });
   });
 
@@ -1240,6 +1254,71 @@ describe('Phase 1 Unit Tests: JWT Verifier, StorageProvider, and SessionTimeline
         TelegramMonitorService.setTransport(null);
         TelegramMonitorService.clearDedupeCache();
       }
+    });
+  });
+
+  // ==========================================================================
+  // 14. Course/Batch Teacher Host Resolution vs Explicit Co-Host Invite
+  // ==========================================================================
+  describe('14. Course/Batch Teacher Host Resolution vs Explicit Co-Host Invite', () => {
+    it('recognizes any course/batch teacher as Host Teacher (with full whiteboard & content control) unless explicitly invited as a Co-Teacher', async () => {
+      const hostSessionId = `sess_host_teacher_${Date.now()}`;
+
+      // Even if a stale invited_teachers entry exists in Redis or sessionTeacherId defaulted to '1',
+      // a regular course/batch teacher (e.g. userId = '5333', role = 'teacher') MUST be Host Teacher.
+      await AudioStageController.inviteCoTeacher(hostSessionId, {
+        teacherId: '5333',
+        teacherName: 'Dr. Ramesh Kumar',
+        canUseWhiteboard: false,
+        isMuted: false,
+        invitedAt: Date.now(),
+        isOnline: true,
+      });
+
+      const courseTeacher = {
+        userId: '5333',
+        name: 'Dr. Ramesh Kumar',
+        role: 'teacher' as const,
+        sessionId: hostSessionId,
+      };
+
+      assert.equal(
+        AudioStageController.isExplicitCoTeacher(courseTeacher),
+        false,
+        'Course/batch teacher without explicit Co-Host invite flags must NOT be treated as Co-Teacher'
+      );
+
+      const isHost = await AudioStageController.isHostTeacher(hostSessionId, courseTeacher, '1');
+      assert.equal(
+        isHost,
+        true,
+        'Course/batch teacher must be recognized as Host Teacher even if sessionTeacherId defaulted to 1'
+      );
+
+      // Explicit Co-Teacher invite (?cohost=1 / isCoTeacher: true) must be recognized as Co-Teacher, not Host
+      const invitedCoTeacher = {
+        userId: '8899',
+        name: 'Co-Host Faculty',
+        role: 'teacher' as const,
+        sessionId: hostSessionId,
+        isCoTeacher: true,
+        isCoHostInvite: true,
+      };
+      assert.equal(
+        AudioStageController.isExplicitCoTeacher(invitedCoTeacher),
+        true,
+        'Teacher with isCoTeacher/isCoHostInvite flag must be recognized as explicit Co-Teacher'
+      );
+      const isCoTeacherHost = await AudioStageController.isHostTeacher(
+        hostSessionId,
+        invitedCoTeacher,
+        '5333'
+      );
+      assert.equal(
+        isCoTeacherHost,
+        false,
+        'Explicit Co-Teacher must not override the Host Teacher'
+      );
     });
   });
 });
