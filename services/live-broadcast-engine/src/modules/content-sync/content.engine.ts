@@ -58,7 +58,7 @@ export class ContentEngine {
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
-        if (parsed.activeLessonId === 'les_ohms_law') {
+        if (parsed.activeLessonId === 'les_ohms_law' || parsed.activeLessonId === '1') {
           parsed.activeLessonId = '';
         }
         if (parsed.activeTopicId === 'top_resistance') {
@@ -67,6 +67,23 @@ export class ContentEngine {
         state = { ...state, ...parsed };
       } catch {
         // Fallback
+      }
+    }
+
+    if (!state.activeLessonId) {
+      try {
+        const ctxRaw = await redis.get(`room:${sessionId}:context`);
+        if (ctxRaw) {
+          const ctx = JSON.parse(ctxRaw);
+          if (ctx.lessonId && ctx.lessonId !== 'les_ohms_law' && ctx.lessonId !== '1') {
+            state.activeLessonId = String(ctx.lessonId);
+          }
+          if (!state.activeTopicId && ctx.topicId && ctx.topicId !== 'top_resistance') {
+            state.activeTopicId = String(ctx.topicId);
+          }
+        }
+      } catch {
+        // Ignore context fallback errors
       }
     }
 
@@ -129,6 +146,28 @@ export class ContentEngine {
     };
 
     await redis.set(this.stateKey(sessionId), JSON.stringify(updated));
+
+    try {
+      const snapRaw = await redis.get(`room:${sessionId}:snapshot`);
+      if (snapRaw) {
+        const snap = JSON.parse(snapRaw);
+        if (snap.sessionContext) {
+          if (activeLessonId) snap.sessionContext.lessonId = activeLessonId;
+          snap.sessionContext.topicId = activeTopicId ?? '';
+        }
+        snap.contentState = updated;
+        await redis.set(`room:${sessionId}:snapshot`, JSON.stringify(snap));
+      }
+      const ctxRaw = await redis.get(`room:${sessionId}:context`);
+      if (ctxRaw) {
+        const ctx = JSON.parse(ctxRaw);
+        if (activeLessonId) ctx.lessonId = activeLessonId;
+        ctx.topicId = activeTopicId ?? '';
+        await redis.set(`room:${sessionId}:context`, JSON.stringify(ctx));
+      }
+    } catch {
+      // Ignore snapshot sync errors
+    }
 
     return await RoomManager.appendPacket(sessionId, 'NAV_STATE_CHANGE', {
       activeLessonId,

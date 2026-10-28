@@ -52,6 +52,10 @@ export default function LearningSessionLayout() {
         sessionId: '',
         token: '',
         isRestart: false,
+        isRejoin: false,
+        hasExplicitLanguageId: false,
+        urlLessonId: '',
+        urlTopicId: '',
         isMobileViewport: false,
         branchId: 0,
         batchId: 0,
@@ -240,11 +244,12 @@ export default function LearningSessionLayout() {
       '';
     const stId = rawStId.replace(/^student_/, '');
 
-    const rawLangCandidate =
+    const explicitLangParam =
       urlParams.get('languageId') ||
       urlParams.get('language_id') ||
       claims.languageId ||
-      1;
+      '';
+    const rawLangCandidate = explicitLangParam || 1;
     const rawLang: number = (() => {
       if (!isNaN(Number(rawLangCandidate)) && Number(rawLangCandidate) > 0) {
         return Math.floor(Number(rawLangCandidate));
@@ -283,6 +288,10 @@ export default function LearningSessionLayout() {
       sessionId: resolvedSessionId,
       token: tok,
       isRestart: isRestartFromPage,
+      isRejoin: isRejoinFromPage || Boolean(!urlToken && storedToken),
+      hasExplicitLanguageId: Boolean(explicitLangParam),
+      urlLessonId: urlParams.get('lessonId') || '',
+      urlTopicId: urlParams.get('topicId') || '',
       isMobileViewport: window.innerWidth < 768,
       branchId: Number(urlParams.get('branchId') || claims.branchId) || 0,
       batchId: Number(urlParams.get('batchId') || claims.batchId) || 0,
@@ -314,6 +323,15 @@ export default function LearningSessionLayout() {
   const [sessionMetadata, setSessionMetadata] = useState<any>(null);
   const [curriculum, setCurriculum] = useState<any>(null);
   const [lessonContent, setLessonContent] = useState<any>(null);
+  const [isContentLoading, setIsContentLoading] = useState<boolean>(true);
+  const [contentLoadError, setContentLoadError] = useState<string | null>(null);
+  const [contentRetryCounter, setContentRetryCounter] = useState<number>(0);
+  const activeTokenRef = useRef<string>(initialParams.token);
+  const lastFetchedLessonKeyRef = useRef<string>('');
+  const pendingTeacherInitialNavRef = useRef<{ lessonId: string; topicId: string } | null>(null);
+  if (token && activeTokenRef.current !== token) {
+    activeTokenRef.current = token;
+  }
   const [livekitToken, setLivekitToken] = useState<string>('');
   const [livekitUrl, setLivekitUrl] = useState<string | undefined>(undefined);
   const [canPublishAudio, setCanPublishAudio] = useState<boolean>(false);
@@ -404,6 +422,10 @@ export default function LearningSessionLayout() {
   const {
     isConnected,
     isReconnecting,
+    reconnectAttempt,
+    hasConnectedOnce,
+    isSimulatedDisconnect,
+    isBrowserOnline,
     hasLeftSession,
     sessionEndedInfo,
     mode,
@@ -513,14 +535,21 @@ export default function LearningSessionLayout() {
     let isMounted = true;
 
     const loadSessionData = async () => {
-      if (!sessionId || !token || token.startsWith('DEV_TOKEN_')) {
+      const currentAuthToken = activeTokenRef.current || token;
+      if (!sessionId || !currentAuthToken || currentAuthToken.startsWith('DEV_TOKEN_')) {
         if (isMounted) {
           setIsAuthVerifying(false);
+          setIsContentLoading(false);
           setAuthError(
             'Direct access to Zerix Live Broadcast Studio is restricted. Please sign in to Zerix Academy and launch or join your scheduled live classroom session.'
           );
         }
         return;
+      }
+
+      if (isMounted) {
+        setIsContentLoading(true);
+        setContentLoadError(null);
       }
 
       try {
@@ -535,7 +564,7 @@ export default function LearningSessionLayout() {
           role,
           teacherId,
           studentId,
-          token,
+          token: currentAuthToken,
           deviceId: clientDeviceId,
           cohost: isCoHostUrlParam,
           restart: initialParams.isRestart,
@@ -543,10 +572,11 @@ export default function LearningSessionLayout() {
 
         if (!isMounted) return;
 
-        let activeSessionToken = token;
+        let activeSessionToken = currentAuthToken;
         if (initData.token && typeof initData.token === 'string') {
           activeSessionToken = initData.token;
-          if (activeSessionToken !== token) {
+          activeTokenRef.current = activeSessionToken;
+          if (!token) {
             setToken(activeSessionToken);
           }
         }
@@ -577,19 +607,29 @@ export default function LearningSessionLayout() {
           setCoHostInviteToken(initData.coHostInviteToken);
         }
 
+        let effectiveRole: 'teacher' | 'student' = role;
         if (initData.user) {
           if (initData.user.role === 'teacher' || initData.user.role === 'student') {
-            setRole(initData.user.role);
+            effectiveRole = initData.user.role;
+            if (initData.user.role !== role) {
+              setRole(initData.user.role);
+            }
           }
           if (initData.user.name) {
             setVerifiedUserName(String(initData.user.name));
           }
           if (initData.user.role === 'teacher' && initData.user.userId) {
             const rawTId = String(initData.user.userId);
-            setTeacherId(rawTId.startsWith('teacher_') ? rawTId : `teacher_${rawTId}`);
+            const nextTId = rawTId.startsWith('teacher_') ? rawTId : `teacher_${rawTId}`;
+            if (nextTId !== teacherId) {
+              setTeacherId(nextTId);
+            }
             setIsVerifiedCoTeacher(Boolean(initData.user.isCoTeacher));
           } else if (initData.user.role === 'student' && initData.user.userId) {
-            setStudentId(String(initData.user.userId).replace(/^student_/, ''));
+            const nextSId = String(initData.user.userId).replace(/^student_/, '');
+            if (nextSId !== studentId) {
+              setStudentId(nextSId);
+            }
             setIsVerifiedCoTeacher(false);
           }
         }
@@ -599,7 +639,9 @@ export default function LearningSessionLayout() {
         if ((initData as any).videoState) {
           setInitialVideoState((initData as any).videoState);
         }
-        const resolvedLang = initialParams.languageId || ctx.languageId || 1;
+        const resolvedLang = initialParams.hasExplicitLanguageId
+          ? initialParams.languageId
+          : ctx.languageId || initialParams.languageId || 1;
         setLanguageId(resolvedLang);
         setIsAuthVerifying(false);
         setAuthError(null);
@@ -633,6 +675,7 @@ export default function LearningSessionLayout() {
           }
           setLivekitToken('');
           setCanPublishAudio(false);
+          setIsContentLoading(false);
           return;
         }
 
@@ -661,19 +704,34 @@ export default function LearningSessionLayout() {
           }
         }
 
-        const courseId = initialParams.courseId || ctx.courseId;
+        const courseId =
+          initialParams.courseId &&
+          String(initialParams.courseId) !== '0' &&
+          String(initialParams.courseId) !== '1'
+            ? initialParams.courseId
+            : ctx.courseId &&
+              String(ctx.courseId) !== '0' &&
+              String(ctx.courseId) !== '1'
+            ? ctx.courseId
+            : initialParams.courseId || ctx.courseId;
+
         let curData: any = null;
         if (courseId) {
-          try {
-            curData = await CurriculumClient.fetchCurriculum(
-              String(courseId),
-              resolvedLang,
-              activeSessionToken
-            );
-            if (isMounted) setCurriculum(curData);
-          } catch (curErr: any) {
-            console.warn('[LearningSessionLayout] Curriculum fetch warning:', curErr?.message);
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              curData = await CurriculumClient.fetchCurriculum(
+                String(courseId),
+                resolvedLang,
+                activeSessionToken
+              );
+              if (curData && Array.isArray(curData.chapters) && curData.chapters.length > 0) {
+                break;
+              }
+            } catch (curErr: any) {
+              console.warn('[LearningSessionLayout] Curriculum fetch warning:', curErr?.message);
+            }
           }
+          if (isMounted && curData) setCurriculum(curData);
         }
 
         const chaptersList = Array.isArray(curData?.chapters) ? curData.chapters : [];
@@ -681,11 +739,68 @@ export default function LearningSessionLayout() {
         const firstLesson = firstChapter?.lessons?.[0];
         const firstTopic = firstLesson?.topics?.[0];
 
+        const roomLiveLessonId =
+          initData.contentState?.activeLessonId &&
+          initData.contentState.activeLessonId !== '1' &&
+          initData.contentState.activeLessonId !== 'les_ohms_law'
+            ? String(initData.contentState.activeLessonId)
+            : ctx.lessonId &&
+              String(ctx.lessonId) !== '1' &&
+              String(ctx.lessonId) !== 'les_ohms_law'
+            ? String(ctx.lessonId)
+            : '';
+
+        const roomLiveTopicId =
+          initData.contentState?.activeTopicId &&
+          initData.contentState.activeTopicId !== 'top_resistance'
+            ? String(initData.contentState.activeTopicId)
+            : ctx.topicId && String(ctx.topicId) !== 'top_resistance'
+            ? String(ctx.topicId)
+            : '';
+
+        const paramLessonId =
+          initialParams.lessonId &&
+          String(initialParams.lessonId) !== '1' &&
+          String(initialParams.lessonId) !== 'les_ohms_law'
+            ? String(initialParams.lessonId)
+            : '';
+
+        const paramTopicId =
+          initialParams.topicId && String(initialParams.topicId) !== 'top_resistance'
+            ? String(initialParams.topicId)
+            : '';
+
+        const urlExplicitLessonId =
+          !initialParams.isRejoin &&
+          initialParams.urlLessonId &&
+          String(initialParams.urlLessonId) !== '1'
+            ? String(initialParams.urlLessonId)
+            : '';
+
+        const urlExplicitTopicId =
+          !initialParams.isRejoin && initialParams.urlTopicId
+            ? String(initialParams.urlTopicId)
+            : '';
+
         let targetTopicId = String(
-          initialParams.topicId || ctx.topicId || firstTopic?.topicId || ''
+          effectiveRole === 'teacher' && urlExplicitTopicId
+            ? urlExplicitTopicId
+            : roomLiveTopicId ||
+              paramTopicId ||
+              firstTopic?.topicId ||
+              ctx.topicId ||
+              initialParams.topicId ||
+              ''
         );
         let targetLessonId = String(
-          initialParams.lessonId || ctx.lessonId || firstLesson?.lessonId || ''
+          effectiveRole === 'teacher' && urlExplicitLessonId
+            ? urlExplicitLessonId
+            : roomLiveLessonId ||
+              paramLessonId ||
+              firstLesson?.lessonId ||
+              ctx.lessonId ||
+              initialParams.lessonId ||
+              ''
         );
 
         // Verify targetTopicId and targetLessonId exist in curriculum if curriculum has chapters
@@ -723,32 +838,74 @@ export default function LearningSessionLayout() {
             targetLessonId = String(firstLesson.lessonId);
           }
           if (matchedLesson) {
+            const lessonHasDirectContent = Boolean(
+              matchedLesson.hasContent ||
+                (matchedLesson.description && String(matchedLesson.description).trim() !== '')
+            );
             const topicExists = (matchedLesson.topics || []).some(
               (t: any) => String(t.topicId) === targetTopicId
             );
-            if (!topicExists && matchedLesson.topics?.[0]?.topicId) {
-              targetTopicId = String(matchedLesson.topics[0].topicId);
+            if (!topicExists) {
+              if (matchedLesson.topics?.[0]?.topicId) {
+                targetTopicId = String(matchedLesson.topics[0].topicId);
+              } else if (lessonHasDirectContent) {
+                targetTopicId = '';
+              }
             }
           }
         }
 
         if (isMounted) {
           if (targetLessonId) setActiveLessonId(targetLessonId);
-          if (targetTopicId) setActiveTopicId(targetTopicId);
+          setActiveTopicId(targetTopicId);
+          if (
+            effectiveRole === 'teacher' &&
+            targetLessonId &&
+            targetLessonId !== '1' &&
+            (targetLessonId !== roomLiveLessonId || targetTopicId !== roomLiveTopicId)
+          ) {
+            pendingTeacherInitialNavRef.current = {
+              lessonId: targetLessonId,
+              topicId: targetTopicId,
+            };
+          }
         }
 
-        if (targetLessonId) {
-          try {
-            const contentData = await CurriculumClient.fetchLessonContent(
-              targetLessonId,
-              resolvedLang,
-              undefined,
-              activeSessionToken
-            );
-            if (isMounted) setLessonContent(contentData);
-          } catch (contentErr: any) {
-            console.warn('[LearningSessionLayout] Lesson content fetch warning:', contentErr?.message);
+        if (targetLessonId && targetLessonId !== 'les_ohms_law') {
+          const fetchKey = `${targetLessonId}::${resolvedLang}`;
+          lastFetchedLessonKeyRef.current = fetchKey;
+          let contentData: any = null;
+          let lastContentErr: any = null;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              contentData = await CurriculumClient.fetchLessonContent(
+                targetLessonId,
+                resolvedLang,
+                undefined,
+                activeSessionToken
+              );
+              if (contentData) break;
+            } catch (contentErr: any) {
+              lastContentErr = contentErr;
+              console.warn('[LearningSessionLayout] Lesson content fetch warning:', contentErr?.message);
+            }
           }
+          if (isMounted) {
+            if (contentData) {
+              setLessonContent(contentData);
+              setContentLoadError(null);
+            } else {
+              lastFetchedLessonKeyRef.current = '';
+              if (lastContentErr) {
+                setContentLoadError(
+                  'Unable to load lesson content from server. Please click Retry.'
+                );
+              }
+            }
+            setIsContentLoading(false);
+          }
+        } else if (isMounted) {
+          setIsContentLoading(false);
         }
       } catch (err: any) {
         console.error('[LearningSessionLayout] Init error:', err.message);
@@ -758,6 +915,7 @@ export default function LearningSessionLayout() {
             window.sessionStorage.removeItem('broadcast_rejoin_session_id');
           }
           setIsAuthVerifying(false);
+          setIsContentLoading(false);
           setAuthError(
             err?.message ||
               'Invalid or expired classroom credentials. Please launch the live class from Zerix Academy.'
@@ -772,11 +930,8 @@ export default function LearningSessionLayout() {
     };
   }, [
     sessionId,
-    role,
-    teacherId,
-    studentId,
-    token,
     initialParams,
+    contentRetryCounter,
     setActiveLessonId,
     setActiveTopicId,
     setAttendanceList,
@@ -787,27 +942,69 @@ export default function LearningSessionLayout() {
     clientDeviceId,
   ]);
 
+  // Broadcast teacher's resolved initial lesson/topic once socket connects so Student and Redis ContentEngine stay in sync
+  useEffect(() => {
+    if (isConnected && role === 'teacher' && pendingTeacherInitialNavRef.current) {
+      const { lessonId, topicId } = pendingTeacherInitialNavRef.current;
+      pendingTeacherInitialNavRef.current = null;
+      if (lessonId && lessonId !== '1' && lessonId !== 'les_ohms_law') {
+        broadcastNavSync(lessonId, topicId);
+      }
+    }
+  }, [isConnected, role, broadcastNavSync]);
+
   // Reload lesson content when activeLessonId or languageId changes
   useEffect(() => {
     let isMounted = true;
+    const currentAuthToken = activeTokenRef.current || token;
     if (
       activeLessonId &&
       activeLessonId !== 'les_ohms_law' &&
-      token &&
-      !token.startsWith('DEV_TOKEN_')
+      activeLessonId !== '1' &&
+      currentAuthToken &&
+      !currentAuthToken.startsWith('DEV_TOKEN_')
     ) {
-      CurriculumClient.fetchLessonContent(activeLessonId, languageId, undefined, token)
+      const fetchKey = `${activeLessonId}::${languageId}`;
+      if (
+        lastFetchedLessonKeyRef.current === fetchKey &&
+        lessonContent &&
+        String(lessonContent.lessonId || activeLessonId) === String(activeLessonId)
+      ) {
+        return;
+      }
+      lastFetchedLessonKeyRef.current = fetchKey;
+      setIsContentLoading(true);
+      setContentLoadError(null);
+      CurriculumClient.fetchLessonContent(
+        activeLessonId,
+        languageId,
+        undefined,
+        currentAuthToken
+      )
         .then((data) => {
-          if (isMounted && data) {
-            setLessonContent(data);
+          if (isMounted) {
+            if (data) {
+              setLessonContent(data);
+              setContentLoadError(null);
+            } else {
+              lastFetchedLessonKeyRef.current = '';
+            }
+            setIsContentLoading(false);
           }
         })
-        .catch((err) => console.error('[Content] Error loading lesson content:', err));
+        .catch((err) => {
+          console.error('[Content] Error loading lesson content:', err);
+          if (isMounted) {
+            lastFetchedLessonKeyRef.current = '';
+            setIsContentLoading(false);
+            setContentLoadError('Unable to load lesson content. Please try again.');
+          }
+        });
     }
     return () => {
       isMounted = false;
     };
-  }, [activeLessonId, languageId, token]);
+  }, [activeLessonId, languageId, token, contentRetryCounter]);
 
   // Ensure activeLessonId and activeTopicId match a valid lesson/topic when curriculum loads or socket updates activeLessonId
   useEffect(() => {
@@ -1209,6 +1406,61 @@ export default function LearningSessionLayout() {
         filteredBlocks = rawBlocks.filter(
           (b: any) => String(b.topicId) === String(activeTopicId)
         );
+      }
+    }
+
+    // Fallback: if filteredBlocks is empty due to topic/lesson level mismatch, surface any available content in lessonContent
+    if (filteredBlocks.length === 0 && lessonContent) {
+      if (lessonBlocksArray.length > 0) {
+        filteredBlocks = lessonBlocksArray;
+      } else if (
+        lessonContent.contentHtml &&
+        String(lessonContent.contentHtml).trim() !== ''
+      ) {
+        filteredBlocks = [
+          {
+            blockId: 'blk_lesson_html',
+            type: 'concept',
+            content: '',
+            contentHtml: String(lessonContent.contentHtml),
+          },
+        ];
+      } else if (
+        lessonContent.description &&
+        String(lessonContent.description).trim() !== ''
+      ) {
+        filteredBlocks = [
+          {
+            blockId: 'blk_lesson_desc',
+            type: 'concept',
+            content: '',
+            contentHtml: String(lessonContent.description),
+          },
+        ];
+      } else if (rawBlocks.length > 0) {
+        filteredBlocks = rawBlocks;
+      } else {
+        const firstTopicWithContent = topicsArray.find(
+          (t: any) =>
+            (Array.isArray(t.blocks) && t.blocks.length > 0) ||
+            (t.contentHtml && String(t.contentHtml).trim() !== '')
+        );
+        if (firstTopicWithContent) {
+          if (Array.isArray(firstTopicWithContent.blocks) && firstTopicWithContent.blocks.length > 0) {
+            filteredBlocks = firstTopicWithContent.blocks;
+          } else if (firstTopicWithContent.contentHtml) {
+            filteredBlocks = [
+              {
+                blockId: `blk_topic_${firstTopicWithContent.topicId || '0'}`,
+                type: 'concept',
+                content: '',
+                contentHtml: String(firstTopicWithContent.contentHtml),
+                topicId: String(firstTopicWithContent.topicId || ''),
+                topicTitle: firstTopicWithContent.title,
+              },
+            ];
+          }
+        }
       }
     }
 
@@ -2231,61 +2483,119 @@ export default function LearningSessionLayout() {
             />
           ) : (
             /* Content Mode (800px Virtual Page with Formula A Scaling & Block-ID Anchoring) */
-            <VirtualContentStage
-              role={role}
-              currentUserId={currentUserId}
-              isHostTeacher={isHostTeacher}
-              canEditContent={role === 'teacher' || canEditWhiteboard}
-              lessonTitle={lessonTitle}
-              topicTitle={topicTitle}
-              blocks={normalizedBlocks}
-              contentState={{
-                chapterId: activeChapterId,
-                lessonId: activeLessonId,
-                topicId: activeTopicId,
-                scrollAnchor: {
-                  blockId: activeBlockId,
-                  offsetRatio: blockOffsetRatio,
-                  authorId: scrollAuthorId,
-                  updatedAt: scrollUpdatedAt,
-                },
-                penStrokes: penStrokes || [],
-              }}
-              laserPointer={{
-                blockId: laserPointer?.blockId,
-                x: laserPointer?.x || 0,
-                y: laserPointer?.y || 0,
-                active: Boolean(laserPointer?.active),
-                isDragging: Boolean(laserPointer?.isDragging),
-                tool: laserPointer?.tool || 'cursor',
-                sheetXPct: laserPointer?.sheetXPct,
-                sheetYPct: laserPointer?.sheetYPct,
-                sheetYPx: laserPointer?.sheetYPx,
-                tokenId: laserPointer?.tokenId,
-                rx: laserPointer?.rx,
-                ry: laserPointer?.ry,
-                regionId: laserPointer?.regionId,
-                regionRx: laserPointer?.regionRx,
-                regionRy: laserPointer?.regionRy,
-                authorId: laserPointer?.authorId,
-                authorName: laserPointer?.authorName,
-                updatedAt: laserPointer?.updatedAt,
-              }}
-              isToolboxVisible={isContentToolboxVisible}
-              followTeacher={followTeacher}
-              onToggleFollow={setFollowTeacher}
-              onScrollSync={broadcastScrollSync}
-              onAddStroke={(stroke) => broadcastStroke(stroke)}
-              onDeleteStroke={(strokeId) =>
-                broadcastDeleteStroke(activeLessonId, strokeId)
-              }
-              onClearStrokes={() => broadcastClearStrokes(activeLessonId)}
-              onLaserMove={broadcastLaser}
-              onSendBlockToWhiteboard={(block) => {
-                setIsSidebarCollapsed(true);
-                sendContentBlockToWhiteboard(block);
-              }}
-            />
+            <>
+              {isContentLoading && normalizedBlocks.length === 0 && (
+                <div
+                  data-testid="content-api-loading-indicator"
+                  className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-50/90 backdrop-blur-xs p-6 text-center"
+                >
+                  <div className="w-full max-w-md rounded-2xl bg-white border border-slate-200 shadow-lg p-6 space-y-4">
+                    <div className="mx-auto w-11 h-11 rounded-full border-3 border-sky-100 border-t-[#12a3ff] animate-spin" />
+                    <div className="space-y-1">
+                      <h3 className="text-sm sm:text-base font-bold text-slate-900">
+                        Loading Lesson Content...
+                      </h3>
+                      <p className="text-xs text-slate-500">
+                        Fetching synchronized curriculum &amp; topic materials from Zerix Academy API
+                      </p>
+                    </div>
+                    <div className="space-y-2 pt-1 text-left">
+                      <div className="h-3 w-3/4 rounded-full bg-slate-100 animate-pulse" />
+                      <div className="h-3 w-full rounded-full bg-slate-100 animate-pulse" />
+                      <div className="h-3 w-5/6 rounded-full bg-slate-100 animate-pulse" />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {isContentLoading && normalizedBlocks.length > 0 && (
+                <div
+                  data-testid="content-api-loading-indicator"
+                  className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white/95 border border-sky-200 shadow-md text-xs font-semibold text-slate-700"
+                >
+                  <span className="w-3.5 h-3.5 rounded-full border-2 border-sky-200 border-t-[#12a3ff] animate-spin" />
+                  <span>Loading lesson content...</span>
+                </div>
+              )}
+
+              {!isContentLoading && normalizedBlocks.length === 0 && contentLoadError && (
+                <div
+                  data-testid="content-api-error-banner"
+                  className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-50/90 p-6 text-center"
+                >
+                  <div className="w-full max-w-md rounded-2xl bg-white border border-slate-200 shadow-lg p-6 space-y-3">
+                    <p className="text-sm font-semibold text-slate-800">{contentLoadError}</p>
+                    <button
+                      type="button"
+                      data-testid="retry-content-load-btn"
+                      onClick={() => {
+                        lastFetchedLessonKeyRef.current = '';
+                        setContentRetryCounter((prev) => prev + 1);
+                      }}
+                      className="px-4 py-2 rounded-xl bg-[#12a3ff] hover:bg-[#0d8de0] text-white text-xs font-bold shadow-xs transition-colors cursor-pointer"
+                    >
+                      Retry Loading Content
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <VirtualContentStage
+                role={role}
+                currentUserId={currentUserId}
+                isHostTeacher={isHostTeacher}
+                canEditContent={role === 'teacher' || canEditWhiteboard}
+                lessonTitle={lessonTitle}
+                topicTitle={topicTitle}
+                blocks={normalizedBlocks}
+                contentState={{
+                  chapterId: activeChapterId,
+                  lessonId: activeLessonId,
+                  topicId: activeTopicId,
+                  scrollAnchor: {
+                    blockId: activeBlockId,
+                    offsetRatio: blockOffsetRatio,
+                    authorId: scrollAuthorId,
+                    updatedAt: scrollUpdatedAt,
+                  },
+                  penStrokes: penStrokes || [],
+                }}
+                laserPointer={{
+                  blockId: laserPointer?.blockId,
+                  x: laserPointer?.x || 0,
+                  y: laserPointer?.y || 0,
+                  active: Boolean(laserPointer?.active),
+                  isDragging: Boolean(laserPointer?.isDragging),
+                  tool: laserPointer?.tool || 'cursor',
+                  sheetXPct: laserPointer?.sheetXPct,
+                  sheetYPct: laserPointer?.sheetYPct,
+                  sheetYPx: laserPointer?.sheetYPx,
+                  tokenId: laserPointer?.tokenId,
+                  rx: laserPointer?.rx,
+                  ry: laserPointer?.ry,
+                  regionId: laserPointer?.regionId,
+                  regionRx: laserPointer?.regionRx,
+                  regionRy: laserPointer?.regionRy,
+                  authorId: laserPointer?.authorId,
+                  authorName: laserPointer?.authorName,
+                  updatedAt: laserPointer?.updatedAt,
+                }}
+                isToolboxVisible={isContentToolboxVisible}
+                followTeacher={followTeacher}
+                onToggleFollow={setFollowTeacher}
+                onScrollSync={broadcastScrollSync}
+                onAddStroke={(stroke) => broadcastStroke(stroke)}
+                onDeleteStroke={(strokeId) =>
+                  broadcastDeleteStroke(activeLessonId, strokeId)
+                }
+                onClearStrokes={() => broadcastClearStrokes(activeLessonId)}
+                onLaserMove={broadcastLaser}
+                onSendBlockToWhiteboard={(block) => {
+                  setIsSidebarCollapsed(true);
+                  sendContentBlockToWhiteboard(block);
+                }}
+              />
+            </>
           )}
         </main>
       </div>
@@ -2415,7 +2725,10 @@ export default function LearningSessionLayout() {
         isDisconnected={
           !hasLeftSession &&
           teacherStatus !== 'ENDED' &&
-          (!isConnected || isReconnecting)
+          (isSimulatedDisconnect ||
+            (hasConnectedOnce &&
+              !isConnected &&
+              (!isBrowserOnline || reconnectAttempt >= 4)))
         }
         teacherDisconnected={{
           active:

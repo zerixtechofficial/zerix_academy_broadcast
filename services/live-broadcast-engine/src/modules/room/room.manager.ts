@@ -58,16 +58,43 @@ export class RoomManager {
         if (isStaleMock || isLangChanged) {
           const freshCtx = await provider.getSessionContext(sessionId, languageId);
           if (freshCtx) {
-            parsed.sessionContext = freshCtx;
-            if (isStaleMock || !parsed.contentState?.activeLessonId || parsed.contentState.activeLessonId === 'les_ohms_law') {
+            const prevCtx = parsed.sessionContext;
+            parsed.sessionContext = {
+              ...freshCtx,
+              courseId:
+                freshCtx.courseId && freshCtx.courseId !== '1'
+                  ? freshCtx.courseId
+                  : prevCtx?.courseId || freshCtx.courseId,
+              chapterId:
+                freshCtx.chapterId && freshCtx.chapterId !== '1'
+                  ? freshCtx.chapterId
+                  : prevCtx?.chapterId || freshCtx.chapterId,
+              lessonId:
+                prevCtx?.lessonId && prevCtx.lessonId !== '1' && prevCtx.lessonId !== 'les_ohms_law'
+                  ? prevCtx.lessonId
+                  : freshCtx.lessonId,
+              topicId:
+                prevCtx?.topicId && prevCtx.topicId !== 'top_resistance'
+                  ? prevCtx.topicId
+                  : freshCtx.topicId,
+              teacherId:
+                prevCtx?.teacherId && prevCtx.teacherId !== '1'
+                  ? prevCtx.teacherId
+                  : freshCtx.teacherId,
+              teacherName:
+                prevCtx?.teacherName && prevCtx.teacherName !== 'Instructor'
+                  ? prevCtx.teacherName
+                  : freshCtx.teacherName,
+            };
+            if (isStaleMock || !parsed.contentState?.activeLessonId || parsed.contentState.activeLessonId === 'les_ohms_law' || parsed.contentState.activeLessonId === '1') {
               parsed.contentState = {
                 ...parsed.contentState,
-                activeLessonId: String(freshCtx.lessonId || ''),
-                activeTopicId: String(freshCtx.topicId || ''),
+                activeLessonId: String(parsed.sessionContext.lessonId || ''),
+                activeTopicId: String(parsed.sessionContext.topicId || ''),
               };
             }
             await redis.set(key, JSON.stringify(parsed));
-            await redis.set(`${this.keyPrefix(sessionId)}:context`, JSON.stringify(freshCtx));
+            await redis.set(`${this.keyPrefix(sessionId)}:context`, JSON.stringify(parsed.sessionContext));
           }
         }
         return parsed;

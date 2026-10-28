@@ -323,22 +323,73 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         user.userId = uniqueCoHostId;
         user.name = resolvedCoHostName;
         user.isCoTeacher = true;
+      }
+
+      const currentContent = await ContentEngine.getState(body.sessionId);
+      const effectiveCourseId =
+        user.courseId && String(user.courseId) !== '0' && String(user.courseId) !== '1'
+          ? String(user.courseId)
+          : room.sessionContext?.courseId &&
+            String(room.sessionContext.courseId) !== '0' &&
+            String(room.sessionContext.courseId) !== '1'
+          ? String(room.sessionContext.courseId)
+          : String(user.courseId || room.sessionContext?.courseId || '1');
+
+      const liveLessonId =
+        currentContent.activeLessonId &&
+        currentContent.activeLessonId !== '1' &&
+        currentContent.activeLessonId !== 'les_ohms_law'
+          ? String(currentContent.activeLessonId)
+          : room.sessionContext?.lessonId &&
+            room.sessionContext.lessonId !== '1' &&
+            room.sessionContext.lessonId !== 'les_ohms_law'
+          ? String(room.sessionContext.lessonId)
+          : '';
+
+      const userRealLessonId =
+        user.lessonId &&
+        String(user.lessonId) !== '1' &&
+        String(user.lessonId) !== 'les_ohms_law'
+          ? String(user.lessonId)
+          : '';
+
+      const effectiveLessonId =
+        user.role === 'teacher' && !isCoHostJoin && (!liveLessonId || body.restart === true)
+          ? userRealLessonId || liveLessonId
+          : liveLessonId || userRealLessonId;
+
+      const effectiveTopicId =
+        user.role === 'teacher' && !isCoHostJoin && (!liveLessonId || body.restart === true)
+          ? String(user.topicId || currentContent.activeTopicId || room.sessionContext?.topicId || '')
+          : String(currentContent.activeTopicId || room.sessionContext?.topicId || user.topicId || '');
+
+      if (isCoHostJoin && user.role === 'teacher') {
+        const existingCoTeachers = await AudioStageController.getInvitedTeachers(body.sessionId);
+        const existingEntry = existingCoTeachers.find(
+          (t) =>
+            t.teacherId === user.userId ||
+            String(t.teacherId).replace(/^teacher_/, '') ===
+              String(user.userId).replace(/^teacher_/, '')
+        );
+        const effectiveCanUseWb = existingEntry
+          ? Boolean(existingEntry.canUseWhiteboard)
+          : Boolean(verifiedClaims?.canUseWhiteboard);
 
         issuedSessionToken = JwtVerifier.sign({
-          sub: uniqueCoHostId,
-          userId: uniqueCoHostId,
-          name: resolvedCoHostName,
+          sub: user.userId,
+          userId: user.userId,
+          name: user.name,
           role: 'teacher',
           sessionId: body.sessionId,
-          courseId: Number(room.sessionContext?.courseId || user.courseId || 1),
+          courseId: Number(effectiveCourseId) || 1,
           batchId: room.sessionContext?.batchId || user.batchId || 1,
           branchId: Number(room.sessionContext?.branchId || user.branchId || 1),
           languageId: String(
             resolvedLanguageId || room.sessionContext?.languageId || '1'
           ),
           chapterId: String(room.sessionContext?.chapterId || user.chapterId || '1'),
-          lessonId: String(room.sessionContext?.lessonId || user.lessonId || '1'),
-          topicId: String(room.sessionContext?.topicId || user.topicId || ''),
+          lessonId: effectiveLessonId,
+          topicId: effectiveTopicId,
           isCoTeacher: true,
           isCoHostInvite: false,
           canUseWhiteboard: effectiveCanUseWb,
@@ -353,15 +404,15 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           name: user.name || (user.role === 'teacher' ? 'Instructor' : 'Student'),
           role: user.role,
           sessionId: body.sessionId,
-          courseId: Number(room.sessionContext?.courseId || user.courseId || 1),
+          courseId: Number(effectiveCourseId) || 1,
           batchId: room.sessionContext?.batchId || user.batchId || body.sessionId,
           branchId: Number(room.sessionContext?.branchId || user.branchId || 1),
           languageId: String(
             resolvedLanguageId || room.sessionContext?.languageId || user.languageId || '1'
           ),
           chapterId: String(room.sessionContext?.chapterId || user.chapterId || '1'),
-          lessonId: String(room.sessionContext?.lessonId || user.lessonId || '1'),
-          topicId: String(room.sessionContext?.topicId || user.topicId || ''),
+          lessonId: effectiveLessonId,
+          topicId: effectiveTopicId,
           isCoTeacher: false,
           isCoHostInvite: false,
           canUseWhiteboard:
@@ -369,6 +420,17 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
               ? user.canUseWhiteboard
               : user.role === 'teacher',
           exp: Math.floor(Date.now() / 1000) + 12 * 3600,
+        });
+      }
+
+      // Ensure room.sessionContext has the resolved courseId when available
+      if (effectiveCourseId && room.sessionContext && String(room.sessionContext.courseId || '') !== effectiveCourseId) {
+        room.sessionContext = {
+          ...room.sessionContext,
+          courseId: effectiveCourseId,
+        };
+        await RoomManager.updateSnapshot(body.sessionId, {
+          sessionContext: room.sessionContext,
         });
       }
 
@@ -390,27 +452,22 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         }
       }
 
-      // If the Host Teacher launches from a specific lesson/topic on /learn, sync the active lesson/topic
-      if (user.role === 'teacher' && !isCoHostJoin && (user.lessonId || user.topicId)) {
-        const currentContent = await ContentEngine.getState(body.sessionId);
-        const nextLessonId = String(user.lessonId || currentContent.activeLessonId || room.sessionContext?.lessonId || '');
-        const nextTopicId = String(user.topicId || currentContent.activeTopicId || room.sessionContext?.topicId || '');
-        if (
-          nextLessonId &&
-          (currentContent.activeLessonId !== nextLessonId ||
-            (nextTopicId && currentContent.activeTopicId !== nextTopicId))
-        ) {
-          await ContentEngine.updateNavigation(body.sessionId, nextLessonId, nextTopicId);
-          room.sessionContext = {
-            ...room.sessionContext,
-            chapterId: String(user.chapterId || room.sessionContext?.chapterId || ''),
-            lessonId: nextLessonId,
-            topicId: nextTopicId,
-          };
-          await RoomManager.updateSnapshot(body.sessionId, {
-            sessionContext: room.sessionContext,
-          });
-        }
+      // Sync active lesson/topic when resolved
+      if (
+        effectiveLessonId &&
+        (currentContent.activeLessonId !== effectiveLessonId ||
+          (effectiveTopicId && currentContent.activeTopicId !== effectiveTopicId))
+      ) {
+        await ContentEngine.updateNavigation(body.sessionId, effectiveLessonId, effectiveTopicId);
+        room.sessionContext = {
+          ...room.sessionContext,
+          chapterId: String(user.chapterId || room.sessionContext?.chapterId || ''),
+          lessonId: effectiveLessonId,
+          topicId: effectiveTopicId,
+        };
+        await RoomManager.updateSnapshot(body.sessionId, {
+          sessionContext: room.sessionContext,
+        });
       }
 
       const [elements, files, cam, cursor, contentState, audioStage, liveAttendance] =
@@ -425,14 +482,10 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         ]);
 
       if (!contentState.activeLessonId || contentState.activeLessonId === '1') {
-        contentState.activeLessonId = String(
-          user.lessonId || room.sessionContext?.lessonId || ''
-        );
+        contentState.activeLessonId = effectiveLessonId;
       }
-      if (!contentState.activeTopicId) {
-        contentState.activeTopicId = String(
-          user.topicId || room.sessionContext?.topicId || ''
-        );
+      if (!contentState.activeTopicId && effectiveTopicId) {
+        contentState.activeTopicId = effectiveTopicId;
       }
 
       // Generate LiveKit SFU Token (with per-device identity when deviceId is provided)

@@ -2328,4 +2328,107 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
       );
     });
   });
+
+  describe('20. Reliable Content Loading Across Teacher & Student, API Loading Indicator & Auto-Rejoin Without False Connection Interrupt Modal', () => {
+    it('prevents self-cancelling loadSessionData effect, eliminates placeholder "1" lessonId/courseId overwrites, and shows Content API loading indicator', () => {
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+      const broadcastRoutesSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../services/live-broadcast-engine/src/routes/broadcast.routes.ts'
+        ),
+        'utf8'
+      );
+      const engineIndexSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../services/live-broadcast-engine/src/index.ts'
+        ),
+        'utf8'
+      );
+      const contentEngineSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../services/live-broadcast-engine/src/modules/content-sync/content.engine.ts'
+        ),
+        'utf8'
+      );
+
+      // 1. loadSessionData effect must not depend on role/token/teacherId/studentId so minting a session token does not abort in-flight curriculum/lesson fetches
+      assert.equal(
+        layoutSource.includes('activeTokenRef.current = activeSessionToken;') &&
+          layoutSource.includes('const fetchKey = `${targetLessonId}::${resolvedLang}`;') &&
+          layoutSource.includes('lastFetchedLessonKeyRef.current = fetchKey;') &&
+          !layoutSource.includes('role,\n    teacherId,\n    studentId,\n    token,'),
+        true,
+        'LearningSessionLayout must not re-run and self-cancel loadSessionData when role/token/teacherId states update during initSession'
+      );
+
+      // 2. Backend and frontend ignore placeholder "1" lessonId/courseId when resolving active lesson and broadcast Teacher initial resolved lesson
+      assert.equal(
+        broadcastRoutesSource.includes("currentContent.activeLessonId !== '1'") &&
+          engineIndexSource.includes("currentContent.activeLessonId !== '1'") &&
+          contentEngineSource.includes("parsed.activeLessonId === '1'") &&
+          layoutSource.includes('pendingTeacherInitialNavRef.current') &&
+          layoutSource.includes('broadcastNavSync(lessonId, topicId);'),
+        true,
+        'Backend and frontend must ignore placeholder "1" lessonId values and synchronize Teacher resolved initial lesson to Student'
+      );
+
+      // 3. Content API loading indicator and retry UI are rendered when fetching content from API
+      assert.equal(
+        layoutSource.includes('data-testid="content-api-loading-indicator"') &&
+          layoutSource.includes('data-testid="content-api-error-banner"') &&
+          layoutSource.includes('data-testid="retry-content-load-btn"') &&
+          layoutSource.includes('setContentRetryCounter((prev) => prev + 1);'),
+        true,
+        'LearningSessionLayout must display a clear loading indicator while fetching content from the API and provide a retry mechanism on error'
+      );
+    });
+
+    it('suppresses Connection Interrupted modal during join/rejoin when connected to the internet and auto-reconnects without manual button click', () => {
+      const socketSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/hooks/useBroadcastSocket.ts'),
+        'utf8'
+      );
+      const reconnectModalSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/ReconnectModal.tsx'),
+        'utf8'
+      );
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+
+      // 1. Socket lifecycle effect only depends on [sessionId, hasValidAuthToken, updateSeqId] and updates socket.auth via ref so token refresh on rejoin never disconnects the socket
+      assert.equal(
+        socketSource.includes('}, [sessionId, hasValidAuthToken, updateSeqId]);') &&
+          socketSource.includes('const tokenRef = useRef<string>(validToken);') &&
+          socketSource.includes('hasConnectedOnce') &&
+          socketSource.includes('isBrowserOnline'),
+        true,
+        'useBroadcastSocket must keep the WebSocket connection stable across token updates and track hasConnectedOnce + isBrowserOnline'
+      );
+
+      // 2. ReconnectModal is hidden during initial join/rejoin when online and only shows when offline, simulated, or after repeated failures
+      assert.equal(
+        layoutSource.includes('isSimulatedDisconnect ||') &&
+          layoutSource.includes('(!isBrowserOnline || reconnectAttempt >= 4)'),
+        true,
+        'ReconnectModal must not appear on initial join/rejoin or brief online reconnects when internet is connected'
+      );
+
+      // 3. Both useBroadcastSocket and ReconnectModal automatically trigger reconnection when online without requiring manual button clicks
+      assert.equal(
+        socketSource.includes("window.addEventListener('online', handleOnline);") &&
+          socketSource.includes('socketRef.current.connect();') &&
+          reconnectModalSource.includes('onManualReconnect();'),
+        true,
+        'useBroadcastSocket and ReconnectModal must automatically reconnect when connected to internet without requiring manual button clicks'
+      );
+    });
+  });
 });

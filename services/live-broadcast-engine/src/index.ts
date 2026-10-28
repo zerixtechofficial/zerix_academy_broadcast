@@ -257,14 +257,32 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
           }
           if (isHost && !user.isCoTeacher && lastSeqId === 0 && (user.lessonId || user.topicId)) {
             const currentContent = await ContentEngine.getState(targetSessionId);
-            const nextLessonId = String(
-              user.lessonId || currentContent.activeLessonId || currentRoom.sessionContext?.lessonId || ''
-            );
-            const nextTopicId = String(
-              user.topicId || currentContent.activeTopicId || currentRoom.sessionContext?.topicId || ''
-            );
+            const hasLiveLesson =
+              Boolean(currentContent.activeLessonId) &&
+              currentContent.activeLessonId !== '1' &&
+              currentContent.activeLessonId !== 'les_ohms_law';
+            const userLessonValid =
+              Boolean(user.lessonId) &&
+              String(user.lessonId) !== '1' &&
+              String(user.lessonId) !== 'les_ohms_law';
+            const nextLessonId =
+              hasLiveLesson && !payload?.restart
+                ? String(currentContent.activeLessonId)
+                : userLessonValid
+                ? String(user.lessonId)
+                : String(currentContent.activeLessonId || currentRoom.sessionContext?.lessonId || '');
+            const nextTopicId =
+              hasLiveLesson && !payload?.restart
+                ? String(currentContent.activeTopicId || user.topicId || '')
+                : String(
+                    user.topicId ||
+                      currentContent.activeTopicId ||
+                      currentRoom.sessionContext?.topicId ||
+                      ''
+                  );
             if (
               nextLessonId &&
+              nextLessonId !== '1' &&
               (currentContent.activeLessonId !== nextLessonId ||
                 (nextTopicId && currentContent.activeTopicId !== nextTopicId))
             ) {

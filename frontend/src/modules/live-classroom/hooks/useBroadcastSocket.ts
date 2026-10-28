@@ -289,6 +289,61 @@ export function useBroadcastSocket({
   const [isConnected, setIsConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [hasConnectedOnce, setHasConnectedOnce] = useState(false);
+  const [isSimulatedDisconnect, setIsSimulatedDisconnect] = useState(false);
+  const [isBrowserOnline, setIsBrowserOnline] = useState<boolean>(() =>
+    typeof navigator === 'undefined' ? true : navigator.onLine !== false
+  );
+
+  const validToken =
+    token && token !== 'undefined' && token !== 'null' ? token.trim() : '';
+  const hasValidAuthToken = Boolean(validToken && !validToken.startsWith('DEV_TOKEN_'));
+
+  const tokenRef = useRef<string>(validToken);
+  const roleRef = useRef<'teacher' | 'student'>(role);
+  const studentIdRef = useRef<string | undefined>(studentId);
+  const teacherIdRef = useRef<string | undefined>(teacherId);
+
+  useEffect(() => {
+    tokenRef.current = validToken;
+    roleRef.current = role;
+    studentIdRef.current = studentId;
+    teacherIdRef.current = teacherId;
+    if (socketRef.current) {
+      const cleanTId = teacherId ? String(teacherId).replace(/^teacher_/, '') : '';
+      socketRef.current.auth = {
+        token: validToken,
+        role,
+        studentId,
+        teacherId: cleanTId ? `teacher_${cleanTId}` : '',
+        sessionId,
+        deviceId: clientDeviceIdRef.current,
+      };
+    }
+  }, [validToken, role, studentId, teacherId, sessionId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => {
+      setIsBrowserOnline(true);
+      if (
+        !intentionalLeaveRef.current &&
+        socketRef.current &&
+        !socketRef.current.connected
+      ) {
+        socketRef.current.connect();
+      }
+    };
+    const handleOffline = () => {
+      setIsBrowserOnline(false);
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   const [mode, setModeState] = useState<'CONTENT' | 'WHITEBOARD' | 'ROUGH_PAD'>('CONTENT');
   const [teacherStatus, setTeacherStatus] = useState<'LIVE' | 'TEACHER_RECONNECTING' | 'ENDED'>('LIVE');
@@ -369,42 +424,44 @@ export function useBroadcastSocket({
   useEffect(() => {
     seqIdRef.current = 0;
     setSeqId(0);
-    const validToken =
-      token && token !== 'undefined' && token !== 'null' ? token.trim() : '';
+    const currentToken = tokenRef.current;
 
     // Never connect socket without a valid classroom JWT token and sessionId
-    if (!validToken || validToken.startsWith('DEV_TOKEN_') || !sessionId) {
+    if (!hasValidAuthToken || !currentToken || !sessionId) {
       setIsConnected(false);
       setIsReconnecting(false);
       return;
     }
 
     const baseUrl = getApiBaseUrl();
-    const cleanTeacherId = teacherId ? String(teacherId).replace(/^teacher_/, '') : '';
+    const currentRole = roleRef.current;
+    const currentStudentId = studentIdRef.current;
+    const currentTeacherId = teacherIdRef.current;
+    const cleanTeacherId = currentTeacherId ? String(currentTeacherId).replace(/^teacher_/, '') : '';
     const clientDeviceId = clientDeviceIdRef.current;
 
     const socket = io(baseUrl, {
       parser: msgpackParser,
       transports: ['websocket', 'polling'],
       auth: {
-        token: validToken,
-        role,
-        studentId,
+        token: currentToken,
+        role: currentRole,
+        studentId: currentStudentId,
         teacherId: cleanTeacherId ? `teacher_${cleanTeacherId}` : '',
         sessionId,
         deviceId: clientDeviceId,
       },
       query: {
         sessionId,
-        role,
-        studentId: studentId || '',
+        role: currentRole,
+        studentId: currentStudentId || '',
         teacherId: cleanTeacherId ? `teacher_${cleanTeacherId}` : '',
         deviceId: clientDeviceId,
       },
       reconnection: true,
       reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
+      reconnectionDelay: 800,
+      reconnectionDelayMax: 3000,
       timeout: 20000,
     });
 
@@ -413,6 +470,8 @@ export function useBroadcastSocket({
     socket.on('connect', () => {
       const isReconnect = hasConnectedOnceRef.current;
       hasConnectedOnceRef.current = true;
+      setHasConnectedOnce(true);
+      setIsSimulatedDisconnect(false);
       setIsConnected(true);
       setIsReconnecting(false);
       setReconnectAttempt(0);
@@ -447,10 +506,9 @@ export function useBroadcastSocket({
         setIsReconnecting(false);
         return;
       }
+      setIsReconnecting(true);
       if (reason === 'io server disconnect') {
         socket.connect();
-      } else {
-        setIsReconnecting(true);
       }
     });
 
@@ -515,11 +573,17 @@ export function useBroadcastSocket({
       if (snap.contentState) {
         if (
           snap.contentState.activeLessonId &&
-          snap.contentState.activeLessonId !== 'les_ohms_law'
+          snap.contentState.activeLessonId !== 'les_ohms_law' &&
+          snap.contentState.activeLessonId !== '1'
         ) {
           setActiveLessonId(String(snap.contentState.activeLessonId));
-        }
-        if (
+          if (
+            snap.contentState.activeTopicId !== undefined &&
+            snap.contentState.activeTopicId !== 'top_resistance'
+          ) {
+            setActiveTopicId(String(snap.contentState.activeTopicId || ''));
+          }
+        } else if (
           snap.contentState.activeTopicId &&
           snap.contentState.activeTopicId !== 'top_resistance'
         ) {
@@ -750,8 +814,9 @@ export function useBroadcastSocket({
       });
       if (typeof window !== 'undefined' && sessionId) {
         try {
-          if (token) {
-            window.sessionStorage.setItem('broadcast_ended_token', token);
+          const activeTok = tokenRef.current;
+          if (activeTok) {
+            window.sessionStorage.setItem('broadcast_ended_token', activeTok);
             window.sessionStorage.setItem('broadcast_ended_session_id', sessionId);
           }
           window.sessionStorage.setItem('broadcast_session_ended', sessionId);
@@ -809,11 +874,14 @@ export function useBroadcastSocket({
       });
       setRaisedHands((prev) => prev.filter((h) => h.userId !== data.studentId));
 
-      const myUserId = role === 'teacher' ? teacherId || '' : `student_${studentId || ''}`;
+      const curRole = roleRef.current;
+      const curTeacherId = teacherIdRef.current;
+      const curStudentId = studentIdRef.current;
+      const myUserId = curRole === 'teacher' ? curTeacherId || '' : `student_${curStudentId || ''}`;
       const isTargetMe =
         data.studentId === myUserId ||
-        data.studentId === studentId ||
-        data.studentId === `student_${studentId}` ||
+        data.studentId === curStudentId ||
+        data.studentId === `student_${curStudentId}` ||
         `student_${data.studentId}` === myUserId;
 
       if (isTargetMe && !data.selfUnmuted) {
@@ -843,11 +911,13 @@ export function useBroadcastSocket({
           )
         );
       }
-      if (role === 'student' && data?.studentId) {
+      const curRole = roleRef.current;
+      const curStudentId = studentIdRef.current;
+      if (curRole === 'student' && data?.studentId) {
         const isTargetMe =
-          data.studentId === studentId ||
-          data.studentId === `student_${studentId}` ||
-          data.studentId.replace(/^student_/, '') === studentId;
+          data.studentId === curStudentId ||
+          data.studentId === `student_${curStudentId}` ||
+          data.studentId.replace(/^student_/, '') === curStudentId;
         if (isTargetMe) {
           // If a specific deviceId was muted, only revoke local mic on that device
           if (data.deviceId && data.deviceId !== clientDeviceId) {
@@ -871,8 +941,10 @@ export function useBroadcastSocket({
         if (Array.isArray(data?.multiDeviceStudents)) {
           setMultiDeviceStudents(data.multiDeviceStudents);
         }
-        if (role === 'student' && data?.allowMultiDevice && multiDeviceBlockedRef.current) {
-          const normMyId = `student_${String(studentId || '').replace(/^student_/, '')}`;
+        const curRole = roleRef.current;
+        const curStudentId = studentIdRef.current;
+        if (curRole === 'student' && data?.allowMultiDevice && multiDeviceBlockedRef.current) {
+          const normMyId = `student_${String(curStudentId || '').replace(/^student_/, '')}`;
           if (!data.studentId || data.studentId === normMyId) {
             setMultiDeviceBlocked(null);
             socket.emit('JOIN_ROOM', {
@@ -890,7 +962,7 @@ export function useBroadcastSocket({
       if (data?.allowStudentUnmute === false || data?.allowStudentUnmute === undefined) {
         setAllowStudentUnmute(false);
       }
-      if (role === 'student') {
+      if (roleRef.current === 'student') {
         onStudentMicRevokedRef.current?.();
       }
     });
@@ -937,7 +1009,7 @@ export function useBroadcastSocket({
 
     // Heartbeat ping interval for student (every 30 seconds)
     const heartbeatTimer = setInterval(() => {
-      if (socket.connected && role === 'student') {
+      if (socket.connected && roleRef.current === 'student') {
         socket.emit('HEARTBEAT', { deviceId: clientDeviceId });
         setLastHeartbeat(Date.now());
       }
@@ -947,7 +1019,38 @@ export function useBroadcastSocket({
       clearInterval(heartbeatTimer);
       socket.disconnect();
     };
-  }, [sessionId, role, token, studentId, teacherId, updateSeqId]);
+  }, [sessionId, hasValidAuthToken, updateSeqId]);
+
+  // Automatic background reconnection when browser is online and socket dropped unexpectedly
+  useEffect(() => {
+    if (
+      !hasConnectedOnce ||
+      isConnected ||
+      hasLeftSession ||
+      teacherStatus === 'ENDED' ||
+      isSimulatedDisconnect ||
+      !isBrowserOnline
+    ) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      if (
+        !intentionalLeaveRef.current &&
+        socketRef.current &&
+        !socketRef.current.connected
+      ) {
+        socketRef.current.connect();
+      }
+    }, 1800);
+    return () => window.clearInterval(timer);
+  }, [
+    hasConnectedOnce,
+    isConnected,
+    hasLeftSession,
+    teacherStatus,
+    isSimulatedDisconnect,
+    isBrowserOnline,
+  ]);
 
   // Client actions
   const changeMode = useCallback(
@@ -1403,10 +1506,12 @@ export function useBroadcastSocket({
 
   const simulateDisconnect = useCallback(() => {
     if (socketRef.current) {
+      setIsSimulatedDisconnect(true);
       setIsConnected(false);
       setIsReconnecting(true);
       socketRef.current.disconnect();
       window.setTimeout(() => {
+        setIsSimulatedDisconnect(false);
         socketRef.current?.connect();
       }, 2800);
     }
@@ -1415,6 +1520,7 @@ export function useBroadcastSocket({
   const manualReconnect = useCallback(() => {
     if (socketRef.current) {
       intentionalLeaveRef.current = false;
+      setIsSimulatedDisconnect(false);
       setHasLeftSession(false);
       socketRef.current.connect();
     }
@@ -1494,6 +1600,9 @@ export function useBroadcastSocket({
     isConnected,
     isReconnecting,
     reconnectAttempt,
+    hasConnectedOnce,
+    isSimulatedDisconnect,
+    isBrowserOnline,
     mode,
     teacherStatus,
     hasLeftSession,

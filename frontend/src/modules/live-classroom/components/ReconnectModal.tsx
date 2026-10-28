@@ -52,6 +52,25 @@ export const ReconnectModal: React.FC<ReconnectModalProps> = ({
     teacherDisconnected.graceEndsAt,
   ]);
 
+  useEffect(() => {
+    if (!isDisconnected) return;
+    const isOnline = typeof navigator === 'undefined' ? true : navigator.onLine !== false;
+    if (isOnline) {
+      const immediateTimer = window.setTimeout(() => {
+        onManualReconnect();
+      }, 900);
+      const retryInterval = window.setInterval(() => {
+        if (typeof navigator === 'undefined' || navigator.onLine !== false) {
+          onManualReconnect();
+        }
+      }, 2200);
+      return () => {
+        window.clearTimeout(immediateTimer);
+        window.clearInterval(retryInterval);
+      };
+    }
+  }, [isDisconnected, onManualReconnect]);
+
   if (!isDisconnected && !teacherDisconnected.active) {
     return null;
   }
