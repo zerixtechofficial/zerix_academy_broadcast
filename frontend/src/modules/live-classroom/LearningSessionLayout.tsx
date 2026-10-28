@@ -51,6 +51,7 @@ export default function LearningSessionLayout() {
         userName: '',
         sessionId: '',
         token: '',
+        isRestart: false,
         isMobileViewport: false,
         branchId: 0,
         batchId: 0,
@@ -68,6 +69,8 @@ export default function LearningSessionLayout() {
     }
     const urlParams = new URLSearchParams(window.location.search);
     const rawSessId = urlParams.get('sessionId') || '';
+    const isRejoinFromPage = urlParams.get('rejoin') === 'true';
+    const isRestartFromPage = urlParams.get('restart') === 'true';
 
     const isTokenMatchingSession = (
       jwtOrToken: string | null,
@@ -96,13 +99,62 @@ export default function LearningSessionLayout() {
     };
 
     const rawUrlToken = urlParams.get('token');
+
+    // Direct navigation to studio.zerixtech.com (/) without sessionId or token must never auto-verify a stored session
+    if (!rawSessId && !rawUrlToken) {
+      window.sessionStorage.removeItem('broadcast_rejoin_token');
+      window.sessionStorage.removeItem('broadcast_rejoin_session_id');
+      window.sessionStorage.removeItem('broadcast_rejoin_authorized');
+      window.sessionStorage.removeItem('broadcast_restart_authorized');
+    }
+
+    if (isRestartFromPage && rawSessId) {
+      window.sessionStorage.removeItem('broadcast_session_ended');
+    }
+
+    const endedSessionId = window.sessionStorage.getItem('broadcast_session_ended') || '';
+    if (endedSessionId && (!rawSessId || endedSessionId === rawSessId) && !isRestartFromPage) {
+      window.sessionStorage.removeItem('broadcast_rejoin_token');
+      window.sessionStorage.removeItem('broadcast_rejoin_session_id');
+      window.sessionStorage.removeItem('broadcast_rejoin_authorized');
+    }
+
     const urlToken = isTokenMatchingSession(rawUrlToken, rawSessId)
       ? rawUrlToken!.trim()
       : '';
 
-    const rawStoredToken = window.sessionStorage.getItem('broadcast_rejoin_token');
-    const storedSessionId = window.sessionStorage.getItem('broadcast_rejoin_session_id') || '';
-    const effectiveSessId = rawSessId || storedSessionId;
+    if (urlToken) {
+      window.sessionStorage.removeItem('broadcast_session_ended');
+    }
+
+    const rejoinAuthorizedSess =
+      window.sessionStorage.getItem('broadcast_rejoin_authorized') || '';
+    const restartAuthorizedSess =
+      window.sessionStorage.getItem('broadcast_restart_authorized') || '';
+
+    // Rejoining without a URL token is strictly allowed ONLY when navigated from the /rejoin page (or explicit restart)
+    const allowStoredTokenLookup = Boolean(
+      rawSessId &&
+        ((isRejoinFromPage && rejoinAuthorizedSess === rawSessId) ||
+          (isRestartFromPage && restartAuthorizedSess === rawSessId))
+    );
+
+    if (rejoinAuthorizedSess) {
+      window.sessionStorage.removeItem('broadcast_rejoin_authorized');
+    }
+    if (restartAuthorizedSess) {
+      window.sessionStorage.removeItem('broadcast_restart_authorized');
+    }
+
+    const rawStoredToken = allowStoredTokenLookup
+      ? window.sessionStorage.getItem('broadcast_rejoin_token') ||
+        (isRestartFromPage ? window.sessionStorage.getItem('broadcast_ended_token') : null)
+      : null;
+    const storedSessionId = allowStoredTokenLookup
+      ? window.sessionStorage.getItem('broadcast_rejoin_session_id') ||
+        (isRestartFromPage ? window.sessionStorage.getItem('broadcast_ended_session_id') || '' : '')
+      : '';
+    const effectiveSessId = rawSessId;
 
     if (urlToken && effectiveSessId) {
       window.sessionStorage.setItem('broadcast_rejoin_token', urlToken);
@@ -110,6 +162,7 @@ export default function LearningSessionLayout() {
     }
 
     const storedToken =
+      allowStoredTokenLookup &&
       (!storedSessionId || !effectiveSessId || storedSessionId === effectiveSessId) &&
       isTokenMatchingSession(rawStoredToken, effectiveSessId)
         ? rawStoredToken!.trim()
@@ -191,6 +244,7 @@ export default function LearningSessionLayout() {
       userName: claims.name ? String(claims.name) : '',
       sessionId: resolvedSessionId,
       token: tok,
+      isRestart: isRestartFromPage,
       isMobileViewport: window.innerWidth < 768,
       branchId: Number(urlParams.get('branchId') || claims.branchId) || 0,
       batchId: Number(urlParams.get('batchId') || claims.batchId) || 0,
@@ -254,15 +308,13 @@ export default function LearningSessionLayout() {
   const [isRecordingModalOpen, setIsRecordingModalOpen] = useState<boolean>(false);
   const [recordingModalMode, setRecordingModalMode] = useState<'start' | 'restart'>('start');
   const [recordingModalForm, setRecordingModalForm] = useState({
+    sessionId: sessionId || '',
+    courseId: String(initialParams.courseId || '1'),
     courseTitle: '',
+    languageId: String(initialParams.languageId || 'en'),
     subjectName: '',
     batchName: '',
-    chapterTitle: '',
-    lessonTitle: '',
-    topicTitle: '',
     teacherName: '',
-    academicYear: String(new Date().getFullYear()),
-    version: '1',
     recordVoice: true,
   });
 
@@ -393,6 +445,7 @@ export default function LearningSessionLayout() {
     token,
     teacherId,
     studentId,
+    restart: initialParams.isRestart,
     onStudentTokenRefresh: (newToken, autoActivate) => {
       setLivekitToken(newToken);
       setCanPublishAudio(true);
@@ -447,6 +500,7 @@ export default function LearningSessionLayout() {
           token,
           deviceId: clientDeviceId,
           cohost: isCoHostUrlParam,
+          restart: initialParams.isRestart,
         });
 
         if (!isMounted) return;
@@ -457,7 +511,10 @@ export default function LearningSessionLayout() {
           if (activeSessionToken !== token) {
             setToken(activeSessionToken);
           }
-          if (typeof window !== 'undefined') {
+          if (
+            typeof window !== 'undefined' &&
+            (initData.status !== 'ENDED' || initialParams.isRestart)
+          ) {
             window.sessionStorage.setItem('broadcast_rejoin_token', activeSessionToken);
           }
         }
@@ -491,6 +548,37 @@ export default function LearningSessionLayout() {
         setLanguageId(resolvedLang);
         setIsAuthVerifying(false);
         setAuthError(null);
+
+        // If the classroom session has already ended and this is NOT an explicit restart, clear session state and do not connect audio
+        if (initData.status === 'ENDED' && !initialParams.isRestart) {
+          if (typeof window !== 'undefined') {
+            if (activeSessionToken) {
+              window.sessionStorage.setItem('broadcast_ended_token', activeSessionToken);
+            }
+            if (sessionId) {
+              window.sessionStorage.setItem('broadcast_ended_session_id', sessionId);
+              window.sessionStorage.setItem('broadcast_session_ended', sessionId);
+              try {
+                window.localStorage.removeItem(`broadcast_rec_ctx_${sessionId}`);
+              } catch {
+                // Ignore localStorage cleanup errors
+              }
+            }
+            window.sessionStorage.removeItem('broadcast_rejoin_token');
+            window.sessionStorage.removeItem('broadcast_rejoin_session_id');
+            window.sessionStorage.removeItem('broadcast_rejoin_authorized');
+            window.sessionStorage.removeItem('broadcast_restart_authorized');
+            window.sessionStorage.removeItem('broadcast_session_left');
+            try {
+              window.history.replaceState({}, '', '/');
+            } catch {
+              // Ignore history state errors
+            }
+          }
+          setLivekitToken('');
+          setCanPublishAudio(false);
+          return;
+        }
 
         if (initData.livekit) {
           setLivekitToken(initData.livekit.token);
@@ -831,15 +919,15 @@ export default function LearningSessionLayout() {
     };
   }, [recoverAudioStage, role, broadcastTeacherMicState, notifyDeviceMicActive]);
 
-  // Auto-activate student microphone when host grants mic access
+  // Auto-activate student microphone once when host grants mic access
   useEffect(() => {
-    if (pendingMicAutoActivate && role === 'student') {
+    if (pendingMicAutoActivate && role === 'student' && hasStudentMicGrant) {
       setPendingMicAutoActivate(false);
       setMicrophoneActive(true).catch((err) => {
         console.warn('[LearningSessionLayout] Mic auto-activation notice:', err?.message || err);
       });
     }
-  }, [pendingMicAutoActivate, role, setMicrophoneActive]);
+  }, [pendingMicAutoActivate, role, hasStudentMicGrant, setMicrophoneActive]);
 
   // Student Raise Hand Handler:
   // First checks/requests browser microphone permission in real time.
@@ -862,8 +950,8 @@ export default function LearningSessionLayout() {
   }, [teacherStatus, hasLeftSession, isMicrophoneEnabled, setMicrophoneActive]);
 
   // Handle local microphone toggle for ALL user types (Host Teacher, Co-Host Teacher, Student):
-  // - Checks browser microphone permission in real time whenever unmuting
-  // - Students notify server per-device on mute/unmute so multi-device mics operate independently
+  // - Uses cached browser permission check inside setMicrophoneActive for instant (<5ms) toggle
+  // - Students with teacher mic access or allowStudentUnmute stay unmuted and sync per-device
   const handleToggleLocalMic = useCallback(async () => {
     unlockAudioPlayback();
     if (role === 'student') {
@@ -871,28 +959,19 @@ export default function LearningSessionLayout() {
         await setMicrophoneActive(false);
         studentSelfMute();
       } else {
-        const perm = await ensureMicrophonePermission();
-        if (!perm.granted) {
-          return;
-        }
-        if (allowStudentUnmute) {
+        const activated = await setMicrophoneActive(true);
+        if (activated && (allowStudentUnmute || hasStudentMicGrant)) {
           studentSelfUnmute();
         }
-        await setMicrophoneActive(true);
       }
     } else {
-      if (!isMicrophoneEnabled) {
-        const perm = await ensureMicrophonePermission();
-        if (!perm.granted) {
-          return;
-        }
-      }
       await toggleMicrophone();
     }
   }, [
     role,
     isMicrophoneEnabled,
     allowStudentUnmute,
+    hasStudentMicGrant,
     ensureMicrophonePermission,
     setMicrophoneActive,
     studentSelfMute,
@@ -1201,17 +1280,25 @@ export default function LearningSessionLayout() {
     (modeToOpen: 'start' | 'restart' = 'start') => {
       setRecordingModalMode(modeToOpen);
       setRecordingModalForm({
+        sessionId: sessionId || '',
+        courseId: String(
+          (sessionMetadata as any)?.courseId ||
+            (curriculum as any)?.courseId ||
+            initialParams.courseId ||
+            '1'
+        ),
         courseTitle: resolvedCourseTitle || 'Live Classroom Course',
+        languageId: String(
+          (sessionMetadata as any)?.languageId ||
+            (curriculum as any)?.languageId ||
+            initialParams.languageId ||
+            'en'
+        ),
         subjectName:
           (sessionMetadata as any)?.subjectName || (curriculum as any)?.subjectName || 'General',
         batchName:
           (sessionMetadata as any)?.batchName || (sessionMetadata as any)?.title || sessionId,
-        chapterTitle: chapterTitle || 'Chapter 1',
-        lessonTitle: lessonTitle || 'Live Lesson',
-        topicTitle: topicTitle || '',
         teacherName: currentTeacherDisplayName || 'Instructor',
-        academicYear: String(initialParams.academicYear || new Date().getFullYear()),
-        version: String(initialParams.version || 1),
         recordVoice: true,
       });
       setIsRecordingModalOpen(true);
@@ -1221,12 +1308,9 @@ export default function LearningSessionLayout() {
       sessionMetadata,
       curriculum,
       sessionId,
-      chapterTitle,
-      lessonTitle,
-      topicTitle,
       currentTeacherDisplayName,
-      initialParams.academicYear,
-      initialParams.version,
+      initialParams.courseId,
+      initialParams.languageId,
     ]
   );
 
@@ -1540,26 +1624,35 @@ export default function LearningSessionLayout() {
     }
   }, [teacherStatus, hasLeftSession, isMicrophoneEnabled, toggleMicrophone]);
 
-  // When class is ended by host/cohost, automatically redirect all participants to the dedicated Rejoin Page
+  // When class is ended by host/cohost, clear all active session state and clean URL so studio.zerixtech.com does not auto-verify/redirect
   useEffect(() => {
     if (teacherStatus === 'ENDED') {
-      if (token) {
-        sessionStorage.setItem('broadcast_rejoin_token', token);
-        sessionStorage.setItem('broadcast_rejoin_session_id', sessionId);
+      if (typeof window !== 'undefined') {
+        if (token) {
+          window.sessionStorage.setItem('broadcast_ended_token', token);
+        }
+        if (sessionId) {
+          window.sessionStorage.setItem('broadcast_ended_session_id', sessionId);
+          window.sessionStorage.setItem('broadcast_session_ended', sessionId);
+          try {
+            window.localStorage.removeItem(`broadcast_rec_ctx_${sessionId}`);
+          } catch {
+            // Ignore localStorage cleanup errors
+          }
+        }
+        window.sessionStorage.removeItem('broadcast_rejoin_token');
+        window.sessionStorage.removeItem('broadcast_rejoin_session_id');
+        window.sessionStorage.removeItem('broadcast_rejoin_authorized');
+        window.sessionStorage.removeItem('broadcast_restart_authorized');
+        window.sessionStorage.removeItem('broadcast_session_left');
+        try {
+          window.history.replaceState({}, '', '/');
+        } catch {
+          // Ignore history replace errors
+        }
       }
-      const queryParams = new URLSearchParams({
-        sessionId,
-        role,
-        ...(studentId ? { studentId } : {}),
-        ...(teacherId ? { teacherId } : {}),
-        ended: 'true',
-      });
-      const timer = setTimeout(() => {
-        window.location.href = `/rejoin?${queryParams.toString()}`;
-      }, 300);
-      return () => clearTimeout(timer);
     }
-  }, [teacherStatus, sessionId, role, studentId, teacherId, token]);
+  }, [teacherStatus, sessionId, token]);
 
   const handleLeaveMeeting = useCallback(() => {
     if (isMicrophoneEnabled) {
@@ -1591,7 +1684,7 @@ export default function LearningSessionLayout() {
     setLivekitToken('');
     setCanPublishAudio(false);
 
-    // If recording is active when ending class, flush final video chunk, save active taught lesson's Whiteboard JSON, and finalize session BEFORE ending room & redirecting
+    // If recording is active when ending class, flush final video chunk, save active taught lesson's Whiteboard JSON, and finalize session BEFORE ending room
     if (isRecording) {
       try {
         await Promise.race([
@@ -1604,22 +1697,34 @@ export default function LearningSessionLayout() {
     }
 
     endSession();
-
-    if (token) {
-      sessionStorage.setItem('broadcast_rejoin_token', token);
-      sessionStorage.setItem('broadcast_rejoin_session_id', sessionId);
+    if (sessionId && token) {
+      CurriculumClient.endSession(sessionId, token).catch(() => {});
     }
-    // Redirect host/cohost to room-based Rejoin Page with ended=true
-    const queryParams = new URLSearchParams({
-      sessionId,
-      role,
-      ...(studentId ? { studentId } : {}),
-      ...(teacherId ? { teacherId } : {}),
-      ended: 'true',
-    });
-    setTimeout(() => {
-      window.location.href = `/rejoin?${queryParams.toString()}`;
-    }, 200);
+
+    if (typeof window !== 'undefined') {
+      if (token) {
+        window.sessionStorage.setItem('broadcast_ended_token', token);
+      }
+      if (sessionId) {
+        window.sessionStorage.setItem('broadcast_ended_session_id', sessionId);
+        window.sessionStorage.setItem('broadcast_session_ended', sessionId);
+        try {
+          window.localStorage.removeItem(`broadcast_rec_ctx_${sessionId}`);
+        } catch {
+          // Ignore localStorage cleanup errors
+        }
+      }
+      window.sessionStorage.removeItem('broadcast_rejoin_token');
+      window.sessionStorage.removeItem('broadcast_rejoin_session_id');
+      window.sessionStorage.removeItem('broadcast_rejoin_authorized');
+      window.sessionStorage.removeItem('broadcast_restart_authorized');
+      window.sessionStorage.removeItem('broadcast_session_left');
+      try {
+        window.history.replaceState({}, '', '/');
+      } catch {
+        // Ignore history replace errors
+      }
+    }
   }, [
     isMicrophoneEnabled,
     toggleMicrophone,
@@ -1627,54 +1732,77 @@ export default function LearningSessionLayout() {
     stopAndFinalizeRecording,
     endSession,
     sessionId,
-    role,
-    studentId,
-    teacherId,
     token,
   ]);
 
-  const handleRejoinSession = useCallback(async () => {
-    rejoinSession();
+  const handleRestartBroadcast = useCallback(async () => {
+    if (role !== 'teacher') return;
+    const activeToken =
+      token ||
+      (typeof window !== 'undefined'
+        ? window.sessionStorage.getItem('broadcast_ended_token') || ''
+        : '');
+
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.removeItem('broadcast_session_ended');
+      window.sessionStorage.removeItem('broadcast_session_left');
+      if (activeToken) {
+        window.sessionStorage.setItem('broadcast_rejoin_token', activeToken);
+      }
+      if (sessionId) {
+        window.sessionStorage.setItem('broadcast_rejoin_session_id', sessionId);
+      }
+    }
+
     try {
       const initData = await CurriculumClient.initSession({
         sessionId,
-        role,
+        role: 'teacher',
         teacherId,
         studentId,
-        token,
+        token: activeToken,
         deviceId: clientDeviceId,
+        restart: true,
       });
       if ((initData as any).videoState) {
         setInitialVideoState((initData as any).videoState);
       }
       if (initData.livekit) {
         setLivekitToken(initData.livekit.token);
+        if (initData.livekit.url) {
+          setLivekitUrl(initData.livekit.url);
+        }
         setCanPublishAudio(initData.livekit.canPublishAudio);
       }
     } catch {
-      // Ignore init error on rejoin
+      // Ignore init error on restart; socket rejoinSession({ restart: true }) also restarts the room
     }
+
+    rejoinSession({ restart: true });
   }, [rejoinSession, sessionId, role, teacherId, studentId, token, clientDeviceId]);
 
   const academyPortalUrl =
-    process.env.NEXT_PUBLIC_ACADEMY_URL || 'https://academy.zerixtech.com';
+    process.env.NEXT_PUBLIC_ACADEMY_PORTAL_URL ||
+    process.env.NEXT_PUBLIC_ACADEMY_URL ||
+    process.env.NEXT_PUBLIC_APP_URL ||
+    'https://academy.zerixtech.com';
 
-  // Strict Classroom Authentication Gate: Block direct unauthenticated access to studio.zerixtech.com
+  // Strict Classroom Authentication Gate: Block direct unauthenticated access to studio.zerixtech.com (Light Theme)
   if (authError || (!isAuthVerifying && (!sessionId || !token))) {
     return (
       <div
         data-testid="studio-auth-required-screen"
-        className="fixed inset-0 flex items-center justify-center bg-gradient-to-br from-slate-900 via-slate-800 to-slate-950 text-slate-100 p-4"
+        className="fixed inset-0 flex items-center justify-center bg-gradient-to-br from-slate-50 via-white to-sky-50/60 text-slate-900 p-4"
       >
-        <div className="max-w-md w-full rounded-3xl bg-slate-800/95 border border-slate-700/80 shadow-2xl p-6 sm:p-8 text-center space-y-5">
-          <div className="mx-auto w-14 h-14 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400 text-2xl font-bold">
+        <div className="max-w-md w-full rounded-3xl bg-white border border-slate-200 shadow-xl shadow-slate-200/70 p-6 sm:p-8 text-center space-y-5">
+          <div className="mx-auto w-14 h-14 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600 text-2xl font-bold shadow-sm">
             🔒
           </div>
           <div className="space-y-2">
-            <h1 className="text-xl font-bold text-white">
+            <h1 className="text-xl font-bold text-slate-900">
               Classroom Authentication Required
             </h1>
-            <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+            <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
               {authError ||
                 'Direct access to Zerix Live Broadcast Studio is restricted. Both instructors and students must launch or join the live class from Zerix Academy with a valid classroom token.'}
             </p>
@@ -1682,7 +1810,7 @@ export default function LearningSessionLayout() {
           <div className="pt-2">
             <a
               href={academyPortalUrl}
-              className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white text-sm font-bold shadow-lg shadow-sky-500/20 transition-all"
+              className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white text-sm font-bold shadow-md shadow-sky-500/20 transition-all"
             >
               <span>Go to Zerix Academy</span>
             </a>
@@ -1696,11 +1824,11 @@ export default function LearningSessionLayout() {
     return (
       <div
         data-testid="studio-auth-verifying-screen"
-        className="fixed inset-0 flex items-center justify-center bg-slate-900 text-slate-100 p-4"
+        className="fixed inset-0 flex items-center justify-center bg-gradient-to-br from-slate-50 via-white to-sky-50/60 text-slate-900 p-4"
       >
-        <div className="text-center space-y-3">
-          <div className="mx-auto w-10 h-10 rounded-full border-2 border-sky-400 border-t-transparent animate-spin" />
-          <p className="text-sm font-semibold text-slate-200">
+        <div className="rounded-3xl bg-white border border-slate-200 shadow-lg shadow-slate-200/60 px-8 py-6 text-center space-y-3">
+          <div className="mx-auto w-10 h-10 rounded-full border-2 border-sky-500 border-t-transparent animate-spin" />
+          <p className="text-sm font-semibold text-slate-700">
             Verifying classroom identity &amp; session token...
           </p>
         </div>
@@ -2080,7 +2208,7 @@ export default function LearningSessionLayout() {
       {multiDeviceBlocked && (
         <div
           data-testid="multi-device-blocked-modal"
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/75 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/30 backdrop-blur-sm"
         >
           <div className="w-full max-w-md rounded-2xl bg-white border border-slate-200 shadow-2xl p-6 text-center space-y-4">
             <div className="mx-auto w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 text-amber-600 flex items-center justify-center text-xl font-bold">
@@ -2112,15 +2240,15 @@ export default function LearningSessionLayout() {
         </div>
       )}
 
-      {/* 4. Intentional Leave / Broadcast Ended Fullscreen Overlay */}
+      {/* 4. Intentional Leave / Broadcast Ended Fullscreen Overlay (Light Theme) */}
       {(hasLeftSession || teacherStatus === 'ENDED') && (
         <div
           data-testid={
             teacherStatus === 'ENDED' ? 'session-ended-screen' : 'session-left-screen'
           }
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/75 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gradient-to-br from-slate-50/95 via-white/95 to-sky-50/90 backdrop-blur-md"
         >
-          <div className="w-full max-w-md rounded-2xl bg-white border border-slate-200 shadow-2xl p-6 text-center space-y-4">
+          <div className="w-full max-w-md rounded-2xl bg-white border border-slate-200 shadow-xl shadow-slate-200/70 p-6 text-center space-y-4">
             <div className="mx-auto w-12 h-12 rounded-2xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center text-xl font-bold">
               {teacherStatus === 'ENDED' ? '⏹' : '👋'}
             </div>
@@ -2140,30 +2268,53 @@ export default function LearningSessionLayout() {
                 ? sessionEndedInfo?.message ||
                   `The live class has been ended by ${
                     sessionEndedInfo?.endedBy || 'the teacher'
-                  }. All participants have been disconnected from the broadcast.`
+                  }. All participants have been disconnected and the active session has been cleared.`
                 : 'You have left the live classroom session. Your attendance and session progress have been saved.'}
             </p>
-            <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-2">
-              <button
-                type="button"
-                data-testid="rejoin-session-btn"
-                onClick={() => {
-                  if (token) {
-                    sessionStorage.setItem('broadcast_rejoin_token', token);
-                  }
-                  const queryParams = new URLSearchParams({
-                    sessionId,
-                    role,
-                    ...(studentId ? { studentId } : {}),
-                    ...(teacherId ? { teacherId } : {}),
-                    ...(teacherStatus === 'ENDED' ? { ended: 'true' } : { left: 'true' }),
-                  });
-                  window.location.href = `/rejoin?${queryParams.toString()}`;
-                }}
-                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-[#12a3ff] hover:bg-[#0d8de0] text-white text-xs sm:text-sm font-semibold shadow-sm transition-colors"
-              >
-                Go to Rejoin Page
-              </button>
+            <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-2.5">
+              {teacherStatus === 'ENDED' ? (
+                <>
+                  {role === 'teacher' && (
+                    <button
+                      type="button"
+                      data-testid="restart-broadcast-btn"
+                      onClick={handleRestartBroadcast}
+                      className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs sm:text-sm font-semibold shadow-sm transition-colors"
+                    >
+                      Restart Class Broadcast
+                    </button>
+                  )}
+                  <a
+                    href={academyPortalUrl}
+                    data-testid="return-to-academy-btn"
+                    className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-xs sm:text-sm font-semibold transition-colors"
+                  >
+                    Return to Zerix Academy
+                  </a>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  data-testid="rejoin-session-btn"
+                  onClick={() => {
+                    if (token) {
+                      sessionStorage.setItem('broadcast_rejoin_token', token);
+                      sessionStorage.setItem('broadcast_rejoin_session_id', sessionId);
+                    }
+                    const queryParams = new URLSearchParams({
+                      sessionId,
+                      role,
+                      ...(studentId ? { studentId } : {}),
+                      ...(teacherId ? { teacherId } : {}),
+                      left: 'true',
+                    });
+                    window.location.href = `/rejoin?${queryParams.toString()}`;
+                  }}
+                  className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-[#12a3ff] hover:bg-[#0d8de0] text-white text-xs sm:text-sm font-semibold shadow-sm transition-colors"
+                >
+                  Go to Rejoin Page
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -2191,29 +2342,29 @@ export default function LearningSessionLayout() {
         }}
       />
 
-      {/* 5. Pre-Start / Restart Session Recording Course & Intro Details Modal */}
+      {/* 5. Pre-Start / Restart Session Recording Course & Intro Details Modal (Light Theme) */}
       {isRecordingModalOpen && role === 'teacher' && isHostTeacher && (
         <div
           data-testid="start-recording-modal"
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/75 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/30 backdrop-blur-sm"
         >
           <div className="w-full max-w-lg rounded-2xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
-            <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between">
+            <div className="px-6 py-4 bg-gradient-to-r from-sky-50 via-white to-indigo-50 border-b border-slate-200 text-slate-900 flex items-center justify-between">
               <div>
-                <h2 className="text-base font-bold">
+                <h2 className="text-base font-bold text-slate-900">
                   {recordingModalMode === 'restart'
                     ? 'Restart Session Recording Details'
                     : 'Start Session Recording Details'}
                 </h2>
-                <p className="text-xs text-slate-300 mt-0.5">
-                  Review or edit course details shown on the starting video card. Switching lessons or chapters mid-session will keep recording in one continuous video.
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Session recording captures your screen and voice for the entire live session and saves directly by Session, Course, and Language.
                 </p>
               </div>
               <button
                 type="button"
                 data-testid="close-start-recording-modal-btn"
                 onClick={() => setIsRecordingModalOpen(false)}
-                className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+                className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
                 aria-label="Close recording setup modal"
               >
                 ✕
@@ -2221,6 +2372,39 @@ export default function LearningSessionLayout() {
             </div>
 
             <div className="p-6 space-y-3.5 max-h-[75vh] overflow-y-auto text-xs sm:text-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Session *
+                  </label>
+                  <input
+                    type="text"
+                    data-testid="recording-modal-session-input"
+                    value={recordingModalForm.sessionId}
+                    readOnly
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-slate-700 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Language *
+                  </label>
+                  <input
+                    type="text"
+                    data-testid="recording-modal-language-input"
+                    value={recordingModalForm.languageId}
+                    onChange={(e) =>
+                      setRecordingModalForm((prev) => ({
+                        ...prev,
+                        languageId: e.target.value,
+                      }))
+                    }
+                    placeholder="e.g. en, hi"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
+                  />
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -2242,45 +2426,6 @@ export default function LearningSessionLayout() {
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Subject Name
-                  </label>
-                  <input
-                    type="text"
-                    data-testid="recording-modal-subject-input"
-                    value={recordingModalForm.subjectName}
-                    onChange={(e) =>
-                      setRecordingModalForm((prev) => ({
-                        ...prev,
-                        subjectName: e.target.value,
-                      }))
-                    }
-                    placeholder="Enter subject name"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Batch / Classroom Name
-                  </label>
-                  <input
-                    type="text"
-                    data-testid="recording-modal-batch-input"
-                    value={recordingModalForm.batchName}
-                    onChange={(e) =>
-                      setRecordingModalForm((prev) => ({
-                        ...prev,
-                        batchName: e.target.value,
-                      }))
-                    }
-                    placeholder="Enter batch name"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
                     Instructor Name *
                   </label>
                   <input
@@ -2294,101 +2439,6 @@ export default function LearningSessionLayout() {
                       }))
                     }
                     placeholder="Enter instructor name"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Starting Chapter *
-                  </label>
-                  <input
-                    type="text"
-                    data-testid="recording-modal-chapter-input"
-                    value={recordingModalForm.chapterTitle}
-                    onChange={(e) =>
-                      setRecordingModalForm((prev) => ({
-                        ...prev,
-                        chapterTitle: e.target.value,
-                      }))
-                    }
-                    placeholder="Enter chapter title"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Starting Lesson *
-                  </label>
-                  <input
-                    type="text"
-                    data-testid="recording-modal-lesson-input"
-                    value={recordingModalForm.lessonTitle}
-                    onChange={(e) =>
-                      setRecordingModalForm((prev) => ({
-                        ...prev,
-                        lessonTitle: e.target.value,
-                      }))
-                    }
-                    placeholder="Enter lesson title"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="sm:col-span-1">
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Topic Title
-                  </label>
-                  <input
-                    type="text"
-                    data-testid="recording-modal-topic-input"
-                    value={recordingModalForm.topicTitle}
-                    onChange={(e) =>
-                      setRecordingModalForm((prev) => ({
-                        ...prev,
-                        topicTitle: e.target.value,
-                      }))
-                    }
-                    placeholder="Topic title"
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Academic Year
-                  </label>
-                  <input
-                    type="number"
-                    data-testid="recording-modal-year-input"
-                    value={recordingModalForm.academicYear}
-                    onChange={(e) =>
-                      setRecordingModalForm((prev) => ({
-                        ...prev,
-                        academicYear: e.target.value,
-                      }))
-                    }
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    VOD Version
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    data-testid="recording-modal-version-input"
-                    value={recordingModalForm.version}
-                    onChange={(e) =>
-                      setRecordingModalForm((prev) => ({
-                        ...prev,
-                        version: e.target.value,
-                      }))
-                    }
                     className="w-full px-3 py-2 rounded-xl border border-slate-300 text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#12a3ff]"
                   />
                 </div>
@@ -2426,7 +2476,7 @@ export default function LearningSessionLayout() {
                 type="button"
                 data-testid="confirm-start-recording-btn"
                 onClick={() => {
-                  if (!recordingModalForm.courseTitle && !recordingModalForm.lessonTitle) {
+                  if (!recordingModalForm.courseTitle) {
                     if (recordingModalMode === 'restart') {
                       restartRecording('display_media').catch(() => {});
                     } else {

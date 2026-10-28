@@ -11,6 +11,10 @@ export class AudioStageController {
     return `room:${sessionId}:active_student_mics`;
   }
 
+  public static grantedStudentMicsKey(sessionId: string): string {
+    return `room:${sessionId}:granted_student_mics`;
+  }
+
   public static allowStudentUnmuteKey(sessionId: string): string {
     return `room:${sessionId}:allow_student_unmute`;
   }
@@ -59,6 +63,49 @@ export class AudioStageController {
   }
 
   /**
+   * Checks whether a student has permission to unmute/publish audio:
+   * true if global `allowStudentUnmute` is enabled, OR if the student is in
+   * `active_student_mics` or `granted_student_mics` (granted by teacher in this session).
+   */
+  public static async hasStudentMicPermission(
+    sessionId: string,
+    studentId: string
+  ): Promise<boolean> {
+    const clean = String(studentId || '').trim();
+    if (!clean) return false;
+    const norm = this.normalizeStudentId(clean);
+    const rawClean = clean.replace(/^student_/, '');
+
+    const [
+      allowUnmute,
+      activeRaw,
+      activeNorm,
+      activeClean,
+      grantedRaw,
+      grantedNorm,
+      grantedClean,
+    ] = await Promise.all([
+      this.getAllowStudentUnmute(sessionId),
+      redis.sismember(this.activeMicsKey(sessionId), clean),
+      redis.sismember(this.activeMicsKey(sessionId), norm),
+      rawClean ? redis.sismember(this.activeMicsKey(sessionId), rawClean) : Promise.resolve(0),
+      redis.sismember(this.grantedStudentMicsKey(sessionId), clean),
+      redis.sismember(this.grantedStudentMicsKey(sessionId), norm),
+      rawClean ? redis.sismember(this.grantedStudentMicsKey(sessionId), rawClean) : Promise.resolve(0),
+    ]);
+
+    return (
+      allowUnmute ||
+      activeRaw === 1 ||
+      activeNorm === 1 ||
+      activeClean === 1 ||
+      grantedRaw === 1 ||
+      grantedNorm === 1 ||
+      grantedClean === 1
+    );
+  }
+
+  /**
    * Generates a LiveKit connection token for participant.
    * When deviceId is provided, mints a per-device LiveKit identity (`${userId}__${deviceId}`)
    * so multiple authorized devices for the same student never collide or disconnect each other in LiveKit SFU.
@@ -87,13 +134,7 @@ export class AudioStageController {
       canPublish = true;
     } else {
       // Check if student currently has mic permission or if students are allowed to unmute
-      const normId = this.normalizeStudentId(userId);
-      const [hasMicRaw, hasMicNorm, allowUnmute] = await Promise.all([
-        redis.sismember(this.activeMicsKey(sessionId), userId),
-        redis.sismember(this.activeMicsKey(sessionId), normId),
-        this.getAllowStudentUnmute(sessionId),
-      ]);
-      canPublish = hasMicRaw === 1 || hasMicNorm === 1 || allowUnmute;
+      canPublish = await this.hasStudentMicPermission(sessionId, userId);
     }
 
     const participantIdentity = this.buildParticipantIdentity(userId, deviceId);
@@ -535,8 +576,33 @@ export class AudioStageController {
     studentId: string,
     deviceId?: string
   ): Promise<{ studentId: string; deviceId?: string; anyDeviceMicActive: boolean }> {
+    const norm = this.normalizeStudentId(studentId);
+    const rawClean = String(studentId || '').replace(/^student_/, '');
+
     if (!deviceId) {
-      await this.muteStudent(sessionId, studentId);
+      // Student self-muted without specifying a deviceId: mark all registered devices for this student
+      // as micActive=false and remove from active speaking badges while preserving grantedStudentMicsKey
+      const key = this.studentDevicesKey(sessionId, studentId);
+      const rawMap = await redis.hgetall(key);
+      if (rawMap) {
+        for (const [devId, rawJson] of Object.entries(rawMap)) {
+          try {
+            const parsed = JSON.parse(rawJson);
+            await redis.hset(
+              key,
+              devId,
+              JSON.stringify({
+                ...parsed,
+                micActive: false,
+                lastSeenAt: Date.now(),
+              })
+            );
+          } catch {
+            // ignore
+          }
+        }
+      }
+      await redis.srem(this.activeMicsKey(sessionId), studentId, norm, rawClean);
       return { studentId, anyDeviceMicActive: false };
     }
 
@@ -548,8 +614,6 @@ export class AudioStageController {
     );
 
     if (!anyDeviceMicActive) {
-      const norm = this.normalizeStudentId(studentId);
-      const rawClean = String(studentId || '').replace(/^student_/, '');
       await redis.srem(this.activeMicsKey(sessionId), studentId, norm, rawClean);
     }
 
@@ -944,7 +1008,15 @@ export class AudioStageController {
       // ignore
     }
 
+    const normStudentId = this.normalizeStudentId(studentId);
+    const rawCleanStudentId = String(studentId || '').replace(/^student_/, '');
     await redis.sadd(micsKey, studentId);
+    await redis.sadd(
+      this.grantedStudentMicsKey(sessionId),
+      studentId,
+      normStudentId,
+      ...(rawCleanStudentId ? [rawCleanStudentId] : [])
+    );
     await this.lowerHand(sessionId, studentId);
 
     const activeDevices = await this.getStudentActiveDevices(sessionId, studentId);
@@ -1026,6 +1098,7 @@ export class AudioStageController {
     const norm = this.normalizeStudentId(studentId);
     const rawClean = String(studentId || '').replace(/^student_/, '');
     await redis.srem(micsKey, studentId, norm, rawClean);
+    await redis.srem(this.grantedStudentMicsKey(sessionId), studentId, norm, rawClean);
 
     const activeDevices = await this.getStudentActiveDevices(sessionId, studentId);
     for (const dev of activeDevices) {
@@ -1060,6 +1133,7 @@ export class AudioStageController {
     const mutedStudents = await redis.smembers(micsKey);
 
     await redis.del(micsKey);
+    await redis.del(this.grantedStudentMicsKey(sessionId));
     await redis.set(this.allowStudentUnmuteKey(sessionId), '0');
 
     for (const studentId of mutedStudents) {
@@ -1093,5 +1167,24 @@ export class AudioStageController {
     });
 
     return mutedStudents;
+  }
+
+  /**
+   * Clears transient session audio/hand/device state when a classroom session ends.
+   */
+  public static async clearSessionState(sessionId: string): Promise<void> {
+    try {
+      await Promise.all([
+        redis.del(this.activeMicsKey(sessionId)),
+        redis.del(this.grantedStudentMicsKey(sessionId)),
+        redis.del(this.allowStudentUnmuteKey(sessionId)),
+        redis.del(this.raisedHandsKey(sessionId)),
+        redis.del(this.raisedHandsMetaKey(sessionId)),
+        redis.del(this.teacherMicKey(sessionId)),
+        redis.del(this.multiDeviceStudentsKey(sessionId)),
+      ]);
+    } catch {
+      // Non-fatal cleanup
+    }
   }
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import '../styles/learning-content.css';
 import {
   ContentModeState,
@@ -839,6 +839,18 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         // ignore
       }
     }
+
+    // When Select/Cursor tool is active, never interrupt native text selection or trigger state updates during drag selection
+    if (activeTool === 'cursor') {
+      if (e.type === 'pointerdown' || e.buttons === 1) {
+        return;
+      }
+      const activeSel = typeof window !== 'undefined' ? window.getSelection() : null;
+      if (activeSel && !activeSel.isCollapsed && activeSel.toString().length > 0) {
+        return;
+      }
+    }
+
     const sheetEl = pageSheetRef.current;
     if (!sheetEl) return;
     const sheetRect = sheetEl.getBoundingClientRect();
@@ -871,13 +883,13 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         });
       }
       setTeacherLaserCoord({ x: sheetX, y: sheetY, active: true, tool: 'laser' });
-    } else if (activeTool === 'cursor') {
-      setTeacherLaserCoord({ x: sheetX, y: sheetY, active: true, tool: 'cursor' });
     } else if (activeTool === 'pen') {
       setTeacherLaserCoord({ x: sheetX, y: sheetY, active: true, tool: 'pen' });
     }
 
-    if (now - lastLaserEmitRef.current >= 30) {
+    // In cursor mode, throttle background hover sync to 120ms and avoid forced layout thrashing
+    const throttleMs = activeTool === 'cursor' ? 120 : 30;
+    if (now - lastLaserEmitRef.current >= throttleMs) {
       lastLaserEmitRef.current = now;
       let targetBlockEl =
         (document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-block-id]') as HTMLElement) ||
@@ -912,16 +924,24 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
       if (targetBlockEl && targetBlockId) {
         const bRect = targetBlockEl.getBoundingClientRect();
-        const cache = getFreshBlockLayout(targetBlockId) || measureBlockDomLayout(targetBlockId, targetBlockEl);
-        const captured = captureStrokePoint(e.clientX, e.clientY, cache, bRect);
-        blockRelX = captured.x;
-        blockRelY = captured.y;
-        tokenId = captured.tokenId;
-        rx = captured.rx;
-        ry = captured.ry;
-        regionId = captured.regionId;
-        regionRx = captured.regionRx;
-        regionRy = captured.regionRy;
+        const cache =
+          activeTool === 'cursor'
+            ? blockLayouts[targetBlockId]
+            : getFreshBlockLayout(targetBlockId) || measureBlockDomLayout(targetBlockId, targetBlockEl);
+        if (cache) {
+          const captured = captureStrokePoint(e.clientX, e.clientY, cache, bRect);
+          blockRelX = captured.x;
+          blockRelY = captured.y;
+          tokenId = captured.tokenId;
+          rx = captured.rx;
+          ry = captured.ry;
+          regionId = captured.regionId;
+          regionRx = captured.regionRx;
+          regionRy = captured.regionRy;
+        } else {
+          blockRelX = ((e.clientX - bRect.left) / Math.max(1, bRect.width)) * 100;
+          blockRelY = ((e.clientY - bRect.top) / Math.max(1, bRect.height)) * 100;
+        }
       }
 
       const sheetXPct = Math.round(((sheetX / Math.max(1, sheetRect.width)) * 100) * 10) / 10;
@@ -951,7 +971,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   };
 
   const handleSheetPointerUp = useCallback(() => {
-    if (canAnnotate) {
+    if (canAnnotate && activeTool !== 'cursor') {
       const sheetEl = pageSheetRef.current;
       if (!sheetEl) return;
       const sheetRect = sheetEl.getBoundingClientRect();
@@ -1107,6 +1127,40 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
   const isSelectionEnabled = !canAnnotate || activeTool === 'cursor';
 
+  // Pre-memoize tokenized HTML, text segments, and SVG markup per block so pointer/scroll/laser re-renders
+  // never re-run HTML tokenization or recreate dangerouslySetInnerHTML objects (which would wipe browser text selection and cause frame lag)
+  const tokenizedHeaderSegments = useMemo(
+    () => tokenizeText(topicTitle || lessonTitle, 'content'),
+    [topicTitle, lessonTitle]
+  );
+
+  const memoizedBlockContentMap = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        htmlObj?: { __html: string };
+        svgObj?: { __html: string };
+        titleSegments: TextTokenSegment[];
+        contentSegments: TextTokenSegment[];
+        formulaSegments: TextTokenSegment[];
+      }
+    >();
+    for (const block of blocks) {
+      map.set(block.blockId, {
+        htmlObj: block.contentHtml
+          ? { __html: tokenizeHtmlContent(block.contentHtml, 'content') }
+          : undefined,
+        svgObj: block.svgDiagram
+          ? { __html: sanitizeSvgMarkup(block.svgDiagram) }
+          : undefined,
+        titleSegments: tokenizeText(block.title, 'title'),
+        contentSegments: tokenizeText(block.content, 'content'),
+        formulaSegments: tokenizeText(block.formulaLatex, 'formula'),
+      });
+    }
+    return map;
+  }, [blocks]);
+
   // Block native browser selectstart event whenever activeTool is not 'cursor'
   useEffect(() => {
     const el = outerContainerRef.current;
@@ -1144,6 +1198,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
               data-testid="content-tool-cursor"
               onClick={() => {
                 setActiveTool('cursor');
+                setTeacherLaserCoord(null);
                 onLaserMove({ blockId: '', x: 0, y: 0, active: false });
               }}
               className={`flex items-center gap-1 px-1.5 sm:px-2.5 py-0.5 sm:py-1 rounded-full text-[10px] sm:text-xs font-medium whitespace-nowrap transition-all shrink-0 ${
@@ -1301,7 +1356,9 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         }}
         onPointerLeave={handleSheetPointerLeave}
         data-testid="content-scroll-container"
-        className={`flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 sm:py-6 sm:px-6 flex justify-center items-start ${
+        className={`flex-1 w-full min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-2.5 py-3 sm:px-5 sm:py-5 md:px-6 lg:px-8 ${
+          canAnnotate && isToolboxVisible ? 'sm:pt-14 pb-16 sm:pb-8' : 'pb-10'
+        } flex justify-center items-start ${
           canAnnotate && activeTool !== 'cursor' && activeTool !== 'laser'
             ? 'cursor-crosshair touch-none'
             : canAnnotate && activeTool === 'laser'
@@ -1309,7 +1366,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
             : 'cursor-auto'
         }`}
       >
-        {/* Full-Width Responsive Content Sheet matching /learn page container */}
+        {/* Full-Width Responsive Content Sheet matching /learn page container across Mobile, Tablet, Laptop & Desktop */}
         <div
           ref={(el) => {
             pageSheetRef.current = el;
@@ -1317,26 +1374,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           }}
           data-block-id="blk_page_canvas"
           data-testid="virtual-content-sheet"
-          onPointerMove={(e) => {
-            handleSheetPointerMove(e);
-            if (canAnnotate && (activeTool === 'pen' || activeTool === 'eraser')) {
-              handleBlockPointerMove(e, activeDrawingBlockIdRef.current || 'blk_page_canvas');
-            }
-          }}
-          onPointerDown={(e) => {
-            handleSheetPointerMove(e);
-            if (canAnnotate && (activeTool === 'pen' || activeTool === 'eraser')) {
-              handleBlockPointerDown(e, 'blk_page_canvas');
-            }
-          }}
-          onPointerUp={(e) => {
-            handleSheetPointerUp();
-            if (canAnnotate && (activeTool === 'pen' || activeTool === 'eraser')) {
-              handleBlockPointerUp(e, activeDrawingBlockIdRef.current || 'blk_page_canvas');
-            }
-          }}
-          onPointerLeave={handleSheetPointerLeave}
-          className={`relative w-full max-w-4xl space-y-5 pb-16 min-h-full ${
+          className={`relative w-full min-w-0 max-w-4xl lg:max-w-5xl xl:max-w-6xl space-y-3.5 sm:space-y-5 pb-16 min-h-full ${
             canAnnotate && activeTool !== 'cursor' && activeTool !== 'laser'
               ? 'cursor-crosshair touch-none'
               : 'cursor-auto'
@@ -1452,12 +1490,12 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
               });
             }
 
-            const headerLayoutCache = getFreshBlockLayout(headerBlockId);
+            const headerLayoutCache =
+              allHeaderStrokes.length > 0 ? getFreshBlockLayout(headerBlockId) : blockLayouts[headerBlockId];
             const headerSvgWidth = Math.max(100, Number((headerLayoutCache?.blockRect.width || 760).toFixed(2)));
             const headerSvgHeight = Math.max(40, Number((headerLayoutCache?.blockRect.height || 80).toFixed(2)));
 
-            const displayTitle = topicTitle || lessonTitle;
-            const topicTitleSegments = tokenizeText(displayTitle, 'content');
+            const topicTitleSegments = tokenizedHeaderSegments;
             const isLaserOnHeader =
               laserPointer.active && laserPointer.blockId === headerBlockId;
 
@@ -1478,10 +1516,10 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                     : 'cursor-default'
                 }`}
               >
-                <div className="min-w-0 flex-1 relative z-1 space-y-2">
+                <div className="min-w-0 flex-1 relative z-1 space-y-1.5 sm:space-y-2 px-0.5">
                   <h1
                     data-region-id="content"
-                    className="text-xl md:text-2xl font-extrabold text-slate-900 tracking-tight leading-snug break-words"
+                    className="text-lg sm:text-xl md:text-2xl lg:text-[26px] font-extrabold text-slate-900 tracking-tight leading-snug break-words"
                   >
                     {renderTokenizedText(
                       topicTitleSegments,
@@ -1521,10 +1559,10 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           })()}
 
           {/* Main Content Card matching /learn page (.content-main-container) */}
-          <div className="bg-white rounded-2xl p-4 sm:p-6 space-y-4 shadow-xs border border-slate-200/80">
-            <div className="flex items-center gap-2 text-[#2563eb] font-extrabold text-base">
-              <BookOpen className="w-5 h-5 shrink-0" />
-              <span>{topicTitle || lessonTitle}</span>
+          <div className="w-full min-w-0 bg-white rounded-xl sm:rounded-2xl p-3 sm:p-5 md:p-6 lg:p-7 space-y-3.5 sm:space-y-4 shadow-xs border border-slate-200/90 overflow-hidden">
+            <div className="flex items-start sm:items-center gap-2 text-[#2563eb] font-extrabold text-sm sm:text-base break-words">
+              <BookOpen className="w-4 h-4 sm:w-5 sm:h-5 shrink-0 mt-0.5 sm:mt-0" />
+              <span className="min-w-0 break-words">{topicTitle || lessonTitle}</span>
             </div>
 
             {blocks.length === 0 ? (
@@ -1593,13 +1631,17 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                     });
                   }
 
-                  const layoutCache = getFreshBlockLayout(block.blockId);
+                  const layoutCache =
+                    allBlockStrokes.length > 0
+                      ? getFreshBlockLayout(block.blockId)
+                      : blockLayouts[block.blockId];
                   const svgWidth = Math.max(100, Number((layoutCache?.blockRect.width || 760).toFixed(2)));
                   const svgHeight = Math.max(40, Number((layoutCache?.blockRect.height || 120).toFixed(2)));
 
-                  const titleSegments = tokenizeText(block.title, 'title');
-                  const contentSegments = tokenizeText(block.content, 'content');
-                  const formulaSegments = tokenizeText(block.formulaLatex, 'formula');
+                  const memoizedBlock = memoizedBlockContentMap.get(block.blockId);
+                  const titleSegments = memoizedBlock?.titleSegments || [];
+                  const contentSegments = memoizedBlock?.contentSegments || [];
+                  const formulaSegments = memoizedBlock?.formulaSegments || [];
 
                   const isLaserOnBlock =
                     laserPointer.active && laserPointer.blockId === block.blockId;
@@ -1625,13 +1667,11 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                           : 'cursor-auto'
                       }`}
                     >
-                      {block.contentHtml ? (
+                      {block.contentHtml && memoizedBlock?.htmlObj ? (
                         <div
                           data-region-id="content"
                           className="content-html-fragment"
-                          dangerouslySetInnerHTML={{
-                            __html: tokenizeHtmlContent(block.contentHtml, 'content'),
-                          }}
+                          dangerouslySetInnerHTML={memoizedBlock.htmlObj}
                         />
                       ) : (
                         <section data-region-id="content">
@@ -1668,11 +1708,11 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                             </div>
                           )}
 
-                          {block.svgDiagram && (
+                          {block.svgDiagram && memoizedBlock?.svgObj && (
                             <div
                               data-region-id="diagram"
                               className="diagram-box flex justify-center items-center overflow-hidden [&>svg]:w-full [&>svg]:h-auto [&>svg]:max-h-[260px] [&>svg]:block"
-                              dangerouslySetInnerHTML={{ __html: sanitizeSvgMarkup(block.svgDiagram) }}
+                              dangerouslySetInnerHTML={memoizedBlock.svgObj}
                             />
                           )}
                         </section>

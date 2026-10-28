@@ -767,6 +767,31 @@ export class StorageProvider {
   }
 
   /**
+   * Builds the deterministic session-level storage key organized by Session, Course, and Language only
+   * (no chapter, lesson, or topic segmentation required):
+   * `sessions/session_${sessionId}/course_${courseId}/lang_${languageId}/video_720p.${ext}`
+   */
+  public static buildSessionCourseLanguageVideoKey(
+    ctx: Partial<RelationalLessonContext> & { sessionId: string; languageCode?: string },
+    extension: 'webm' | 'mp4' = 'webm'
+  ): string {
+    const norm = this.normalizeRelationalContext(ctx);
+    const rawLang =
+      ctx.languageCode ||
+      (typeof ctx.languageId === 'string' &&
+      String(ctx.languageId).trim().length > 0 &&
+      !/^\d+$/.test(String(ctx.languageId).trim())
+        ? String(ctx.languageId).trim().toLowerCase()
+        : String(norm.languageId));
+    const cleanSession = String(ctx.sessionId || norm.sessionId || 'default').replace(
+      /[^a-zA-Z0-9_-]/g,
+      '_'
+    );
+    const cleanLang = String(rawLang || '1').replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `sessions/session_${cleanSession}/course_${norm.courseId}/lang_${cleanLang}/video_720p.${extension}`;
+  }
+
+  /**
    * Builds the deterministic relational storage key for a continuous live session video:
    * `courses/course_${courseId}/board_${boardId}_lang_${languageId}/batch_${batchId}/session_${sessionId}/v${version}_${academicYear}/video_720p.${ext}`
    */
@@ -928,13 +953,25 @@ export class StorageProvider {
         const lockedRelCtx = options.relationalContext
           ? { ...options.relationalContext }
           : undefined;
+        const hasExplicitLessonHierarchy = Boolean(
+          lockedRelCtx &&
+            lockedRelCtx.chapterId !== undefined &&
+            lockedRelCtx.chapterId !== null &&
+            lockedRelCtx.lessonId !== undefined &&
+            lockedRelCtx.lessonId !== null
+        );
         const videoKey =
           options.videoKeyOverride ||
           (lockedRelCtx
-            ? StorageProvider.buildLessonVideoKey(
-                { ...lockedRelCtx, sessionId },
-                extension
-              )
+            ? hasExplicitLessonHierarchy
+              ? StorageProvider.buildLessonVideoKey(
+                  { ...lockedRelCtx, sessionId },
+                  extension
+                )
+              : StorageProvider.buildSessionCourseLanguageVideoKey(
+                  { ...lockedRelCtx, sessionId },
+                  extension
+                )
             : `sessions/${sessionId}/video_720p.${extension}`);
 
         const cachePath = this.resolveCachePath(videoKey);
@@ -1195,11 +1232,25 @@ export class StorageProvider {
         state?.startingRelationalContext && Object.keys(state.startingRelationalContext).length > 0
           ? { ...ctx, ...state.startingRelationalContext, sessionId: ctx.sessionId || sessionId }
           : ctx;
-      const primaryLessonKey = StorageProvider.buildLessonVideoKey(
+      const sessionCourseLangKey = StorageProvider.buildSessionCourseLanguageVideoKey(
         effectivePrimaryCtx,
         state?.extension || 'webm'
       );
-      const currentLessonKey = StorageProvider.buildLessonVideoKey(ctx, state?.extension || 'webm');
+      const hasExplicitLessonHierarchy = Boolean(
+        effectivePrimaryCtx.chapterId !== undefined &&
+          effectivePrimaryCtx.chapterId !== null &&
+          effectivePrimaryCtx.lessonId !== undefined &&
+          effectivePrimaryCtx.lessonId !== null
+      );
+      const primaryLessonKey = hasExplicitLessonHierarchy
+        ? StorageProvider.buildLessonVideoKey(
+            effectivePrimaryCtx,
+            state?.extension || 'webm'
+          )
+        : sessionCourseLangKey;
+      const currentLessonKey = hasExplicitLessonHierarchy
+        ? StorageProvider.buildLessonVideoKey(ctx, state?.extension || 'webm')
+        : sessionCourseLangKey;
 
       if (!state) {
         // Check if file already exists at primaryLessonKey
@@ -1257,8 +1308,13 @@ export class StorageProvider {
       this.persistVideoRecordingStateSync(state);
       FileCache.invalidate(state.cachePath);
 
-      // 3. Ensure primary lesson key and any additional taught lesson keys point to the finalized video
-      const targetKeys = new Set<string>([state.videoKey, primaryLessonKey, currentLessonKey]);
+      // 3. Ensure session-course-language key, primary key, and any additional taught lesson keys point to the finalized video
+      const targetKeys = new Set<string>([
+        state.videoKey,
+        sessionCourseLangKey,
+        primaryLessonKey,
+        currentLessonKey,
+      ]);
       if (options?.additionalLessonContexts) {
         for (const extraCtx of options.additionalLessonContexts) {
           targetKeys.add(StorageProvider.buildLessonVideoKey(extraCtx, state.extension));

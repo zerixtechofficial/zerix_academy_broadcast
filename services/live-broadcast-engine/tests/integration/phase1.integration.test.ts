@@ -1337,4 +1337,115 @@ describe('Phase 1 Integration Tests: End-to-End Fastify REST & Streaming Pipelin
     );
     assert.equal(resRejoin.json().data.nextExpectedChunkIndex, 3);
   });
+
+  it('20. clears session and audio state on POST /api/v1/sessions/:sessionId/end, prevents auto-reviving ENDED sessions on init without restart=true, and revives only when restart=true', async () => {
+    const { RoomManager } = await import('../../src/modules/room/room.manager');
+    const { AudioStageController } = await import('../../src/modules/audio-stage/audio.controller');
+
+    const endTestSessionId = `sess_end_cleanup_${Date.now()}`;
+    const endTeacherJwt = JwtVerifier.sign({
+      userId: 'teacher_777',
+      name: 'Prof. R. Sharma',
+      role: 'teacher',
+      sessionId: endTestSessionId,
+      batchId: '108',
+    });
+
+    // 1. Initialize live classroom session as teacher
+    const initLiveRes = await server.fastify.inject({
+      method: 'POST',
+      url: '/api/v1/sessions/init',
+      payload: {
+        sessionId: endTestSessionId,
+        role: 'teacher',
+        teacherId: 'teacher_777',
+        token: endTeacherJwt,
+      },
+    });
+    assert.equal(initLiveRes.statusCode, 200);
+    assert.equal(initLiveRes.json().data.status, 'LIVE');
+
+    // Simulate active audio stage state (raised hand, granted student mic, teacher mic on)
+    await AudioStageController.raiseHand(endTestSessionId, {
+      userId: 'student_301',
+      name: 'Aarav',
+      raisedAt: Date.now(),
+    });
+    await AudioStageController.setTeacherMicActive(endTestSessionId, true);
+    const stageBeforeEnd = await AudioStageController.getStageState(endTestSessionId);
+    assert.equal(
+      stageBeforeEnd.raisedHands.some((h) => h.userId === 'student_301'),
+      true
+    );
+    assert.equal(stageBeforeEnd.teacherMicActive, true);
+
+    // 2. End classroom session via REST endpoint
+    const endRes = await server.fastify.inject({
+      method: 'POST',
+      url: `/api/v1/sessions/${endTestSessionId}/end`,
+      headers: {
+        authorization: `Bearer ${endTeacherJwt}`,
+      },
+      payload: {},
+    });
+    assert.equal(endRes.statusCode, 200);
+    assert.equal(endRes.json().success, true);
+    const roomAfterEnd = await RoomManager.getOrInitRoom(endTestSessionId);
+    assert.equal(roomAfterEnd.status, 'ENDED');
+
+    // Verify Redis audio stage state is completely wiped and sessionId is removed from active_broadcast_sessions
+    const stageAfterEnd = await AudioStageController.getStageState(endTestSessionId);
+    assert.equal(stageAfterEnd.raisedHands.length, 0);
+    assert.equal(stageAfterEnd.activeStudentMics.length, 0);
+    assert.equal(
+      await AudioStageController.hasStudentMicPermission(endTestSessionId, 'student_301'),
+      false
+    );
+    assert.equal(stageAfterEnd.teacherMicActive, false);
+    const isActiveMember = await redis.sismember(
+      'active_broadcast_sessions',
+      endTestSessionId
+    );
+    assert.equal(isActiveMember, 0);
+
+    // 3. Calling /api/v1/sessions/init with teacher token WITHOUT restart=true must NOT revive the ENDED session
+    const initWithoutRestartRes = await server.fastify.inject({
+      method: 'POST',
+      url: '/api/v1/sessions/init',
+      payload: {
+        sessionId: endTestSessionId,
+        role: 'teacher',
+        teacherId: 'teacher_777',
+        token: endTeacherJwt,
+      },
+    });
+    assert.equal(initWithoutRestartRes.statusCode, 200);
+    assert.equal(
+      initWithoutRestartRes.json().data.status,
+      'ENDED',
+      'Ended classroom session must stay ENDED when teacher calls init without restart=true'
+    );
+
+    // 4. Calling /api/v1/sessions/init with teacher token AND restart=true revives the session to LIVE
+    const initWithRestartRes = await server.fastify.inject({
+      method: 'POST',
+      url: '/api/v1/sessions/init',
+      payload: {
+        sessionId: endTestSessionId,
+        role: 'teacher',
+        teacherId: 'teacher_777',
+        token: endTeacherJwt,
+        restart: true,
+      },
+    });
+    assert.equal(initWithRestartRes.statusCode, 200);
+    assert.equal(
+      initWithRestartRes.json().data.status,
+      'LIVE',
+      'Ended classroom session must transition back to LIVE when teacher explicitly passes restart=true'
+    );
+
+    // Clean up test session
+    await RoomManager.endSession(endTestSessionId);
+  });
 });

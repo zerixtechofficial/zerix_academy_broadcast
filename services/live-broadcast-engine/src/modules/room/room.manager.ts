@@ -32,7 +32,6 @@ export class RoomManager {
    * Initializes or fetches room session state from Redis or DataProvider.
    */
   public static async getOrInitRoom(sessionId: string, languageId?: string): Promise<SessionSnapshot> {
-    await redis.sadd(this.ACTIVE_SESSIONS_KEY, sessionId);
     const key = `${this.keyPrefix(sessionId)}:snapshot`;
     const cached = await redis.get(key);
     const provider = getDataProvider();
@@ -40,6 +39,11 @@ export class RoomManager {
     if (cached) {
       try {
         const parsed = JSON.parse(cached) as SessionSnapshot;
+        if (parsed.status === 'ENDED') {
+          await redis.srem(this.ACTIVE_SESSIONS_KEY, sessionId);
+        } else {
+          await redis.sadd(this.ACTIVE_SESSIONS_KEY, sessionId);
+        }
         const seqRaw = await redis.get(`${this.keyPrefix(sessionId)}:seq_counter`);
         if (seqRaw) {
           parsed.seqId = Number(seqRaw) || parsed.seqId;
@@ -71,6 +75,8 @@ export class RoomManager {
         // Fallback to fresh init
       }
     }
+
+    await redis.sadd(this.ACTIVE_SESSIONS_KEY, sessionId);
 
     const parsedMatch = /^session_b(\d+)_c(\d+)_/i.exec(sessionId);
     const fallbackBatchId = parsedMatch ? parsedMatch[1] : sessionId;
@@ -266,14 +272,18 @@ export class RoomManager {
     sessionId: string,
     status: SessionStatus
   ): Promise<BroadcastPacket> {
+    if (status === 'LIVE') {
+      await redis.sadd('active_broadcast_sessions', sessionId);
+    }
     await this.updateSnapshot(sessionId, { status });
     return await this.appendPacket(sessionId, 'TEACHER_STATUS_CHANGE', { status });
   }
 
   /**
-   * Marks a session as officially ended.
+   * Marks a session as officially ended and removes it from active broadcast sessions.
    */
   public static async endSession(sessionId: string): Promise<BroadcastPacket> {
+    await redis.srem('active_broadcast_sessions', sessionId);
     await this.updateSnapshot(sessionId, { status: 'ENDED' });
     return await this.appendPacket(sessionId, 'SESSION_ENDED', { sessionId, endedAt: Date.now() });
   }

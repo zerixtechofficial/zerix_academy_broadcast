@@ -133,7 +133,10 @@ export interface IntroBrandingSceneMetadata {
 }
 
 export interface StartRecordingDetailsInput {
+  sessionId?: string;
+  courseId?: string | number;
   courseTitle?: string;
+  languageId?: string | number;
   subjectName?: string;
   batchName?: string;
   chapterTitle?: string;
@@ -856,17 +859,27 @@ export function useCompressedClassRecorder({
           titlesRef.current = mergedTitles;
           startingRelationalContextRef.current = {
             ...relationalContextRef.current,
+            sessionId: customDetails.sessionId?.trim() || sessionIdRef.current,
+            ...(customDetails.courseId !== undefined && String(customDetails.courseId).trim() !== ''
+              ? { courseId: customDetails.courseId }
+              : {}),
+            ...(customDetails.languageId !== undefined &&
+            String(customDetails.languageId).trim() !== ''
+              ? { languageId: customDetails.languageId }
+              : {}),
             courseTitle: mergedTitles.courseTitle,
-            ...(customDetails.academicYear !== undefined &&
-            !Number.isNaN(Number(customDetails.academicYear))
-              ? { academicYear: Number(customDetails.academicYear) }
-              : {}),
-            ...(customDetails.version !== undefined && !Number.isNaN(Number(customDetails.version))
-              ? { version: Number(customDetails.version) }
-              : {}),
+            chapterId: undefined as any,
+            lessonId: undefined as any,
+            topicId: null,
           };
         } else if (!startingRelationalContextRef.current) {
-          startingRelationalContextRef.current = { ...relationalContextRef.current };
+          startingRelationalContextRef.current = {
+            ...relationalContextRef.current,
+            sessionId: sessionIdRef.current,
+            chapterId: undefined as any,
+            lessonId: undefined as any,
+            topicId: null,
+          };
           lockedIntroTitlesRef.current = { ...titlesRef.current };
         }
 

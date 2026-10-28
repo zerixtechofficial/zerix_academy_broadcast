@@ -178,7 +178,12 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
     // 1. Join Room & Catch-Up Protocol
     socket.on(
       'JOIN_ROOM',
-      async (payload: { sessionId: string; lastSeqId?: number; deviceId?: string }) => {
+      async (payload: {
+        sessionId: string;
+        lastSeqId?: number;
+        deviceId?: string;
+        restart?: boolean;
+      }) => {
         const targetSessionId = payload?.sessionId || sessionId;
         const lastSeqId = typeof payload?.lastSeqId === 'number' ? payload.lastSeqId : 0;
 
@@ -193,6 +198,18 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
           socket.emit('ERROR', {
             code: 'SESSION_MISMATCH',
             message: `Socket token is bound to session "${boundSessionId}" and cannot join session "${targetSessionId}".`,
+          });
+          return;
+        }
+
+        const existingRoomCheck = await RoomManager.getOrInitRoom(targetSessionId);
+        if (
+          existingRoomCheck.status === 'ENDED' &&
+          !(user.role === 'teacher' && payload?.restart === true)
+        ) {
+          socket.emit('SESSION_ENDED', {
+            sessionId: targetSessionId,
+            message: 'This classroom session has already ended.',
           });
           return;
         }
@@ -625,7 +642,10 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
     socket.on('AUDIO_MUTE_STUDENT', async (data: { studentId: string }) => {
       if (user.role !== 'teacher') return;
       await AudioStageController.muteStudent(sessionId, data.studentId);
-      io.to(sessionId).emit('AUDIO_MIC_REVOKED', { studentId: data.studentId });
+      io.to(sessionId).emit('AUDIO_MIC_REVOKED', {
+        studentId: data.studentId,
+        revokedByTeacher: true,
+      });
     });
 
     socket.on('AUDIO_MUTE_ALL', async () => {
@@ -682,9 +702,8 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
         }
         const stId = user.role === 'teacher' && data?.studentId ? data.studentId : user.userId;
         const reqDeviceId = getSocketDeviceId(data?.deviceId);
-        const allow = await AudioStageController.getAllowStudentUnmute(sessionId);
-        const hasMic = await redis.sismember(AudioStageController.activeMicsKey(sessionId), stId);
-        if (!allow && hasMic !== 1) {
+        const hasPermission = await AudioStageController.hasStudentMicPermission(sessionId, stId);
+        if (!hasPermission) {
           socket.emit('AUDIO_ERROR', {
             message: 'Microphones are currently restricted. Please raise your hand to speak.',
             studentId: stId,
@@ -702,6 +721,8 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
           io.to(sessionId).emit('AUDIO_MIC_GRANTED', {
             ...result,
             targetDeviceId: reqDeviceId,
+            selfUnmuted: true,
+            autoActivate: false,
           });
         } catch (err: any) {
           socket.emit('AUDIO_ERROR', {
@@ -719,6 +740,13 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
         if (user.role !== 'student') return;
         const devId = getSocketDeviceId(data?.deviceId);
         const micActive = Boolean(data?.micActive ?? data?.active);
+        if (micActive) {
+          const hasPermission = await AudioStageController.hasStudentMicPermission(
+            sessionId,
+            user.userId
+          );
+          if (!hasPermission) return;
+        }
         const state = await AudioStageController.setStudentDeviceMicState(
           sessionId,
           user.userId,
@@ -735,6 +763,7 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
           io.to(sessionId).emit('AUDIO_MIC_GRANTED', {
             studentId: user.userId,
             targetDeviceId: devId,
+            selfUnmuted: true,
             autoActivate: false,
           });
         } else if (!state.anyDeviceMicActive) {
@@ -742,6 +771,7 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
             studentId: user.userId,
             deviceId: devId,
             selfMuted: true,
+            revokedByTeacher: false,
           });
         }
       }
@@ -764,7 +794,8 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
           data?.deviceId ||
           (socket as any).deviceId ||
           (socket as any).handshake?.auth?.deviceId ||
-          (socket as any).handshake?.query?.deviceId;
+          (socket as any).handshake?.query?.deviceId ||
+          (user.role === 'student' ? getSocketDeviceId() : undefined);
 
         if (explicitDeviceId && user.role === 'student') {
           const muteRes = await AudioStageController.muteStudentDevice(
@@ -783,11 +814,15 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
               studentId: stId,
               deviceId: String(explicitDeviceId),
               selfMuted: true,
+              revokedByTeacher: false,
             });
           }
         } else {
           await AudioStageController.muteStudent(sessionId, stId);
-          io.to(sessionId).emit('AUDIO_MIC_REVOKED', { studentId: stId });
+          io.to(sessionId).emit('AUDIO_MIC_REVOKED', {
+            studentId: stId,
+            revokedByTeacher: true,
+          });
         }
       }
     );
@@ -817,17 +852,11 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
         // Authorize publisher: Teachers (Host & Co-Host) are always authorized;
         // Students must either have an active mic grant or allowStudentUnmute enabled.
         if (user.role !== 'teacher') {
-          const normStudentId = AudioStageController.normalizeStudentId(user.userId);
-          const rawCleanId = String(user.userId || '').replace(/^student_/, '');
-          const [allowAll, hasGrantNorm, hasGrantRaw, hasGrantClean] = await Promise.all([
-            AudioStageController.getAllowStudentUnmute(sessionId),
-            redis.sismember(AudioStageController.activeMicsKey(sessionId), normStudentId),
-            redis.sismember(AudioStageController.activeMicsKey(sessionId), user.userId),
-            rawCleanId
-              ? redis.sismember(AudioStageController.activeMicsKey(sessionId), rawCleanId)
-              : Promise.resolve(0),
-          ]);
-          if (!allowAll && hasGrantNorm !== 1 && hasGrantRaw !== 1 && hasGrantClean !== 1) return;
+          const hasPermission = await AudioStageController.hasStudentMicPermission(
+            sessionId,
+            user.userId
+          );
+          if (!hasPermission) return;
         }
 
         const relayPayload = {
@@ -1024,7 +1053,10 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
         socket.data.intentionalLeave = true;
         try {
           await AutoSaveService.cancelTeacherGraceTimer(sessionId);
+          await AudioStageController.clearSessionState(sessionId);
           const room = await RoomManager.getOrInitRoom(sessionId);
+          await RoomManager.endSession(sessionId);
+
           if (!getStorageProvider().getSessionVideoState(sessionId).finalized) {
             await AutoSaveService.ensureSessionVodFinalized(sessionId);
           }
@@ -1037,7 +1069,6 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
           );
           const provider = getDataProvider();
           await provider.publishSessionCompleted(summary);
-          await RoomManager.endSession(sessionId);
 
           const isHostEnder = await AudioStageController.isHostTeacher(
             sessionId,

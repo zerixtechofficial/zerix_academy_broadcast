@@ -20,8 +20,8 @@ export interface RelationalLessonContext {
   branchId: number;
   batchId: number;
   boardId: number | null;
-  languageId: number;
-  courseId: number;
+  languageId: number | string;
+  courseId: number | string;
   courseTitle?: string;
   linkedVodCourseId: number;
   subjectId: number;
@@ -199,6 +199,7 @@ export class CurriculumClient {
     deviceId?: string;
     cohost?: boolean;
     cohostName?: string;
+    restart?: boolean;
   }) {
     const res = await this.request<{ success: boolean; data: any }>('/api/v1/sessions/init', {
       method: 'POST',

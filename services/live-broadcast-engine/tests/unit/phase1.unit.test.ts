@@ -1321,4 +1321,89 @@ describe('Phase 1 Unit Tests: JWT Verifier, StorageProvider, and SessionTimeline
       );
     });
   });
+
+  // ==========================================================================
+  // 15. Student Mic Grant Persistence Across Self-Mute/Unmute & Session/Course/Language Recording Storage
+  // ==========================================================================
+  describe('15. Student Mic Grant Persistence & Session/Course/Language Recording Storage', () => {
+    it('preserves teacher mic grant across student self-mute/unmute cycles until teacher explicitly revokes', async () => {
+      const micSessionId = `sess_student_mic_${Date.now()}`;
+      const studentNumericId = '7042';
+      const studentIdentity = 'student_7042';
+
+      // Initially student does not have mic permission (allowStudentUnmute defaults to false)
+      await AudioStageController.setAllowStudentUnmute(micSessionId, false);
+      assert.equal(
+        await AudioStageController.hasStudentMicPermission(micSessionId, studentNumericId),
+        false
+      );
+
+      // 1. Teacher grants student mic using normalized identity (`student_7042`)
+      await AudioStageController.grantStudentMic(micSessionId, studentIdentity);
+      assert.equal(
+        await AudioStageController.hasStudentMicPermission(micSessionId, studentNumericId),
+        true,
+        'Student with numeric userId must be recognized as having mic permission after teacher grant'
+      );
+      assert.equal(
+        await AudioStageController.hasStudentMicPermission(micSessionId, studentIdentity),
+        true
+      );
+
+      // 2. Student self-mutes (or client emits initial micActive: false state sync) via muteStudentDevice
+      await AudioStageController.muteStudentDevice(micSessionId, studentIdentity);
+      const activeMicsAfterSelfMute = await AudioStageController.getActiveStudentMics(micSessionId);
+      assert.equal(
+        activeMicsAfterSelfMute.includes(studentIdentity),
+        false,
+        'Active speaking badge set should clear when student self-mutes'
+      );
+      assert.equal(
+        await AudioStageController.hasStudentMicPermission(micSessionId, studentNumericId),
+        true,
+        'Teacher mic grant MUST persist in granted_student_mics so student can unmute again without auto-muting'
+      );
+
+      // 3. Teacher explicitly revokes student mic via muteStudent -> permission is removed
+      await AudioStageController.muteStudent(micSessionId, studentIdentity);
+      assert.equal(
+        await AudioStageController.hasStudentMicPermission(micSessionId, studentNumericId),
+        false,
+        'Teacher explicit muteStudent must revoke student mic permission'
+      );
+    });
+
+    it('stores session recordings by Session, Course, and Language only when chapter/lesson/topic are omitted', async () => {
+      const recSessionId = `sess_course_lang_${Date.now()}`;
+      const sessionOnlyCtx = {
+        sessionId: recSessionId,
+        courseId: 15,
+        languageId: 'en',
+      };
+
+      const expectedKey = StorageProvider.buildSessionCourseLanguageVideoKey(sessionOnlyCtx, 'webm');
+      assert.equal(
+        expectedKey,
+        `sessions/session_${recSessionId}/course_15/lang_en/video_720p.webm`
+      );
+
+      const chunk0 = Buffer.alloc(32, 0x1a);
+      chunk0[10] = 0x44;
+      chunk0[11] = 0x89;
+      chunk0[12] = 0x88;
+      chunk0.writeDoubleBE(0.0, 13);
+
+      const appendRes = await storageProvider.appendVideoChunk(recSessionId, chunk0, {
+        chunkIndex: 0,
+        relationalContext: sessionOnlyCtx,
+      });
+      assert.equal(appendRes.videoKey, expectedKey);
+
+      const finalized = await storageProvider.finalizeVideoRecording(recSessionId, sessionOnlyCtx, {
+        durationSec: 12,
+      });
+      assert.equal(finalized.key, expectedKey);
+      assert.equal(finalized.totalBytes, chunk0.length);
+    });
+  });
 });

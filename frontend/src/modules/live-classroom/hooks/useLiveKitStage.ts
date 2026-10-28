@@ -278,6 +278,8 @@ export function useLiveKitStage({
   const roomRef = useRef<Room | null>(null);
   const dspNodesRef = useRef<NoiseCancellationNodes | null>(null);
   const captureCtxRef = useRef<AudioContext | null>(null);
+  const captureStreamRef = useRef<MediaStream | null>(null);
+  const hasVerifiedMicPermissionRef = useRef<boolean>(false);
   const desiredMicEnabledRef = useRef<boolean>(false);
   const canPublishAudioRef = useRef<boolean>(canPublishAudio);
   useEffect(() => {
@@ -907,10 +909,30 @@ export function useLiveKitStage({
     unlockAudioPlayback,
   ]);
 
-  // Real-Time Port-443 WebAudio Voice Relay Capture Loop
-  // Streams 16kHz mono PCM frames over Socket.IO whenever local microphone is enabled & authorized
+  // Synchronize hardware track enabled state instantaneously on mute/unmute without tearing down AudioContext
   useEffect(() => {
-    if (typeof window === 'undefined' || !isMicrophoneEnabled || !canPublishAudio) {
+    if (captureStreamRef.current) {
+      captureStreamRef.current.getAudioTracks().forEach((t) => {
+        t.enabled = isMicrophoneEnabled && canPublishAudio;
+      });
+    }
+    if (captureCtxRef.current && isMicrophoneEnabled && canPublishAudio) {
+      if (captureCtxRef.current.state !== 'running' && typeof captureCtxRef.current.resume === 'function') {
+        captureCtxRef.current.resume().catch(() => {});
+      }
+    }
+  }, [isMicrophoneEnabled, canPublishAudio]);
+
+  // Real-Time Port-443 WebAudio Voice Relay Capture Loop
+  // Keeps capture stream warm while canPublishAudio is true so mute/unmute is instant (<5ms)
+  useEffect(() => {
+    if (typeof window === 'undefined' || !canPublishAudio) {
+      return;
+    }
+    if (!isMicrophoneEnabled && !captureStreamRef.current) {
+      return;
+    }
+    if (captureStreamRef.current && captureCtxRef.current && captureCtxRef.current.state !== 'closed') {
       return;
     }
 
@@ -937,10 +959,16 @@ export function useLiveKitStage({
           },
         });
 
-        if (isCancelled) {
+        if (isCancelled || !canPublishAudioRef.current) {
           localStream.getTracks().forEach((t) => t.stop());
           return;
         }
+
+        hasVerifiedMicPermissionRef.current = true;
+        localStream.getAudioTracks().forEach((t) => {
+          t.enabled = desiredMicEnabledRef.current;
+        });
+        captureStreamRef.current = localStream;
 
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
         if (!AudioCtx) return;
@@ -963,7 +991,7 @@ export function useLiveKitStage({
         silentGainNode.gain.value = 0;
 
         processorNode.onaudioprocess = (event: AudioProcessingEvent) => {
-          if (isCancelled || !desiredMicEnabledRef.current) return;
+          if (isCancelled || !desiredMicEnabledRef.current || !canPublishAudioRef.current) return;
           const inputData = event.inputBuffer.getChannelData(0);
           const { pcmInt16, rms } = downsampleFloat32ToInt16(
             inputData,
@@ -1003,31 +1031,73 @@ export function useLiveKitStage({
     startVoiceRelayCapture();
 
     return () => {
-      isCancelled = true;
-      try {
-        processorNode?.disconnect();
-        sourceNode?.disconnect();
-        silentGainNode?.disconnect();
-      } catch {
-        // ignore
+      if (!canPublishAudioRef.current) {
+        isCancelled = true;
+        try {
+          processorNode?.disconnect();
+          sourceNode?.disconnect();
+          silentGainNode?.disconnect();
+        } catch {
+          // ignore
+        }
+        if (captureCtxRef.current === captureCtx) {
+          captureCtxRef.current = null;
+        }
+        if (captureCtx && captureCtx.state !== 'closed') {
+          captureCtx.close().catch(() => {});
+        }
+        const streamToStop = captureStreamRef.current || localStream;
+        captureStreamRef.current = null;
+        if (streamToStop) {
+          streamToStop.getTracks().forEach((t) => {
+            try {
+              t.stop();
+            } catch {
+              // ignore
+            }
+          });
+        }
       }
-      if (captureCtxRef.current === captureCtx) {
-        captureCtxRef.current = null;
+    };
+  }, [isMicrophoneEnabled, canPublishAudio, isNoiseCancellationEnabled, voiceRelayRestartTick]);
+
+  // Ensure full cleanup on unmount or when canPublishAudio becomes false
+  useEffect(() => {
+    if (!canPublishAudio) {
+      if (captureCtxRef.current && captureCtxRef.current.state !== 'closed') {
+        captureCtxRef.current.close().catch(() => {});
       }
-      if (captureCtx && captureCtx.state !== 'closed') {
-        captureCtx.close().catch(() => {});
-      }
-      if (localStream) {
-        localStream.getTracks().forEach((t) => {
+      captureCtxRef.current = null;
+      if (captureStreamRef.current) {
+        captureStreamRef.current.getTracks().forEach((t) => {
           try {
             t.stop();
           } catch {
             // ignore
           }
         });
+        captureStreamRef.current = null;
+      }
+    }
+  }, [canPublishAudio]);
+  useEffect(() => {
+    return () => {
+      if (captureCtxRef.current && captureCtxRef.current.state !== 'closed') {
+        captureCtxRef.current.close().catch(() => {});
+      }
+      captureCtxRef.current = null;
+      if (captureStreamRef.current) {
+        captureStreamRef.current.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
+          }
+        });
+        captureStreamRef.current = null;
       }
     };
-  }, [isMicrophoneEnabled, canPublishAudio, isNoiseCancellationEnabled, voiceRelayRestartTick]);
+  }, []);
 
   /**
    * Recovers classroom audio playback and microphone streaming after an internet disconnect,
@@ -1131,15 +1201,41 @@ export function useLiveKitStage({
     });
   }, [applyWebAudioNoiseCancellation]);
 
-  // Real-time Microphone Permission Check bound to hook state (updates micError state if denied)
+  // Real-time Microphone Permission Check bound to hook state (caches granted permission for 0ms instant toggle)
   const ensureMicrophonePermission = useCallback(async (): Promise<MicPermissionCheckResult> => {
+    if (hasVerifiedMicPermissionRef.current) {
+      setMicError(null);
+      return { granted: true };
+    }
+
+    if (
+      typeof navigator !== 'undefined' &&
+      navigator.permissions &&
+      typeof navigator.permissions.query === 'function'
+    ) {
+      try {
+        const permStatus = await navigator.permissions.query({
+          name: 'microphone' as PermissionName,
+        });
+        if (permStatus.state === 'granted') {
+          hasVerifiedMicPermissionRef.current = true;
+          setMicError(null);
+          return { granted: true };
+        }
+      } catch {
+        // Fallback to getUserMedia probe if Permissions API is unsupported
+      }
+    }
+
     const res = await requestBrowserMicrophonePermission();
     if (!res.granted) {
+      hasVerifiedMicPermissionRef.current = false;
       setMicError(
         res.error ||
           'Microphone permission is required to speak. Please allow microphone access in your browser.'
       );
     } else {
+      hasVerifiedMicPermissionRef.current = true;
       setMicError(null);
     }
     return res;
@@ -1149,37 +1245,55 @@ export function useLiveKitStage({
     setMicError(null);
   }, []);
 
-  // Explicit Set Mic Active/Inactive Action (verifies browser permission in real time before enabling)
+  // Explicit Set Mic Active/Inactive Action (instant optimistic state transition with cached permission check)
   const setMicrophoneActive = useCallback(
     async (active: boolean): Promise<boolean> => {
       const room = roomRef.current;
 
-      if (active) {
-        const perm = await ensureMicrophonePermission();
-        if (!perm.granted) {
-          desiredMicEnabledRef.current = false;
-          setIsMicrophoneEnabled(false);
-          onMicStateChangeRef.current?.(false);
-          return false;
-        }
-      } else {
+      if (!active) {
         setMicError(null);
+        desiredMicEnabledRef.current = false;
+        if (captureStreamRef.current) {
+          captureStreamRef.current.getAudioTracks().forEach((t) => {
+            t.enabled = false;
+          });
+        }
+        setIsMicrophoneEnabled(false);
+        onMicStateChangeRef.current?.(false);
+
+        if (room && isAudioConnected) {
+          room.localParticipant.setMicrophoneEnabled(false).catch(() => {});
+        }
+        return true;
       }
 
-      desiredMicEnabledRef.current = active;
-      setIsMicrophoneEnabled(active);
-      onMicStateChangeRef.current?.(active);
-
-      if (active) {
-        unlockAudioPlayback();
+      const perm = await ensureMicrophonePermission();
+      if (!perm.granted) {
+        const wasEnabled = desiredMicEnabledRef.current;
+        desiredMicEnabledRef.current = false;
+        setIsMicrophoneEnabled(false);
+        if (wasEnabled) {
+          onMicStateChangeRef.current?.(false);
+        }
+        return false;
       }
+
+      desiredMicEnabledRef.current = true;
+      if (captureStreamRef.current) {
+        captureStreamRef.current.getAudioTracks().forEach((t) => {
+          t.enabled = true;
+        });
+      }
+      setIsMicrophoneEnabled(true);
+      onMicStateChangeRef.current?.(true);
+      unlockAudioPlayback();
 
       if (!room || !isAudioConnected) {
         return true;
       }
 
       try {
-        await room.localParticipant.setMicrophoneEnabled(active, {
+        await room.localParticipant.setMicrophoneEnabled(true, {
           noiseSuppression: isNoiseCancellationEnabled,
           echoCancellation: true,
           autoGainControl: true,
@@ -1188,22 +1302,20 @@ export function useLiveKitStage({
           ...({ voiceIsolation: isNoiseCancellationEnabled } as any),
         });
 
-        if (active) {
-          const micPub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
-          const rawTrack = micPub?.audioTrack?.mediaStreamTrack;
-          if (rawTrack) {
-            applyWebAudioNoiseCancellation(rawTrack, isNoiseCancellationEnabled);
-          }
+        const micPub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
+        const rawTrack = micPub?.audioTrack?.mediaStreamTrack;
+        if (rawTrack) {
+          applyWebAudioNoiseCancellation(rawTrack, isNoiseCancellationEnabled);
         }
         return true;
       } catch (err: any) {
         const errName = String(err?.name || '');
         if (
-          active &&
-          (errName === 'NotAllowedError' ||
-            errName === 'PermissionDeniedError' ||
-            errName === 'SecurityError')
+          errName === 'NotAllowedError' ||
+          errName === 'PermissionDeniedError' ||
+          errName === 'SecurityError'
         ) {
+          hasVerifiedMicPermissionRef.current = false;
           desiredMicEnabledRef.current = false;
           setIsMicrophoneEnabled(false);
           onMicStateChangeRef.current?.(false);

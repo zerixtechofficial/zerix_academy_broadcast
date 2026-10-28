@@ -172,6 +172,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           deviceId: Type.Optional(Type.String()),
           cohost: Type.Optional(Type.Boolean()),
           cohostName: Type.Optional(Type.String()),
+          restart: Type.Optional(Type.Boolean()),
         }),
       },
     },
@@ -186,6 +187,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         deviceId?: string;
         cohost?: boolean;
         cohostName?: string;
+        restart?: boolean;
       };
 
       const headerAuth = request.headers.authorization;
@@ -222,7 +224,11 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         body.languageId || user.languageId || undefined;
 
       let room = await RoomManager.getOrInitRoom(body.sessionId, resolvedLanguageId);
-      if (user.role === 'teacher' && room.status !== 'LIVE') {
+      if (
+        user.role === 'teacher' &&
+        room.status !== 'LIVE' &&
+        (room.status !== 'ENDED' || body.restart === true)
+      ) {
         await AutoSaveService.cancelTeacherGraceTimer(body.sessionId);
         await RoomManager.setTeacherStatus(body.sessionId, 'LIVE');
         room = await RoomManager.getOrInitRoom(body.sessionId, resolvedLanguageId);
@@ -724,7 +730,11 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         });
       }
 
+      await AutoSaveService.cancelTeacherGraceTimer(sessionId);
+      await AudioStageController.clearSessionState(sessionId);
       const room = await RoomManager.getOrInitRoom(sessionId);
+      await RoomManager.endSession(sessionId);
+
       if (!getStorageProvider().getSessionVideoState(sessionId).finalized) {
         await AutoSaveService.ensureSessionVodFinalized(sessionId);
       }
@@ -738,7 +748,6 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
       );
 
       await provider.publishSessionCompleted(summary);
-      await RoomManager.endSession(sessionId);
 
       const io = (fastify as any).io;
       if (io) {

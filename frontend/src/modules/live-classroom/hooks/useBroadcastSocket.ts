@@ -232,6 +232,7 @@ export interface UseBroadcastSocketParams {
   studentId?: string;
   teacherId?: string;
   deviceId?: string;
+  restart?: boolean;
   onStudentTokenRefresh?: (token: string, autoActivate?: boolean) => void;
   onStudentMicRevoked?: () => void;
   onIncomingVoiceFrame?: (packet: any) => void;
@@ -245,6 +246,7 @@ export function useBroadcastSocket({
   studentId,
   teacherId,
   deviceId: propDeviceId,
+  restart,
   onStudentTokenRefresh,
   onStudentMicRevoked,
   onIncomingVoiceFrame,
@@ -253,6 +255,12 @@ export function useBroadcastSocket({
   const socketRef = useRef<Socket | null>(null);
   const seqIdRef = useRef<number>(0);
   const hasConnectedOnceRef = useRef<boolean>(false);
+  const restartRef = useRef<boolean>(Boolean(restart));
+  useEffect(() => {
+    if (restart) {
+      restartRef.current = true;
+    }
+  }, [restart]);
   const clientDeviceIdRef = useRef<string>(propDeviceId || getOrCreateClientDeviceId());
   if (propDeviceId && clientDeviceIdRef.current !== propDeviceId) {
     clientDeviceIdRef.current = propDeviceId;
@@ -410,10 +418,13 @@ export function useBroadcastSocket({
       setReconnectAttempt(0);
 
       // Trigger Join Room and catch-up with our highest known seqId from ref + per-device ID
+      const shouldRestart = restartRef.current;
+      restartRef.current = false;
       socket.emit('JOIN_ROOM', {
         sessionId,
         lastSeqId: seqIdRef.current,
         deviceId: clientDeviceId,
+        ...(shouldRestart ? { restart: true } : {}),
       });
 
       if (isReconnect) {
@@ -737,6 +748,23 @@ export function useBroadcastSocket({
         endedByRole: data?.endedByRole,
         message: data?.message,
       });
+      if (typeof window !== 'undefined' && sessionId) {
+        try {
+          if (token) {
+            window.sessionStorage.setItem('broadcast_ended_token', token);
+            window.sessionStorage.setItem('broadcast_ended_session_id', sessionId);
+          }
+          window.sessionStorage.setItem('broadcast_session_ended', sessionId);
+          window.sessionStorage.removeItem('broadcast_rejoin_token');
+          window.sessionStorage.removeItem('broadcast_rejoin_session_id');
+          window.sessionStorage.removeItem('broadcast_rejoin_authorized');
+          window.sessionStorage.removeItem('broadcast_restart_authorized');
+          window.sessionStorage.removeItem('broadcast_session_left');
+          window.localStorage.removeItem(`broadcast_rec_ctx_${sessionId}`);
+        } catch {
+          // Ignore storage cleanup error
+        }
+      }
       setIsConnected(false);
       setIsReconnecting(false);
       socket.disconnect();
@@ -788,7 +816,7 @@ export function useBroadcastSocket({
         data.studentId === `student_${studentId}` ||
         `student_${data.studentId}` === myUserId;
 
-      if (isTargetMe) {
+      if (isTargetMe && !data.selfUnmuted) {
         const grantedToken =
           (data.deviceTokens && data.deviceTokens[clientDeviceId]) || data.token;
         const shouldAutoActivate =
@@ -825,7 +853,10 @@ export function useBroadcastSocket({
           if (data.deviceId && data.deviceId !== clientDeviceId) {
             return;
           }
-          onStudentMicRevokedRef.current?.();
+          // Only revoke student mic permission when teacher explicitly revokes it (not when student self-mutes)
+          if (!data.selfMuted || data.revokedByTeacher === true) {
+            onStudentMicRevokedRef.current?.();
+          }
         }
       }
     });
@@ -1152,7 +1183,10 @@ export function useBroadcastSocket({
         authorId: localUserId,
         updatedAt: Date.now(),
       };
-      setLaserPointer(roundedLaser);
+      // Avoid 33Hz local React state re-renders of the entire layout tree during normal cursor movement
+      if (laser?.tool !== 'cursor') {
+        setLaserPointer(roundedLaser);
+      }
       if (socketRef.current?.connected) {
         socketRef.current.emit('CONTENT_LASER_MOVE', roundedLaser);
       }
@@ -1429,15 +1463,32 @@ export function useBroadcastSocket({
     }
   }, [sessionId]);
 
-  const rejoinSession = useCallback(() => {
-    intentionalLeaveRef.current = false;
-    setHasLeftSession(false);
-    setSessionEndedInfo(null);
-    setTeacherStatus('LIVE');
-    if (socketRef.current) {
-      socketRef.current.connect();
-    }
-  }, []);
+  const rejoinSession = useCallback(
+    (options?: { restart?: boolean }) => {
+      intentionalLeaveRef.current = false;
+      setHasLeftSession(false);
+      setSessionEndedInfo(null);
+      setTeacherStatus('LIVE');
+      if (options?.restart) {
+        restartRef.current = true;
+      }
+      if (socketRef.current) {
+        if (socketRef.current.connected) {
+          const shouldRestart = restartRef.current;
+          restartRef.current = false;
+          socketRef.current.emit('JOIN_ROOM', {
+            sessionId,
+            lastSeqId: seqIdRef.current,
+            deviceId: clientDeviceIdRef.current,
+            ...(shouldRestart ? { restart: true } : {}),
+          });
+        } else {
+          socketRef.current.connect();
+        }
+      }
+    },
+    [sessionId]
+  );
 
   return {
     isConnected,

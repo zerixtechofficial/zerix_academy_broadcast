@@ -1737,16 +1737,18 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
         'useCompressedClassRecorder must lock startingRelationalContextRef so switching lessons/chapters never creates separate recordings'
       );
 
-      // 3. Pre-Start Recording Course & Session Details Modal in LearningSessionLayout
+      // 3. Pre-Start Recording Session, Course & Language Details Modal in LearningSessionLayout
       assert.equal(
         layoutSource.includes('data-testid="start-recording-modal"') &&
+          layoutSource.includes('data-testid="recording-modal-session-input"') &&
           layoutSource.includes('data-testid="recording-modal-course-input"') &&
-          layoutSource.includes('data-testid="recording-modal-chapter-input"') &&
-          layoutSource.includes('data-testid="recording-modal-lesson-input"') &&
+          layoutSource.includes('data-testid="recording-modal-language-input"') &&
+          !layoutSource.includes('data-testid="recording-modal-chapter-input"') &&
+          !layoutSource.includes('data-testid="recording-modal-lesson-input"') &&
           layoutSource.includes('data-testid="recording-modal-voice-checkbox"') &&
           layoutSource.includes('data-testid="confirm-start-recording-btn"'),
         true,
-        'LearningSessionLayout must render prefilled Start Recording Details modal when instructor clicks Record'
+        'LearningSessionLayout must render prefilled Start Recording Details modal for Session, Course, and Language only'
       );
     });
 
@@ -1780,6 +1782,216 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
           layoutSource.includes('data-testid="resume-recording-btn"'),
         true,
         'Recorder and layout must detect already-started session recordings on rejoin and resume appending without resetting to 00:00'
+      );
+    });
+  });
+
+  describe('16. Instant Mic Mute/Unmute & Student Mic Grant Persistence, Content Selection Stability, Session/Course/Language Recording & Light Theme Rejoin Screen', () => {
+    it('caches browser mic permission & keeps voice relay warm for <1ms toggle, and prevents student mic from auto-muting after teacher grant', () => {
+      const stageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/hooks/useLiveKitStage.ts'),
+        'utf8'
+      );
+      const socketSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/hooks/useBroadcastSocket.ts'),
+        'utf8'
+      );
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+
+      // 1. Instant mic permission cache + warm Port-443 voice relay stream toggle
+      assert.equal(
+        stageSource.includes('hasVerifiedMicPermissionRef.current') &&
+          stageSource.includes("name: 'microphone'") &&
+          stageSource.includes('if (!canPublishAudioRef.current) {') &&
+          stageSource.includes('t.enabled = false;'),
+        true,
+        'useLiveKitStage must cache verified mic permission and keep captureStreamRef warm while canPublishAudio is true for instant mute/unmute'
+      );
+
+      // 2. Student self-mute/unmute must not revoke teacher mic grant or refresh LiveKit token mid-speech
+      assert.equal(
+        socketSource.includes('!data.selfUnmuted') &&
+          socketSource.includes('if (!data.selfMuted || data.revokedByTeacher === true)') &&
+          layoutSource.includes('if (activated && (allowStudentUnmute || hasStudentMicGrant))'),
+        true,
+        'Student self-mute/unmute must preserve teacher mic grant and avoid auto-muting the student'
+      );
+    });
+
+    it('preserves text selection on Content page by memoizing block HTML/segments and skipping cursor-mode state updates during selection', () => {
+      const contentStageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/VirtualContentStage.tsx'),
+        'utf8'
+      );
+      const socketSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/hooks/useBroadcastSocket.ts'),
+        'utf8'
+      );
+
+      assert.equal(
+        contentStageSource.includes('const memoizedBlockContentMap = useMemo(') &&
+          contentStageSource.includes('const tokenizedHeaderSegments = useMemo(') &&
+          contentStageSource.includes('dangerouslySetInnerHTML={memoizedBlock.htmlObj}') &&
+          contentStageSource.includes("if (activeTool === 'cursor') {") &&
+          socketSource.includes("if (laser?.tool !== 'cursor') {"),
+        true,
+        'VirtualContentStage must memoize dangerouslySetInnerHTML objects and avoid cursor-mode re-renders so text selection never auto-unselects or lags'
+      );
+    });
+
+    it('renders Light Theme responsive Rejoin page with scrolling enabled, no card ID displayed, and .env Academy website URL', () => {
+      const rejoinSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/RejoinScreen.tsx'),
+        'utf8'
+      );
+      const globalsCss = fs.readFileSync(
+        path.resolve(__dirname, '../src/app/globals.css'),
+        'utf8'
+      );
+      const envLocal = fs.readFileSync(
+        path.resolve(__dirname, '../.env.local'),
+        'utf8'
+      );
+
+      assert.equal(
+        rejoinSource.includes('process.env.NEXT_PUBLIC_ACADEMY_PORTAL_URL') &&
+          rejoinSource.includes('process.env.NEXT_PUBLIC_ACADEMY_URL') &&
+          rejoinSource.includes('overflow-y-auto') &&
+          rejoinSource.includes('bg-white border border-slate-200') &&
+          !rejoinSource.includes('ID: {selectedSessionId}') &&
+          !rejoinSource.includes('Session: {selectedSessionId}'),
+        true,
+        'RejoinScreen must use Light Theme, allow vertical scrolling, hide session/card ID on the card, and read Academy URL from .env'
+      );
+
+      assert.equal(
+        globalsCss.includes('overflow-y: auto;') &&
+          envLocal.includes('NEXT_PUBLIC_ACADEMY_PORTAL_URL='),
+        true,
+        'globals.css must allow vertical scrolling on standalone pages and .env.local must define NEXT_PUBLIC_ACADEMY_PORTAL_URL'
+      );
+    });
+  });
+
+  describe('17. End Class Session Cleanup, Rejoin From Rejoin Page Only, Restart-Only When Ended, Light Theme Main Page & Responsive Content Page', () => {
+    it('clears backend session state on End Class, prevents auto-reviving ENDED sessions without restart=true, and blocks auto-verify/redirect on studio.zerixtech.com root', () => {
+      const audioControllerSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../services/live-broadcast-engine/src/modules/audio-stage/audio.controller.ts'
+        ),
+        'utf8'
+      );
+      const roomManagerSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../services/live-broadcast-engine/src/modules/room/room.manager.ts'
+        ),
+        'utf8'
+      );
+      const broadcastRoutesSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../services/live-broadcast-engine/src/routes/broadcast.routes.ts'
+        ),
+        'utf8'
+      );
+      const engineIndexSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../services/live-broadcast-engine/src/index.ts'
+        ),
+        'utf8'
+      );
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+      const rejoinSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/RejoinScreen.tsx'),
+        'utf8'
+      );
+
+      // 1. Backend clears audio stage Redis keys and removes sessionId from active_broadcast_sessions on endSession
+      assert.equal(
+        audioControllerSource.includes('static async clearSessionState(sessionId: string): Promise<void>') &&
+          roomManagerSource.includes("await redis.srem('active_broadcast_sessions', sessionId);") &&
+          broadcastRoutesSource.includes('await AudioStageController.clearSessionState(sessionId);') &&
+          engineIndexSource.includes('await AudioStageController.clearSessionState(sessionId);'),
+        true,
+        'Ending a session must clear AudioStageController Redis state and remove sessionId from active_broadcast_sessions'
+      );
+
+      // 2. Backend only revives an ENDED session when teacher explicitly passes restart === true
+      assert.equal(
+        broadcastRoutesSource.includes("(room.status !== 'ENDED' || body.restart === true)") &&
+          engineIndexSource.includes("existingRoomCheck.status === 'ENDED'") &&
+          engineIndexSource.includes("!(user.role === 'teacher' && payload?.restart === true)"),
+        true,
+        'Backend init and JOIN_ROOM must not revive an ENDED session unless teacher explicitly passes restart=true'
+      );
+
+      // 3. Direct visits to studio.zerixtech.com (/) clear sessionStorage rejoin tokens and never auto-redirect/auto-verify
+      assert.equal(
+        layoutSource.includes('if (!rawSessId && !rawUrlToken) {') &&
+          layoutSource.includes("window.sessionStorage.removeItem('broadcast_rejoin_token');") &&
+          layoutSource.includes("window.sessionStorage.removeItem('broadcast_rejoin_session_id');") &&
+          layoutSource.includes('const allowStoredTokenLookup = Boolean(') &&
+          rejoinSource.includes("sessionStorage.setItem('broadcast_rejoin_authorized', selectedSessionId);") &&
+          rejoinSource.includes("sessionStorage.setItem('broadcast_restart_authorized', selectedSessionId);"),
+        true,
+        'Direct root visits to studio.zerixtech.com must clear stored session tokens and only allow stored-token rejoin when authorized from /rejoin page'
+      );
+
+      // 4. Ended classroom shows Restart Class Broadcast for teacher and no Rejoin button
+      assert.equal(
+        layoutSource.includes('data-testid="restart-broadcast-btn"') &&
+          layoutSource.includes('const handleRestartBroadcast = useCallback(async () => {') &&
+          layoutSource.includes('CurriculumClient.endSession(sessionId, token)'),
+        true,
+        'LearningSessionLayout must call CurriculumClient.endSession on End Class and show Restart Class Broadcast button (no Rejoin button) when class has ended'
+      );
+    });
+
+    it('uses Light Theme across the main broadcast page screens and modals', () => {
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+
+      assert.equal(
+        layoutSource.includes('data-testid="studio-auth-required-screen"') &&
+          layoutSource.includes('data-testid="studio-auth-verifying-screen"') &&
+          layoutSource.includes("teacherStatus === 'ENDED' ? 'session-ended-screen' : 'session-left-screen'") &&
+          layoutSource.includes('data-testid="start-recording-modal"') &&
+          !layoutSource.includes('bg-[#0B0F19] text-slate-100') &&
+          !layoutSource.includes('bg-[#111827] border border-slate-800'),
+        true,
+        'LearningSessionLayout must use Light Theme across main broadcast screens and modals without dark #0B0F19/#111827 backgrounds'
+      );
+    });
+
+    it('makes Content page responsive across mobile, tablet, laptop, and desktop viewports', () => {
+      const stageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/VirtualContentStage.tsx'),
+        'utf8'
+      );
+      const cssSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/styles/learning-content.css'),
+        'utf8'
+      );
+
+      assert.equal(
+        stageSource.includes('max-w-4xl lg:max-w-5xl xl:max-w-6xl') &&
+          stageSource.includes('overflow-x-hidden') &&
+          cssSource.includes('clamp(') &&
+          cssSource.includes('@media (max-width: 639px)') &&
+          cssSource.includes('grid-template-columns: 1fr !important;'),
+        true,
+        'VirtualContentStage and learning-content.css must apply responsive container widths, fluid typography clamp(), and mobile grid stacking'
       );
     });
   });
