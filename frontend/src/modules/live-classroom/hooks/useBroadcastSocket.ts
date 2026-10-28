@@ -137,7 +137,7 @@ export interface LaserPointerState {
   y: number;
   active: boolean;
   isDragging?: boolean;
-  tool?: 'cursor' | 'laser' | 'pen' | 'eraser';
+  tool?: 'cursor' | 'laser' | 'pen' | 'highlighter' | 'eraser';
   sheetXPct?: number;
   sheetYPct?: number;
   sheetYPx?: number;

@@ -2119,4 +2119,159 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
       );
     });
   });
+
+  describe('19. Pen Line-Locking & Cross-Line Spike Guard on Mobile + Dedicated Highlighter Tool with Color Options', () => {
+    it('locks active Pen/Highlighter strokes to preferredLineTop on Laptop so slight up/down hand movement never jumps to adjacent lines', () => {
+      const laptopTokens = [
+        // Line 1 on Laptop (top = 10, height = 22 -> bottom = 32)
+        { tokenId: 'content:0', left: 20, top: 10, width: 80, height: 22 },
+        { tokenId: 'content:1', left: 108, top: 10, width: 95, height: 22 },
+        { tokenId: 'content:2', left: 211, top: 10, width: 88, height: 22 },
+        // Line 2 on Laptop (top = 36, height = 22 -> bottom = 58)
+        { tokenId: 'content:10', left: 20, top: 36, width: 65, height: 22 },
+        { tokenId: 'content:11', left: 93, top: 36, width: 92, height: 22 },
+        { tokenId: 'content:12', left: 193, top: 36, width: 85, height: 22 },
+      ];
+      const laptopCache: ContentSyncMath.BlockDomLayoutCache = {
+        blockId: 'blk_1',
+        blockRect: { left: 0, top: 0, width: 860, height: 120 } as DOMRect,
+        tokens: new Map(laptopTokens.map((t) => [t.tokenId, t])),
+        tokenList: laptopTokens,
+        regions: new Map(),
+      };
+
+      // Teacher starts underlining Line 2 ('modern' -> 'classrooms' -> 'worldwide', preferredLineTop = 36).
+      // While moving across 'classrooms' (x = 130), teacher's hand drifts slightly UP to y = 34 (between Line 1 bottom=32 and Line 2 top=36).
+      // Previously, Step 1 hit Line 1 ('content:1') because 34 <= 10 + 22 + 12 (44)!
+      // With preferredLineTop = 36 and non-overlapping Step 1 bounds, it MUST stay locked to Line 2 ('content:11')!
+      const hitWhileDriftingUp = ContentSyncMath.hitTestWordToken(130, 34, laptopCache, 12, 36);
+      assert.ok(hitWhileDriftingUp, 'Should resolve a token when drifting slightly up on Line 2');
+      assert.equal(
+        hitWhileDriftingUp?.token.tokenId,
+        'content:11',
+        'Slight upward hand movement while marking Line 2 must stay locked to Line 2 token instead of jumping to Line 1'
+      );
+
+      // Conversely, teacher starts underlining Line 1 (preferredLineTop = 10) and hand drifts slightly DOWN to y = 37 (1px inside Line 2 top=36).
+      // With preferredLineTop = 10, it stays locked to Line 1 ('content:1')!
+      const hitWhileDriftingDown = ContentSyncMath.hitTestWordToken(130, 37, laptopCache, 12, 10);
+      assert.ok(hitWhileDriftingDown, 'Should resolve a token when drifting slightly down on Line 1');
+      assert.equal(
+        hitWhileDriftingDown?.token.tokenId,
+        'content:1',
+        'Slight downward hand movement while marking Line 1 must stay locked to Line 1 token instead of jumping to Line 2'
+      );
+    });
+
+    it('repairs isolated cross-line token spikes and breaks subpaths across wrapped mobile lines so Mobile never shows long vertical/diagonal lines', () => {
+      // On Mobile (340px width), Laptop Line 1 wraps across 2 lines, and Laptop Line 2 ('content:10'..'content:12') is on Mobile Line 4 (top = 112)
+      const mobileTokens = [
+        { tokenId: 'content:0', left: 12, top: 10, width: 75, height: 20 },
+        { tokenId: 'content:1', left: 95, top: 10, width: 90, height: 20 },
+        { tokenId: 'content:2', left: 193, top: 10, width: 82, height: 20 },
+        // Wrapped part of Laptop Line 1 on Mobile Line 2 (top = 42)
+        { tokenId: 'content:3', left: 12, top: 42, width: 78, height: 20 },
+        // Laptop Line 2 tokens sit down at Mobile top = 112, and notice content:11 has left = 110 (>= content:1 left = 95!)
+        { tokenId: 'content:10', left: 12, top: 112, width: 60, height: 20 },
+        { tokenId: 'content:11', left: 110, top: 112, width: 88, height: 20 },
+      ];
+      const mobileCache: ContentSyncMath.BlockDomLayoutCache = {
+        blockId: 'blk_1',
+        blockRect: { left: 0, top: 0, width: 340, height: 180 } as DOMRect,
+        tokens: new Map(mobileTokens.map((t) => [t.tokenId, t])),
+        tokenList: mobileTokens,
+        regions: new Map(),
+      };
+
+      // Case A: A stroke along Line 1 ('content:0' -> 'content:1' -> 'content:2') has a 1-point spike to 'content:11' (token index diff = 10 >= 4)
+      const strokeWithCrossLineSpike = [
+        { x: 5, y: 10, tokenId: 'content:0', rx: 0.2, ry: 0.9 },
+        { x: 15, y: 10, tokenId: 'content:1', rx: 0.3, ry: 0.9 },
+        { x: 18, y: 30, tokenId: 'content:11', rx: 0.4, ry: 0.1 }, // Accidental cross-line spike to Line 2 token
+        { x: 25, y: 10, tokenId: 'content:1', rx: 0.8, ry: 0.9 },
+        { x: 35, y: 10, tokenId: 'content:2', rx: 0.7, ry: 0.9 },
+      ];
+
+      const pathData = ContentSyncMath.buildResponsiveSvgPath(
+        strokeWithCrossLineSpike,
+        mobileCache,
+        true
+      );
+      // Verify no Y coordinate in the SVG path ever drops down to Mobile Line 4 (y >= 100)
+      const yMatches = Array.from(pathData.matchAll(/[ML]\s*[\d.]+\s+([\d.]+)/g)).map((m) =>
+        parseFloat(m[1])
+      );
+      assert.equal(yMatches.length > 0, true);
+      for (const yVal of yMatches) {
+        assert.equal(
+          yVal < 50,
+          true,
+          `SVG path on Mobile must stay on Line 1 (<50px) and never spike down to y=${yVal}px`
+        );
+      }
+
+      // Case B: Multi-word stroke that genuinely spans across a wrapped line where curr.tokenBox.left >= prev.tokenBox.left
+      const wrappedStroke = [
+        { x: 5, y: 10, tokenId: 'content:0', rx: 0.1, ry: 0.9 },
+        { x: 15, y: 10, tokenId: 'content:1', rx: 0.9, ry: 0.9 },
+        // Next point is on another line (top = 112 vs top = 10) AND its left (110) >= prev left (95)
+        { x: 20, y: 40, tokenId: 'content:11', rx: 0.1, ry: 0.9 },
+        { x: 30, y: 40, tokenId: 'content:11', rx: 0.9, ry: 0.9 },
+      ];
+      const wrappedPath = ContentSyncMath.buildResponsiveSvgPath(wrappedStroke, mobileCache, true);
+      const moveCommands = (wrappedPath.match(/M\s*[\d.]+\s+[\d.]+/g) || []).length;
+      assert.equal(
+        moveCommands >= 2,
+        true,
+        'buildResponsiveSvgPath must break subpath with M whenever consecutive tokens sit on different lines even if curr.left >= prev.left'
+      );
+    });
+
+    it('renders dedicated Highlighter tool right after Pen tool with color options and highlights + underlines exact words across devices', () => {
+      const stageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/VirtualContentStage.tsx'),
+        'utf8'
+      );
+      const socketSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/hooks/useBroadcastSocket.ts'),
+        'utf8'
+      );
+
+      // 1. Highlighter button is present right after Pen button in VirtualContentStage toolbar
+      const penBtnIdx = stageSource.indexOf('data-testid="content-tool-pen"');
+      const highlighterBtnIdx = stageSource.indexOf('data-testid="content-tool-highlighter"');
+      const laserBtnIdx = stageSource.indexOf('data-testid="content-tool-laser"');
+      assert.equal(
+        penBtnIdx > 0 && highlighterBtnIdx > penBtnIdx && laserBtnIdx > highlighterBtnIdx,
+        true,
+        'Highlighter tool button (data-testid="content-tool-highlighter") must be placed right after Pen tool and before Laser tool'
+      );
+
+      // 2. Color options are shown for both Pen and Highlighter tools
+      assert.equal(
+        stageSource.includes("(activeTool === 'pen' || activeTool === 'highlighter')") &&
+          stageSource.includes("['#ef4444', '#12a3ff', '#10b981', '#f59e0b', '#eab308', '#0f172a']"),
+        true,
+        'Color options must be available for both Pen and Highlighter tools'
+      );
+
+      // 3. Highlighter tool applies word-by-word background highlight + underline on [data-token-id] spans and skips messy SVG path when word tokens exist
+      assert.equal(
+        stageSource.includes('style.backgroundColor = hexToRgba(info.highlightedColor, 0.24);') &&
+          stageSource.includes('style.borderBottom = `2.5px solid ${info.highlightedColor}`;') &&
+          stageSource.includes('span.style.backgroundColor = hexToRgba(info.highlightedColor, 0.24);') &&
+          stageSource.includes('span.style.borderBottom = `2.5px solid ${info.highlightedColor}`;') &&
+          stageSource.includes('if (isHighlighter && hasWordTokens) return null;'),
+        true,
+        'Highlighter tool must apply background highlight + solid bottom underline to exact word spans and suppress freehand SVG overlay when word tokens are anchored'
+      );
+
+      // 4. useBroadcastSocket supports 'highlighter' in LaserPointerState.tool
+      assert.equal(
+        socketSource.includes("tool?: 'cursor' | 'laser' | 'pen' | 'highlighter' | 'eraser';"),
+        true,
+        'LaserPointerState.tool must include highlighter'
+      );
+    });
+  });
 });

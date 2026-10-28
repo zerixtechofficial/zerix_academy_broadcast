@@ -34,6 +34,7 @@
 
 .content-main-container[data-selection-enabled="false"],
 .content-main-container[data-active-content-tool="pen"],
+.content-main-container[data-active-content-tool="highlighter"],
 .content-main-container[data-active-content-tool="laser"],
 .content-main-container[data-active-content-tool="eraser"],
 .content-main-container.select-none {
@@ -43,6 +44,7 @@
 
 .content-main-container[data-selection-enabled="false"] *,
 .content-main-container[data-active-content-tool="pen"] *,
+.content-main-container[data-active-content-tool="highlighter"] *,
 .content-main-container[data-active-content-tool="laser"] *,
 .content-main-container[data-active-content-tool="eraser"] *,
 .content-main-container.select-none * {
@@ -58,6 +60,8 @@
 
 [data-active-content-tool="pen"],
 [data-active-content-tool="pen"] *,
+[data-active-content-tool="highlighter"],
+[data-active-content-tool="highlighter"] *,
 [data-active-content-tool="eraser"],
 [data-active-content-tool="eraser"] * {
   cursor: crosshair !important;

@@ -395,8 +395,49 @@ export function hitTestWordToken(
   localX: number,
   localY: number,
   cache: BlockDomLayoutCache,
-  tolerancePx = 12
+  tolerancePx = 12,
+  preferredLineTop?: number
 ): { token: CachedTokenBox; rx: number; ry: number } | null {
+  // 0. Active-stroke line lock: if the user is dragging horizontally along an active line (`preferredLineTop`),
+  // keep slight upward/downward hand movements locked to words on that same line so it never jumps to the line above/below.
+  if (typeof preferredLineTop === 'number' && Number.isFinite(preferredLineTop)) {
+    let bestLockedToken: CachedTokenBox | null = null;
+    let bestLockedDx = Infinity;
+    for (let i = 0; i < cache.tokenList.length; i++) {
+      const t = cache.tokenList[i];
+      if (Math.abs(t.top - preferredLineTop) > t.height * 0.55) continue;
+      const topLimit = t.top - Math.max(7, t.height * 0.42);
+      const bottomLimit = t.top + t.height + Math.max(12, t.height * 0.55);
+      if (localY < topLimit || localY > bottomLimit) continue;
+
+      const dx =
+        localX < t.left
+          ? t.left - localX
+          : localX > t.left + t.width
+          ? localX - (t.left + t.width)
+          : 0;
+      if (dx <= Math.max(tolerancePx, 28) && dx < bestLockedDx) {
+        bestLockedDx = dx;
+        bestLockedToken = t;
+      }
+    }
+    if (bestLockedToken) {
+      const rx = Math.max(
+        -1.5,
+        Math.min(2.5, (localX - bestLockedToken.left) / Math.max(1, bestLockedToken.width))
+      );
+      const ry = Math.max(
+        -0.2,
+        Math.min(1.25, (localY - bestLockedToken.top) / Math.max(1, bestLockedToken.height))
+      );
+      return {
+        token: bestLockedToken,
+        rx: Math.round(rx * 1000) / 1000,
+        ry: Math.round(ry * 1000) / 1000,
+      };
+    }
+  }
+
   // 1. Direct containment including each word's immediate underline zone
   for (let i = 0; i < cache.tokenList.length; i++) {
     const t = cache.tokenList[i];
@@ -404,7 +445,7 @@ export function hitTestWordToken(
     if (
       localX >= t.left - 3 &&
       localX <= t.left + t.width + 3 &&
-      localY >= t.top - 2 &&
+      localY >= t.top + 1.5 &&
       localY <= t.top + t.height + underlineAllowance
     ) {
       const rx = Math.max(-1.5, Math.min(2.5, (localX - t.left) / Math.max(1, t.width)));
@@ -429,14 +470,21 @@ export function hitTestWordToken(
       localX < t.left ? t.left - localX : localX > t.left + t.width ? localX - (t.left + t.width) : 0;
 
     const underlineAllowance = Math.max(6, Math.min(12, t.height * 0.28));
-    const effectiveTop = t.top - 2;
+    const effectiveTop = t.top + 1.5;
     const effectiveBottom = t.top + t.height + underlineAllowance;
-    const dy =
+    let dy =
       localY < effectiveTop
-        ? (effectiveTop - localY) * 2.0
+        ? (effectiveTop - localY) * 3.5
         : localY > effectiveBottom
         ? localY - effectiveBottom
         : 0;
+
+    if (
+      typeof preferredLineTop === 'number' &&
+      Math.abs(t.top - preferredLineTop) > t.height * 0.55
+    ) {
+      dy += t.height * 2.0;
+    }
 
     if (dx <= tolX && dy <= tolY) {
       // Weight vertical distance strongly so inter-word spaces stay on the same line
@@ -468,7 +516,8 @@ export function captureStrokePoint(
   clientX: number,
   clientY: number,
   cache: BlockDomLayoutCache,
-  liveRect?: DOMRect
+  liveRect?: DOMRect,
+  preferredLineTop?: number
 ): AnchoredStrokePoint {
   const blockRect = liveRect || cache.blockRect;
   const safeW = Math.max(1, blockRect.width);
@@ -516,7 +565,7 @@ export function captureStrokePoint(
 
   // Hit-test word tokens (unless inside a pure SVG diagram region)
   if (point.regionId !== 'diagram') {
-    const hit = hitTestWordToken(localX, localY, cache, 14);
+    const hit = hitTestWordToken(localX, localY, cache, 14, preferredLineTop);
     if (hit) {
       point.tokenId = hit.token.tokenId;
       point.rx = hit.rx;
@@ -606,9 +655,10 @@ export function projectPointToDevicePixels(
     const tokenBox =
       cache.tokens.get(pt.tokenId) || cache.tokens.get(stripTokenBlockScope(pt.tokenId));
     if (tokenBox) {
+      const effectiveRy = _isPenStroke ? Math.max(-0.15, Math.min(1.25, pt.ry)) : pt.ry;
       return {
         px: tokenBox.left + pt.rx * tokenBox.width,
-        py: tokenBox.top + pt.ry * tokenBox.height,
+        py: tokenBox.top + effectiveRy * tokenBox.height,
         tokenBox,
       };
     }
@@ -755,10 +805,39 @@ export function buildResponsiveSvgPath(
       .join(' ');
   }
 
-  const workingPoints = expandWrappedTokenPoints(points, cache);
+  // If a stroke is word-anchored, repair any isolated cross-line token index spikes caused by slight vertical hand wobble on wide screens
+  const cleanedInputPoints: AnchoredStrokePoint[] = points.map((pt, idx) => {
+    if (idx <= 0 || idx >= points.length - 1 || !pt.tokenId) return pt;
+    const prev = points[idx - 1];
+    const next = points[idx + 1];
+    if (!prev.tokenId || !next.tokenId) return pt;
+    const pPrev = parseTokenId(prev.tokenId);
+    const pCurr = parseTokenId(pt.tokenId);
+    const pNext = parseTokenId(next.tokenId);
+    if (
+      pPrev &&
+      pCurr &&
+      pNext &&
+      pPrev.prefix === pCurr.prefix &&
+      pPrev.prefix === pNext.prefix &&
+      Math.abs(pNext.index - pPrev.index) <= 2 &&
+      Math.abs(pCurr.index - pPrev.index) > 3 &&
+      Math.abs(pCurr.index - pNext.index) > 3
+    ) {
+      return {
+        ...pt,
+        tokenId: prev.tokenId,
+        rx: typeof prev.rx === 'number' && typeof next.rx === 'number' ? (prev.rx + next.rx) * 0.5 : prev.rx,
+        ry: typeof prev.ry === 'number' && typeof next.ry === 'number' ? (prev.ry + next.ry) * 0.5 : prev.ry,
+      };
+    }
+    return pt;
+  });
+
+  const workingPoints = expandWrappedTokenPoints(cleanedInputPoints, cache);
   const projected = workingPoints.map((pt) => projectPointToDevicePixels(pt, cache, isPenStroke));
 
-  // If a stroke is primarily word-anchored, keep any un-tokenized margin points anchored relative to their nearest word-anchored neighbor
+  // If a stroke is primarily word-anchored, keep any un-tokenized margin points tightly bounded relative to their nearest word-anchored neighbor
   const hasTokenAnchoredPoint = projected.some((p) => Boolean(p.tokenBox));
   if (hasTokenAnchoredPoint && projected.length > 1) {
     const blockW = Math.max(1, cache.blockRect.width);
@@ -778,11 +857,36 @@ export function buildResponsiveSvgPath(
         const anchorProj = projected[nearestIdx];
         const anchorPt = workingPoints[nearestIdx];
         const currPt = workingPoints[i];
+        const anchorH = anchorProj.tokenBox?.height || 20;
+        const maxDx = Math.max(18, anchorH * 1.2);
+        const maxDy = Math.max(6, anchorH * 0.35);
+        const rawDx = ((currPt.x - anchorPt.x) / 100) * blockW;
+        const rawDy = ((currPt.y - anchorPt.y) / 100) * blockH;
         projected[i] = {
-          px: anchorProj.px + ((currPt.x - anchorPt.x) / 100) * blockW,
-          py: anchorProj.py + ((currPt.y - anchorPt.y) / 100) * blockH,
+          px: anchorProj.px + Math.max(-maxDx, Math.min(maxDx, rawDx)),
+          py: anchorProj.py + Math.max(-maxDy, Math.min(maxDy, rawDy)),
           tokenBox: anchorProj.tokenBox,
         };
+      }
+    }
+
+    // Smooth any 1-point cross-line vertical jitter where prev and next sit on the same line on the viewer's screen
+    for (let i = 1; i < projected.length - 1; i++) {
+      const prev = projected[i - 1];
+      const curr = projected[i];
+      const next = projected[i + 1];
+      if (prev.tokenBox && curr.tokenBox && next.tokenBox) {
+        const avgH = (prev.tokenBox.height + next.tokenBox.height) * 0.5;
+        if (
+          Math.abs(prev.tokenBox.top - next.tokenBox.top) <= avgH * 0.5 &&
+          Math.abs(curr.tokenBox.top - prev.tokenBox.top) > avgH * 0.6
+        ) {
+          projected[i] = {
+            px: (prev.px + next.px) * 0.5,
+            py: (prev.py + next.py) * 0.5,
+            tokenBox: prev.tokenBox,
+          };
+        }
       }
     }
   }
@@ -803,12 +907,19 @@ export function buildResponsiveSvgPath(
     const prev = projected[i - 1];
     let shouldBreakSubpath = false;
 
-    // Detect if the stroke jumped across a line wrap on this device
+    // Detect if the stroke jumped across different lines on this device
     if (prev.tokenBox && curr.tokenBox && prev.tokenBox.tokenId !== curr.tokenBox.tokenId) {
       const lineDiff = Math.abs(curr.tokenBox.top - prev.tokenBox.top);
       const avgHeight = (curr.tokenBox.height + prev.tokenBox.height) * 0.5;
-      // If the two words are on different lines AND X jumped backward (line wrap)
-      if (lineDiff > avgHeight * 0.6 && curr.tokenBox.left < prev.tokenBox.left + 4) {
+      if (lineDiff > avgHeight * 0.6) {
+        shouldBreakSubpath = true;
+      }
+    }
+
+    // Never draw a long vertical or diagonal connecting line across lines of text in a word-anchored stroke
+    if (!shouldBreakSubpath && hasTokenAnchoredPoint) {
+      const refHeight = curr.tokenBox?.height || prev.tokenBox?.height || 20;
+      if (Math.abs(curr.py - prev.py) > refHeight * 1.15) {
         shouldBreakSubpath = true;
       }
     }

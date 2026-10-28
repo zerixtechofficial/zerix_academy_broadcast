@@ -125,8 +125,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   const [blockLayouts, setBlockLayouts] = useState<Record<string, BlockDomLayoutCache>>({});
   const activeDrawCacheRef = useRef<BlockDomLayoutCache | null>(null);
 
-  // Content tools: select (cursor), pen, laser, eraser
-  const [activeTool, setActiveTool] = useState<'cursor' | 'pen' | 'eraser' | 'laser'>('cursor');
+  // Content tools: select (cursor), pen, highlighter, laser, eraser
+  const [activeTool, setActiveTool] = useState<'cursor' | 'pen' | 'highlighter' | 'eraser' | 'laser'>('cursor');
   const [penColor, setPenColor] = useState<string>('#ef4444');
   const [activeDrawingBlockId, setActiveDrawingBlockId] = useState<string | null>(null);
   const [currentPoints, setCurrentPoints] = useState<AnchoredStrokePoint[]>([]);
@@ -137,8 +137,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   // Excalidraw-Style Laser Trail & Exact Cursor Tracking
   const LASER_TRAIL_DURATION_MS = 850;
   const [laserTrail, setLaserTrail] = useState<{ x: number; y: number; t: number }[]>([]);
-  const [teacherLaserCoord, setTeacherLaserCoord] = useState<{ x: number; y: number; active: boolean; tool?: 'cursor' | 'laser' | 'pen' | 'eraser' } | null>(null);
-  const [remoteLaserCoord, setRemoteLaserCoord] = useState<{ x: number; y: number; active: boolean; tool?: 'cursor' | 'laser' | 'pen' | 'eraser' } | null>(null);
+  const [teacherLaserCoord, setTeacherLaserCoord] = useState<{ x: number; y: number; active: boolean; tool?: 'cursor' | 'laser' | 'pen' | 'highlighter' | 'eraser' } | null>(null);
+  const [remoteLaserCoord, setRemoteLaserCoord] = useState<{ x: number; y: number; active: boolean; tool?: 'cursor' | 'laser' | 'pen' | 'highlighter' | 'eraser' } | null>(null);
 
   const isProgrammaticScrollRef = useRef<boolean>(false);
   const programmaticScrollTimeoutRef = useRef<number | null>(null);
@@ -815,7 +815,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       return;
     }
 
-    if (activeTool === 'pen') {
+    if (activeTool === 'pen' || activeTool === 'highlighter') {
       e.stopPropagation();
       try {
         e.currentTarget.setPointerCapture(e.pointerId);
@@ -857,10 +857,23 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     }
 
     if (
-      activeTool === 'pen' &&
+      (activeTool === 'pen' || activeTool === 'highlighter') &&
       (activeDrawingBlockIdRef.current === blockId || activeDrawingBlockId === blockId)
     ) {
-      const pt = captureStrokePoint(e.clientX, e.clientY, cache, liveRect);
+      let preferredLineTop: number | undefined;
+      for (let k = currentPointsRef.current.length - 1; k >= 0; k--) {
+        const prevTid = currentPointsRef.current[k].tokenId;
+        if (prevTid) {
+          const prevBox =
+            cache.tokens.get(prevTid) || cache.tokens.get(stripTokenBlockScope(prevTid));
+          if (prevBox) {
+            preferredLineTop = prevBox.top;
+            break;
+          }
+        }
+      }
+
+      const pt = captureStrokePoint(e.clientX, e.clientY, cache, liveRect, preferredLineTop);
       const next = [...currentPointsRef.current, pt];
       currentPointsRef.current = next;
       setCurrentPoints(next);
@@ -874,13 +887,13 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         const sheetRect = sheetEl.getBoundingClientRect();
         const sheetX = e.clientX - sheetRect.left;
         const sheetY = e.clientY - sheetRect.top;
-        setTeacherLaserCoord({ x: sheetX, y: sheetY, active: true, tool: 'pen' });
+        setTeacherLaserCoord({ x: sheetX, y: sheetY, active: true, tool: activeTool });
         sheetXPct = Math.round(((sheetX / Math.max(1, sheetRect.width)) * 100) * 10) / 10;
         sheetYPct = Math.round(((sheetY / Math.max(1, sheetRect.height)) * 100) * 10) / 10;
         sheetYPx = Math.round(sheetY);
       }
 
-      // Broadcast active block and word/region-anchored pen pointer so remote screens track exact pen position
+      // Broadcast active block and word/region-anchored pointer so remote screens track exact position
       const now = Date.now();
       if (now - lastLaserEmitRef.current >= 30) {
         lastLaserEmitRef.current = now;
@@ -889,7 +902,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           x: pt.x,
           y: pt.y,
           active: true,
-          tool: 'pen',
+          tool: activeTool,
           isDragging: true,
           tokenId: pt.tokenId,
           rx: pt.rx,
@@ -919,7 +932,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     }
 
     if (
-      activeTool === 'pen' &&
+      (activeTool === 'pen' || activeTool === 'highlighter') &&
       (activeDrawingBlockIdRef.current === blockId || activeDrawingBlockId === blockId)
     ) {
       activeDrawingBlockIdRef.current = null;
@@ -956,13 +969,14 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           y: Math.round(pt.y * 10) / 10,
         }));
 
+        const strokeTool = activeTool === 'highlighter' ? 'highlighter' : 'pen';
         const stroke: ContentStroke = {
           id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           blockId,
           color: penColor,
-          width: 3,
-          tool: 'pen',
-          opacity: 1,
+          width: strokeTool === 'highlighter' ? 14 : 3,
+          tool: strokeTool,
+          opacity: strokeTool === 'highlighter' ? 0.35 : 1,
           anchorTokens: finalTokens,
           points: normalizedPoints,
         };
@@ -1031,8 +1045,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         });
       }
       setTeacherLaserCoord({ x: sheetX, y: sheetY, active: true, tool: 'laser' });
-    } else if (activeTool === 'pen') {
-      setTeacherLaserCoord({ x: sheetX, y: sheetY, active: true, tool: 'pen' });
+    } else if (activeTool === 'pen' || activeTool === 'highlighter') {
+      setTeacherLaserCoord({ x: sheetX, y: sheetY, active: true, tool: activeTool });
     }
 
     // In cursor mode, throttle background hover sync to 120ms and avoid forced layout thrashing
@@ -1202,6 +1216,12 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         style.borderRadius = '2px';
       }
       */
+      if (isHighlighted && info?.highlightedColor) {
+        style.backgroundColor = hexToRgba(info.highlightedColor, 0.24);
+        style.borderBottom = `2.5px solid ${info.highlightedColor}`;
+        style.borderRadius = '3px';
+        style.paddingBottom = '1px';
+      }
 
       return (
         <span
@@ -1312,7 +1332,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
             blockId: activeDrawingBlockId,
             color: penColor,
             width: 3,
-            tool: 'pen',
+            tool: activeTool === 'highlighter' ? 'highlighter' : 'pen',
             opacity: 1,
             anchorTokens: currentAnchorTokens,
             points: currentPoints,
@@ -1394,8 +1414,16 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         }
         if (info?.highlightedColor) {
           span.setAttribute('data-highlighted', 'true');
+          span.style.backgroundColor = hexToRgba(info.highlightedColor, 0.24);
+          span.style.borderBottom = `2.5px solid ${info.highlightedColor}`;
+          span.style.borderRadius = '3px';
+          span.style.paddingBottom = '1px';
         } else {
           span.removeAttribute('data-highlighted');
+          span.style.backgroundColor = '';
+          span.style.borderBottom = '';
+          span.style.borderRadius = '';
+          span.style.paddingBottom = '';
         }
         if (info?.strokeIds?.length) {
           span.setAttribute('data-stroke-ids', info.strokeIds.join(','));
@@ -1416,6 +1444,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     currentPoints,
     currentAnchorTokens,
     penColor,
+    activeTool,
     laserPointer.active,
     laserPointer.blockId,
     laserPointer.tokenId,
@@ -1484,10 +1513,28 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                   ? 'bg-[#12a3ff] text-white shadow-sm'
                   : 'text-slate-600 hover:bg-slate-100'
               }`}
-              title="Annotate / Mark Words with Pen"
+              title="Annotate / Write with Pen"
             >
               <PenTool className="w-3 sm:w-3.5 h-3 sm:h-3.5 shrink-0" />
               <span>Pen</span>
+            </button>
+
+            <button
+              type="button"
+              data-testid="content-tool-highlighter"
+              onClick={() => {
+                setActiveTool('highlighter');
+                onLaserMove({ blockId: '', x: 0, y: 0, active: false });
+              }}
+              className={`flex items-center gap-1 px-1.5 sm:px-2.5 py-0.5 sm:py-1 rounded-full text-[10px] sm:text-xs font-medium whitespace-nowrap transition-all shrink-0 ${
+                activeTool === 'highlighter'
+                  ? 'bg-amber-500 text-white shadow-sm'
+                  : 'text-slate-600 hover:bg-slate-100'
+              }`}
+              title="Highlight & Underline Words"
+            >
+              <Highlighter className="w-3 sm:w-3.5 h-3 sm:h-3.5 shrink-0" />
+              <span>Highlighter</span>
             </button>
 
             <button
@@ -1523,14 +1570,15 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
               <span>Eraser</span>
             </button>
 
-            {activeTool === 'pen' && (
+            {(activeTool === 'pen' || activeTool === 'highlighter') && (
               <>
                 <div className="h-3.5 w-px bg-slate-200 mx-0.5 shrink-0" />
                 <div className="flex items-center gap-1 shrink-0">
-                  {['#ef4444', '#12a3ff', '#10b981', '#f59e0b', '#0f172a'].map((c) => (
+                  {['#ef4444', '#12a3ff', '#10b981', '#f59e0b', '#eab308', '#0f172a'].map((c) => (
                     <button
                       key={c}
                       type="button"
+                      data-testid={`content-color-${c}`}
                       onClick={() => setPenColor(c)}
                       className={`w-3.5 sm:w-4 h-3.5 sm:h-4 rounded-full border transition-transform shrink-0 ${
                         penColor === c
@@ -1598,7 +1646,10 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
             handleUserScrollIntent();
           }
           handleSheetPointerMove(e);
-          if (canAnnotate && (activeTool === 'pen' || activeTool === 'eraser')) {
+          if (
+            canAnnotate &&
+            (activeTool === 'pen' || activeTool === 'highlighter' || activeTool === 'eraser')
+          ) {
             handleBlockPointerDown(e, 'blk_page_canvas');
           }
         }}
@@ -1606,7 +1657,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           handleSheetPointerMove(e);
           if (
             canAnnotate &&
-            (activeTool === 'pen' || activeTool === 'eraser') &&
+            (activeTool === 'pen' || activeTool === 'highlighter' || activeTool === 'eraser') &&
             activeDrawingBlockIdRef.current === 'blk_page_canvas'
           ) {
             handleBlockPointerMove(e, 'blk_page_canvas');
@@ -1616,7 +1667,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           handleSheetPointerUp();
           if (
             canAnnotate &&
-            (activeTool === 'pen' || activeTool === 'eraser') &&
+            (activeTool === 'pen' || activeTool === 'highlighter' || activeTool === 'eraser') &&
             activeDrawingBlockIdRef.current
           ) {
             handleBlockPointerUp(e, activeDrawingBlockIdRef.current);
@@ -1666,7 +1717,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                     blockId: pageCanvasId,
                     color: penColor,
                     width: 3,
-                    tool: 'pen',
+                    tool: activeTool === 'highlighter' ? 'highlighter' : 'pen',
                     opacity: 1,
                     anchorTokens: currentAnchorTokens,
                     points: currentPoints,
@@ -1695,6 +1746,11 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                 className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-20"
               >
                 {allPageCanvasStrokes.map((stroke) => {
+                  const isHighlighter = stroke.tool === 'highlighter';
+                  const hasWordTokens =
+                    (Array.isArray(stroke.anchorTokens) && stroke.anchorTokens.length > 0) ||
+                    Boolean(stroke.points?.some((p) => Boolean(p.tokenId)));
+                  if (isHighlighter && hasWordTokens) return null;
                   const dPath = buildResponsiveSvgPath(
                     stroke.points || [],
                     pageLayoutCache,
@@ -1734,7 +1790,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                     blockId: headerBlockId,
                     color: penColor,
                     width: 3,
-                    tool: 'pen',
+                    tool: activeTool === 'highlighter' ? 'highlighter' : 'pen',
                     opacity: 1,
                     anchorTokens: currentAnchorTokens,
                     points: currentPoints,
@@ -1743,22 +1799,63 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
               : headerStrokes;
 
             const headerTokenAnnotationMap = new Map<string, TokenAnnotationInfo>();
-            for (const s of allHeaderStrokes) {
+            const headerAndPageStrokes = [
+              ...allHeaderStrokes,
+              ...contentState.penStrokes.filter((s) => s.blockId === 'blk_page_canvas'),
+              ...(activeDrawingBlockId === 'blk_page_canvas' && currentPoints.length > 0
+                ? [
+                    {
+                      id: 'temp-active-page-stroke',
+                      blockId: 'blk_page_canvas',
+                      color: penColor,
+                      width: 3,
+                      tool: (activeTool === 'highlighter' ? 'highlighter' : 'pen') as 'highlighter' | 'pen',
+                      opacity: 1,
+                      anchorTokens: currentAnchorTokens,
+                      points: currentPoints,
+                    },
+                  ]
+                : []),
+            ];
+            for (const s of headerAndPageStrokes) {
+              const isDirect = s.blockId === headerBlockId;
+              const isHighlighter = s.tool === 'highlighter';
               const touchedTokens = new Set<string>();
               if (Array.isArray(s.anchorTokens)) {
                 for (const tid of s.anchorTokens) {
-                  if (tid) touchedTokens.add(stripTokenBlockScope(tid));
+                  if (!tid) continue;
+                  const scope = extractTokenBlockScope(tid);
+                  if (isDirect && (!scope || scope === headerBlockId)) {
+                    touchedTokens.add(stripTokenBlockScope(tid));
+                  } else if (!isDirect && scope === headerBlockId) {
+                    touchedTokens.add(stripTokenBlockScope(tid));
+                  }
                 }
               }
               if (Array.isArray(s.points)) {
                 for (const pt of s.points) {
-                  if (pt?.tokenId) touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+                  if (!pt?.tokenId) continue;
+                  const scope = extractTokenBlockScope(pt.tokenId);
+                  if (isDirect && (!scope || scope === headerBlockId)) {
+                    touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+                  } else if (!isDirect && scope === headerBlockId) {
+                    touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+                  }
                 }
               }
               touchedTokens.forEach((tid) => {
                 const existing = headerTokenAnnotationMap.get(tid) || { strokeIds: [] };
-                existing.markedColor = s.color || '#ef4444';
-                if (s.id && s.id !== 'temp-active-stroke' && !existing.strokeIds.includes(s.id)) {
+                if (isHighlighter) {
+                  existing.highlightedColor = s.color || '#facc15';
+                } else {
+                  existing.markedColor = s.color || '#ef4444';
+                }
+                if (
+                  s.id &&
+                  s.id !== 'temp-active-stroke' &&
+                  s.id !== 'temp-active-page-stroke' &&
+                  !existing.strokeIds.includes(s.id)
+                ) {
                   existing.strokeIds.push(s.id);
                 }
                 headerTokenAnnotationMap.set(tid, existing);
@@ -1817,6 +1914,11 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                   className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-10"
                 >
                   {allHeaderStrokes.map((stroke) => {
+                    const isHighlighter = stroke.tool === 'highlighter';
+                    const hasWordTokens =
+                      (Array.isArray(stroke.anchorTokens) && stroke.anchorTokens.length > 0) ||
+                      Boolean(stroke.points?.some((p) => Boolean(p.tokenId)));
+                    if (isHighlighter && hasWordTokens) return null;
                     const dPath = buildResponsiveSvgPath(stroke.points || [], headerLayoutCache, stroke.tool === 'pen');
                     if (!dPath) return null;
                     return (
@@ -1855,7 +1957,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                       blockId: subheaderBlockId,
                       color: penColor,
                       width: 3,
-                      tool: 'pen',
+                      tool: activeTool === 'highlighter' ? 'highlighter' : 'pen',
                       opacity: 1,
                       anchorTokens: currentAnchorTokens,
                       points: currentPoints,
@@ -1864,22 +1966,63 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                 : subheaderStrokes;
 
               const subheaderTokenAnnotationMap = new Map<string, TokenAnnotationInfo>();
-              for (const s of allSubheaderStrokes) {
+              const subheaderAndPageStrokes = [
+                ...allSubheaderStrokes,
+                ...contentState.penStrokes.filter((s) => s.blockId === 'blk_page_canvas'),
+                ...(activeDrawingBlockId === 'blk_page_canvas' && currentPoints.length > 0
+                  ? [
+                      {
+                        id: 'temp-active-page-stroke',
+                        blockId: 'blk_page_canvas',
+                        color: penColor,
+                        width: 3,
+                        tool: (activeTool === 'highlighter' ? 'highlighter' : 'pen') as 'highlighter' | 'pen',
+                        opacity: 1,
+                        anchorTokens: currentAnchorTokens,
+                        points: currentPoints,
+                      },
+                    ]
+                  : []),
+              ];
+              for (const s of subheaderAndPageStrokes) {
+                const isDirect = s.blockId === subheaderBlockId;
+                const isHighlighter = s.tool === 'highlighter';
                 const touchedTokens = new Set<string>();
                 if (Array.isArray(s.anchorTokens)) {
                   for (const tid of s.anchorTokens) {
-                    if (tid) touchedTokens.add(stripTokenBlockScope(tid));
+                    if (!tid) continue;
+                    const scope = extractTokenBlockScope(tid);
+                    if (isDirect && (!scope || scope === subheaderBlockId)) {
+                      touchedTokens.add(stripTokenBlockScope(tid));
+                    } else if (!isDirect && scope === subheaderBlockId) {
+                      touchedTokens.add(stripTokenBlockScope(tid));
+                    }
                   }
                 }
                 if (Array.isArray(s.points)) {
                   for (const pt of s.points) {
-                    if (pt?.tokenId) touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+                    if (!pt?.tokenId) continue;
+                    const scope = extractTokenBlockScope(pt.tokenId);
+                    if (isDirect && (!scope || scope === subheaderBlockId)) {
+                      touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+                    } else if (!isDirect && scope === subheaderBlockId) {
+                      touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+                    }
                   }
                 }
                 touchedTokens.forEach((tid) => {
                   const existing = subheaderTokenAnnotationMap.get(tid) || { strokeIds: [] };
-                  existing.markedColor = s.color || '#ef4444';
-                  if (s.id && s.id !== 'temp-active-stroke' && !existing.strokeIds.includes(s.id)) {
+                  if (isHighlighter) {
+                    existing.highlightedColor = s.color || '#facc15';
+                  } else {
+                    existing.markedColor = s.color || '#ef4444';
+                  }
+                  if (
+                    s.id &&
+                    s.id !== 'temp-active-stroke' &&
+                    s.id !== 'temp-active-page-stroke' &&
+                    !existing.strokeIds.includes(s.id)
+                  ) {
                     existing.strokeIds.push(s.id);
                   }
                   subheaderTokenAnnotationMap.set(tid, existing);
@@ -1941,6 +2084,11 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                     className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-10"
                   >
                     {allSubheaderStrokes.map((stroke) => {
+                      const isHighlighter = stroke.tool === 'highlighter';
+                      const hasWordTokens =
+                        (Array.isArray(stroke.anchorTokens) && stroke.anchorTokens.length > 0) ||
+                        Boolean(stroke.points?.some((p) => Boolean(p.tokenId)));
+                      if (isHighlighter && hasWordTokens) return null;
                       const dPath = buildResponsiveSvgPath(
                         stroke.points || [],
                         subheaderLayoutCache,
@@ -1993,7 +2141,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                           blockId: block.blockId,
                           color: penColor,
                           width: 3,
-                          tool: 'pen',
+                          tool: activeTool === 'highlighter' ? 'highlighter' : 'pen',
                           opacity: 1,
                           anchorTokens: currentAnchorTokens,
                           points: currentPoints,
@@ -2003,18 +2151,49 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
                   // Build per-word token annotation map for deterministic word-level highlight/mark sync
                   const tokenAnnotationMap = new Map<string, TokenAnnotationInfo>();
-                  for (const s of allBlockStrokes) {
+                  const blockAndPageStrokes = [
+                    ...allBlockStrokes,
+                    ...contentState.penStrokes.filter((s) => s.blockId === 'blk_page_canvas'),
+                    ...(activeDrawingBlockId === 'blk_page_canvas' && currentPoints.length > 0
+                      ? [
+                          {
+                            id: 'temp-active-page-stroke',
+                            blockId: 'blk_page_canvas',
+                            color: penColor,
+                            width: 3,
+                            tool: (activeTool === 'highlighter' ? 'highlighter' : 'pen') as 'highlighter' | 'pen',
+                            opacity: 1,
+                            anchorTokens: currentAnchorTokens,
+                            points: currentPoints,
+                          },
+                        ]
+                      : []),
+                  ];
+                  for (const s of blockAndPageStrokes) {
+                    const isDirect = s.blockId === block.blockId;
                     const isHighlighter = s.tool === 'highlighter';
                     const touchedTokens = new Set<string>();
 
                     if (Array.isArray(s.anchorTokens)) {
                       for (const tid of s.anchorTokens) {
-                        if (tid) touchedTokens.add(stripTokenBlockScope(tid));
+                        if (!tid) continue;
+                        const scope = extractTokenBlockScope(tid);
+                        if (isDirect && (!scope || scope === block.blockId)) {
+                          touchedTokens.add(stripTokenBlockScope(tid));
+                        } else if (!isDirect && scope === block.blockId) {
+                          touchedTokens.add(stripTokenBlockScope(tid));
+                        }
                       }
                     }
                     if (Array.isArray(s.points)) {
                       for (const pt of s.points) {
-                        if (pt?.tokenId) touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+                        if (!pt?.tokenId) continue;
+                        const scope = extractTokenBlockScope(pt.tokenId);
+                        if (isDirect && (!scope || scope === block.blockId)) {
+                          touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+                        } else if (!isDirect && scope === block.blockId) {
+                          touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+                        }
                       }
                     }
 
@@ -2025,7 +2204,12 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                       } else {
                         existing.markedColor = s.color || '#ef4444';
                       }
-                      if (s.id && s.id !== 'temp-active-stroke' && !existing.strokeIds.includes(s.id)) {
+                      if (
+                        s.id &&
+                        s.id !== 'temp-active-stroke' &&
+                        s.id !== 'temp-active-page-stroke' &&
+                        !existing.strokeIds.includes(s.id)
+                      ) {
                         existing.strokeIds.push(s.id);
                       }
                       tokenAnnotationMap.set(tid, existing);
@@ -2132,6 +2316,10 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                       >
                         {allBlockStrokes.map((stroke) => {
                           const isHighlighter = stroke.tool === 'highlighter';
+                          const hasWordTokens =
+                            (Array.isArray(stroke.anchorTokens) && stroke.anchorTokens.length > 0) ||
+                            Boolean(stroke.points?.some((p) => Boolean(p.tokenId)));
+                          if (isHighlighter && hasWordTokens) return null;
                           const dPath = buildResponsiveSvgPath(stroke.points || [], layoutCache, stroke.tool === 'pen');
                           if (!dPath) return null;
 
