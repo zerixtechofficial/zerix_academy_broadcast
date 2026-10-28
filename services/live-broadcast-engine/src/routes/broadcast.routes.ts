@@ -342,7 +342,33 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
           isCoTeacher: true,
           isCoHostInvite: false,
           canUseWhiteboard: effectiveCanUseWb,
-          exp: Math.floor(Date.now() / 1000) + 6 * 3600,
+          exp: Math.floor(Date.now() / 1000) + 12 * 3600,
+        });
+      } else {
+        // Mint a 12-hour classroom session JWT for Host Teachers & Students so short-lived or one-time
+        // Academy launch tokens can seamlessly rejoin as many times as needed until the class ends.
+        issuedSessionToken = JwtVerifier.sign({
+          sub: String(user.userId),
+          userId: String(user.userId),
+          name: user.name || (user.role === 'teacher' ? 'Instructor' : 'Student'),
+          role: user.role,
+          sessionId: body.sessionId,
+          courseId: Number(room.sessionContext?.courseId || user.courseId || 1),
+          batchId: room.sessionContext?.batchId || user.batchId || body.sessionId,
+          branchId: Number(room.sessionContext?.branchId || user.branchId || 1),
+          languageId: String(
+            resolvedLanguageId || room.sessionContext?.languageId || user.languageId || '1'
+          ),
+          chapterId: String(room.sessionContext?.chapterId || user.chapterId || '1'),
+          lessonId: String(room.sessionContext?.lessonId || user.lessonId || '1'),
+          topicId: String(room.sessionContext?.topicId || user.topicId || ''),
+          isCoTeacher: false,
+          isCoHostInvite: false,
+          canUseWhiteboard:
+            typeof user.canUseWhiteboard === 'boolean'
+              ? user.canUseWhiteboard
+              : user.role === 'teacher',
+          exp: Math.floor(Date.now() / 1000) + 12 * 3600,
         });
       }
 

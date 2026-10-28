@@ -64,19 +64,34 @@ function parseUserFromToken(token: string): {
 
 export default function RejoinScreen() {
   const searchParams = useSearchParams();
+  const [hasMounted, setHasMounted] = useState<boolean>(false);
+
+  useEffect(() => {
+    setHasMounted(true);
+  }, []);
+
+  const rawQuerySessionId = searchParams?.get('sessionId') || '';
 
   const token =
     searchParams?.get('token') ||
     (typeof window !== 'undefined'
       ? sessionStorage.getItem('broadcast_rejoin_token') ||
         sessionStorage.getItem('broadcast_ended_token') ||
-        ''
+        (rawQuerySessionId
+          ? (() => {
+              try {
+                return localStorage.getItem(`broadcast_rejoin_token_${rawQuerySessionId}`) || '';
+              } catch {
+                return '';
+              }
+            })()
+          : '')
       : '');
   const tokenClaims = useMemo(() => parseUserFromToken(token), [token]);
 
   // URL Parameters validated against token claims
   const initialSessionId =
-    searchParams?.get('sessionId') ||
+    rawQuerySessionId ||
     tokenClaims.sessionId ||
     (typeof window !== 'undefined'
       ? sessionStorage.getItem('broadcast_rejoin_session_id') ||
@@ -96,7 +111,7 @@ export default function RejoinScreen() {
     '';
   const wasEnded = searchParams?.get('ended') === 'true';
 
-  const [selectedSessionId] = useState<string>(initialSessionId);
+  const selectedSessionId = initialSessionId;
   const [statusData, setStatusData] = useState<SessionStatusData | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
@@ -164,27 +179,56 @@ export default function RejoinScreen() {
   // If the session is ended, clear active rejoin keys so visiting studio.zerixtech.com does not auto-verify/redirect
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (wasEnded || statusData?.status === 'ENDED') {
+    const isConfirmedEnded = statusData ? statusData.status === 'ENDED' : wasEnded;
+    if (isConfirmedEnded) {
       if (token) {
         sessionStorage.setItem('broadcast_ended_token', token);
       }
       if (selectedSessionId) {
         sessionStorage.setItem('broadcast_ended_session_id', selectedSessionId);
         sessionStorage.setItem('broadcast_session_ended', selectedSessionId);
+        try {
+          localStorage.removeItem(`broadcast_rejoin_token_${selectedSessionId}`);
+        } catch {
+          // Ignore localStorage cleanup errors
+        }
       }
       sessionStorage.removeItem('broadcast_rejoin_token');
       sessionStorage.removeItem('broadcast_rejoin_session_id');
       sessionStorage.removeItem('broadcast_rejoin_authorized');
+    } else if (statusData && statusData.status !== 'ENDED') {
+      sessionStorage.removeItem('broadcast_session_ended');
+      if (token) {
+        sessionStorage.setItem('broadcast_rejoin_token', token);
+      }
+      if (selectedSessionId) {
+        sessionStorage.setItem('broadcast_rejoin_session_id', selectedSessionId);
+        sessionStorage.setItem('broadcast_rejoin_authorized', selectedSessionId);
+        if (token) {
+          try {
+            localStorage.setItem(`broadcast_rejoin_token_${selectedSessionId}`, token);
+          } catch {
+            // Ignore localStorage write errors
+          }
+        }
+      }
     }
-  }, [wasEnded, statusData?.status, token, selectedSessionId]);
+  }, [wasEnded, statusData, token, selectedSessionId]);
 
   // Navigate back into classroom (strictly authorized from /rejoin page only when session is active)
   const handleRejoin = () => {
     if (statusData?.status === 'ENDED') return;
+    sessionStorage.removeItem('broadcast_session_ended');
+    sessionStorage.removeItem('broadcast_session_left');
     if (token) {
       sessionStorage.setItem('broadcast_rejoin_token', token);
       sessionStorage.setItem('broadcast_rejoin_session_id', selectedSessionId);
       sessionStorage.setItem('broadcast_rejoin_authorized', selectedSessionId);
+      try {
+        localStorage.setItem(`broadcast_rejoin_token_${selectedSessionId}`, token);
+      } catch {
+        // Ignore localStorage write errors
+      }
     }
     const params = new URLSearchParams({
       sessionId: selectedSessionId,
@@ -198,11 +242,18 @@ export default function RejoinScreen() {
 
   // Host Teacher: Restart class if ended
   const handleRestartClass = () => {
+    sessionStorage.removeItem('broadcast_session_ended');
+    sessionStorage.removeItem('broadcast_session_left');
     if (token) {
       sessionStorage.setItem('broadcast_rejoin_token', token);
       sessionStorage.setItem('broadcast_rejoin_session_id', selectedSessionId);
       sessionStorage.setItem('broadcast_restart_authorized', selectedSessionId);
       sessionStorage.removeItem('broadcast_session_ended');
+      try {
+        localStorage.setItem(`broadcast_rejoin_token_${selectedSessionId}`, token);
+      } catch {
+        // Ignore localStorage write errors
+      }
     }
     const params = new URLSearchParams({
       sessionId: selectedSessionId,
@@ -219,6 +270,17 @@ export default function RejoinScreen() {
     process.env.NEXT_PUBLIC_APP_URL ||
     'https://academy.zerixtech.com'
   ).replace(/\/+$/, '');
+
+  if (!hasMounted) {
+    return (
+      <div className="min-h-screen w-full flex items-center justify-center bg-slate-50 text-slate-900">
+        <div className="flex flex-col items-center gap-3">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-sky-600" />
+          <p className="text-xs font-medium text-slate-600">Loading Classroom Portal...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!selectedSessionId || !token || error) {
     return (

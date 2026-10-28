@@ -138,6 +138,7 @@ export class JwtVerifier {
       secret?: string;
       expectedSessionId?: string;
       nowEpochSeconds?: number;
+      ignoreExpiration?: boolean;
     }
   ): JwtVerificationResult {
     if (!this.looksLikeJwt(token)) {
@@ -184,7 +185,7 @@ export class JwtVerifier {
       const claims = JSON.parse(payloadJson) as BroadcastJwtClaims;
 
       const nowSec = options?.nowEpochSeconds ?? Math.floor(Date.now() / 1000);
-      if (typeof claims.exp === 'number' && nowSec >= claims.exp) {
+      if (!options?.ignoreExpiration && typeof claims.exp === 'number' && nowSec >= claims.exp) {
         return { valid: false, reason: 'JWT token has expired' };
       }
 

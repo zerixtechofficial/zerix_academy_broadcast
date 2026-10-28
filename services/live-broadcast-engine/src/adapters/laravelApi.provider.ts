@@ -10,6 +10,7 @@ import {
 import { SessionAttendanceSummary } from '../types/attendance.types';
 import { JwtVerifier } from '../utils/jwtVerifier';
 import { getStorageProvider } from './storage.provider';
+import { RoomManager } from '../modules/room/room.manager';
 
 export class LaravelApiDataProvider implements IDataProvider {
   public readonly mode = 'laravel_api' as const;
@@ -82,7 +83,30 @@ export class LaravelApiDataProvider implements IDataProvider {
 
     // Fast-path: Verify HMAC-SHA256 JWT locally when shared secret matches
     if (JwtVerifier.looksLikeJwt(cleanToken)) {
-      const verified = JwtVerifier.verify(cleanToken, { expectedSessionId: sessionId });
+      let verified = JwtVerifier.verify(cleanToken, { expectedSessionId: sessionId });
+      if (!verified.valid && verified.reason === 'JWT token has expired') {
+        const verifiedIgnoreExp = JwtVerifier.verify(cleanToken, {
+          expectedSessionId: sessionId,
+          ignoreExpiration: true,
+        });
+        if (verifiedIgnoreExp.valid && verifiedIgnoreExp.claims) {
+          const targetSess = String(sessionId || verifiedIgnoreExp.claims.sessionId || '');
+          if (targetSess) {
+            try {
+              const room = await RoomManager.getOrInitRoom(targetSess);
+              // Allow rejoining with a cryptographically valid session JWT while the class has not ended (or when teacher restarts)
+              if (
+                room.status !== 'ENDED' ||
+                verifiedIgnoreExp.claims.role === 'teacher'
+              ) {
+                verified = verifiedIgnoreExp;
+              }
+            } catch {
+              // Ignore room lookup errors
+            }
+          }
+        }
+      }
       if (verified.valid && verified.claims) {
         const claims = verified.claims as any;
         const userPayload: UserAuthPayload = {

@@ -83,14 +83,14 @@ export default function LearningSessionLayout() {
       if (!trimmed || trimmed.startsWith('DEV_TOKEN_')) return false;
       const payload = decodeJwtPayload(trimmed);
       if (payload) {
-        if (payload.exp && Math.floor(Date.now() / 1000) >= Number(payload.exp)) {
-          return false;
-        }
+        const tokenSessionId = payload.sessionId || payload.session_id || '';
+        const tokenBatchId = payload.batchId || payload.batch_id || '';
         if (
           targetSessionId &&
-          payload.sessionId &&
-          payload.sessionId !== '*' &&
-          String(payload.sessionId) !== String(targetSessionId)
+          tokenSessionId &&
+          tokenSessionId !== '*' &&
+          String(tokenSessionId) !== String(targetSessionId) &&
+          String(tokenBatchId) !== String(targetSessionId)
         ) {
           return false;
         }
@@ -99,6 +99,17 @@ export default function LearningSessionLayout() {
     };
 
     const rawUrlToken = urlParams.get('token');
+    const urlTokenClaims = rawUrlToken ? decodeJwtPayload(rawUrlToken) : null;
+    const derivedUrlSessId =
+      rawSessId ||
+      (urlTokenClaims?.sessionId && urlTokenClaims.sessionId !== '*'
+        ? String(urlTokenClaims.sessionId)
+        : '') ||
+      (urlTokenClaims?.session_id && urlTokenClaims.session_id !== '*'
+        ? String(urlTokenClaims.session_id)
+        : '') ||
+      (urlTokenClaims?.batchId ? String(urlTokenClaims.batchId) : '') ||
+      (urlTokenClaims?.batch_id ? String(urlTokenClaims.batch_id) : '');
 
     // Direct navigation to studio.zerixtech.com (/) without sessionId or token must never auto-verify a stored session
     if (!rawSessId && !rawUrlToken) {
@@ -108,18 +119,24 @@ export default function LearningSessionLayout() {
       window.sessionStorage.removeItem('broadcast_restart_authorized');
     }
 
-    if (isRestartFromPage && rawSessId) {
+    if ((isRestartFromPage || isRejoinFromPage) && derivedUrlSessId) {
       window.sessionStorage.removeItem('broadcast_session_ended');
     }
 
     const endedSessionId = window.sessionStorage.getItem('broadcast_session_ended') || '';
-    if (endedSessionId && (!rawSessId || endedSessionId === rawSessId) && !isRestartFromPage) {
+    if (
+      endedSessionId &&
+      (!derivedUrlSessId || endedSessionId === derivedUrlSessId) &&
+      !isRestartFromPage &&
+      !isRejoinFromPage &&
+      !rawUrlToken
+    ) {
       window.sessionStorage.removeItem('broadcast_rejoin_token');
       window.sessionStorage.removeItem('broadcast_rejoin_session_id');
       window.sessionStorage.removeItem('broadcast_rejoin_authorized');
     }
 
-    const urlToken = isTokenMatchingSession(rawUrlToken, rawSessId)
+    const urlToken = isTokenMatchingSession(rawUrlToken, derivedUrlSessId)
       ? rawUrlToken!.trim()
       : '';
 
@@ -131,34 +148,55 @@ export default function LearningSessionLayout() {
       window.sessionStorage.getItem('broadcast_rejoin_authorized') || '';
     const restartAuthorizedSess =
       window.sessionStorage.getItem('broadcast_restart_authorized') || '';
+    const savedRejoinSess =
+      window.sessionStorage.getItem('broadcast_rejoin_session_id') || '';
 
     // Rejoining without a URL token is strictly allowed ONLY when navigated from the /rejoin page (or explicit restart)
     const allowStoredTokenLookup = Boolean(
       rawSessId &&
         ((isRejoinFromPage && rejoinAuthorizedSess === rawSessId) ||
-          (isRestartFromPage && restartAuthorizedSess === rawSessId))
+          (isRestartFromPage && restartAuthorizedSess === rawSessId) ||
+          isRejoinFromPage ||
+          isRestartFromPage ||
+          rejoinAuthorizedSess === rawSessId ||
+          restartAuthorizedSess === rawSessId ||
+          savedRejoinSess === rawSessId)
     );
 
-    if (rejoinAuthorizedSess) {
-      window.sessionStorage.removeItem('broadcast_rejoin_authorized');
-    }
-    if (restartAuthorizedSess) {
-      window.sessionStorage.removeItem('broadcast_restart_authorized');
+    let localBackupToken: string | null = null;
+    if (allowStoredTokenLookup && derivedUrlSessId) {
+      try {
+        localBackupToken = window.localStorage.getItem(
+          `broadcast_rejoin_token_${derivedUrlSessId}`
+        );
+      } catch {
+        // Ignore localStorage read errors
+      }
     }
 
     const rawStoredToken = allowStoredTokenLookup
       ? window.sessionStorage.getItem('broadcast_rejoin_token') ||
-        (isRestartFromPage ? window.sessionStorage.getItem('broadcast_ended_token') : null)
+        localBackupToken ||
+        window.sessionStorage.getItem('broadcast_ended_token') ||
+        null
       : null;
     const storedSessionId = allowStoredTokenLookup
       ? window.sessionStorage.getItem('broadcast_rejoin_session_id') ||
-        (isRestartFromPage ? window.sessionStorage.getItem('broadcast_ended_session_id') || '' : '')
+        window.sessionStorage.getItem('broadcast_ended_session_id') ||
+        derivedUrlSessId ||
+        ''
       : '';
-    const effectiveSessId = rawSessId;
+    const effectiveSessId = derivedUrlSessId;
 
     if (urlToken && effectiveSessId) {
       window.sessionStorage.setItem('broadcast_rejoin_token', urlToken);
       window.sessionStorage.setItem('broadcast_rejoin_session_id', effectiveSessId);
+      window.sessionStorage.setItem('broadcast_rejoin_authorized', effectiveSessId);
+      try {
+        window.localStorage.setItem(`broadcast_rejoin_token_${effectiveSessId}`, urlToken);
+      } catch {
+        // Ignore localStorage write errors
+      }
     }
 
     const storedToken =
@@ -511,11 +549,28 @@ export default function LearningSessionLayout() {
           if (activeSessionToken !== token) {
             setToken(activeSessionToken);
           }
-          if (
-            typeof window !== 'undefined' &&
-            (initData.status !== 'ENDED' || initialParams.isRestart)
-          ) {
-            window.sessionStorage.setItem('broadcast_rejoin_token', activeSessionToken);
+        }
+        const resolvedActiveSessId = String(
+          initData.sessionContext?.sessionId || sessionId || ''
+        );
+        if (
+          typeof window !== 'undefined' &&
+          activeSessionToken &&
+          (initData.status !== 'ENDED' || initialParams.isRestart)
+        ) {
+          window.sessionStorage.removeItem('broadcast_session_ended');
+          window.sessionStorage.setItem('broadcast_rejoin_token', activeSessionToken);
+          if (resolvedActiveSessId) {
+            window.sessionStorage.setItem('broadcast_rejoin_session_id', resolvedActiveSessId);
+            window.sessionStorage.setItem('broadcast_rejoin_authorized', resolvedActiveSessId);
+            try {
+              window.localStorage.setItem(
+                `broadcast_rejoin_token_${resolvedActiveSessId}`,
+                activeSessionToken
+              );
+            } catch {
+              // Ignore localStorage write errors
+            }
           }
         }
         if (initData.coHostInviteToken && typeof initData.coHostInviteToken === 'string') {
@@ -560,6 +615,7 @@ export default function LearningSessionLayout() {
               window.sessionStorage.setItem('broadcast_session_ended', sessionId);
               try {
                 window.localStorage.removeItem(`broadcast_rec_ctx_${sessionId}`);
+                window.localStorage.removeItem(`broadcast_rejoin_token_${sessionId}`);
               } catch {
                 // Ignore localStorage cleanup errors
               }
@@ -608,12 +664,16 @@ export default function LearningSessionLayout() {
         const courseId = initialParams.courseId || ctx.courseId;
         let curData: any = null;
         if (courseId) {
-          curData = await CurriculumClient.fetchCurriculum(
-            String(courseId),
-            resolvedLang,
-            activeSessionToken
-          );
-          if (isMounted) setCurriculum(curData);
+          try {
+            curData = await CurriculumClient.fetchCurriculum(
+              String(courseId),
+              resolvedLang,
+              activeSessionToken
+            );
+            if (isMounted) setCurriculum(curData);
+          } catch (curErr: any) {
+            console.warn('[LearningSessionLayout] Curriculum fetch warning:', curErr?.message);
+          }
         }
 
         const chaptersList = Array.isArray(curData?.chapters) ? curData.chapters : [];
@@ -678,18 +738,22 @@ export default function LearningSessionLayout() {
         }
 
         if (targetLessonId) {
-          const contentData = await CurriculumClient.fetchLessonContent(
-            targetLessonId,
-            resolvedLang,
-            undefined,
-            activeSessionToken
-          );
-          if (isMounted) setLessonContent(contentData);
+          try {
+            const contentData = await CurriculumClient.fetchLessonContent(
+              targetLessonId,
+              resolvedLang,
+              undefined,
+              activeSessionToken
+            );
+            if (isMounted) setLessonContent(contentData);
+          } catch (contentErr: any) {
+            console.warn('[LearningSessionLayout] Lesson content fetch warning:', contentErr?.message);
+          }
         }
       } catch (err: any) {
         console.error('[LearningSessionLayout] Init error:', err.message);
         if (isMounted) {
-          if (typeof window !== 'undefined') {
+          if (typeof window !== 'undefined' && (err?.status === 401 || err?.status === 403)) {
             window.sessionStorage.removeItem('broadcast_rejoin_token');
             window.sessionStorage.removeItem('broadcast_rejoin_session_id');
           }
@@ -1636,6 +1700,7 @@ export default function LearningSessionLayout() {
           window.sessionStorage.setItem('broadcast_session_ended', sessionId);
           try {
             window.localStorage.removeItem(`broadcast_rec_ctx_${sessionId}`);
+            window.localStorage.removeItem(`broadcast_rejoin_token_${sessionId}`);
           } catch {
             // Ignore localStorage cleanup errors
           }
@@ -1662,9 +1727,30 @@ export default function LearningSessionLayout() {
     setCanPublishAudio(false);
     leaveSession();
 
+    const activeTok =
+      token ||
+      (typeof window !== 'undefined'
+        ? sessionStorage.getItem('broadcast_rejoin_token') ||
+          (sessionId ? localStorage.getItem(`broadcast_rejoin_token_${sessionId}`) : '') ||
+          ''
+        : '');
     if (token) {
       sessionStorage.setItem('broadcast_rejoin_token', token);
       sessionStorage.setItem('broadcast_rejoin_session_id', sessionId);
+    } else if (activeTok) {
+      sessionStorage.setItem('broadcast_rejoin_token', activeTok);
+      sessionStorage.setItem('broadcast_rejoin_session_id', sessionId);
+    }
+    if (sessionId) {
+      sessionStorage.setItem('broadcast_rejoin_authorized', sessionId);
+      sessionStorage.removeItem('broadcast_session_ended');
+      if (activeTok) {
+        try {
+          localStorage.setItem(`broadcast_rejoin_token_${sessionId}`, activeTok);
+        } catch {
+          // Ignore localStorage write errors
+        }
+      }
     }
     // Redirect to room-based Rejoin Page
     const queryParams = new URLSearchParams({
@@ -2300,6 +2386,10 @@ export default function LearningSessionLayout() {
                     if (token) {
                       sessionStorage.setItem('broadcast_rejoin_token', token);
                       sessionStorage.setItem('broadcast_rejoin_session_id', sessionId);
+                    }
+                    if (sessionId) {
+                      sessionStorage.setItem('broadcast_rejoin_authorized', sessionId);
+                      sessionStorage.removeItem('broadcast_session_ended');
                     }
                     const queryParams = new URLSearchParams({
                       sessionId,

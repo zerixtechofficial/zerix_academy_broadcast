@@ -1994,6 +1994,60 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
         'VirtualContentStage and learning-content.css must apply responsive container widths, fluid typography clamp(), and mobile grid stacking'
       );
     });
+
+    it('allows students and teachers to rejoin multiple times until the class has ended without getting Classroom Authentication Required', () => {
+      const broadcastRoutesSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../services/live-broadcast-engine/src/routes/broadcast.routes.ts'
+        ),
+        'utf8'
+      );
+      const laravelProviderSource = fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../services/live-broadcast-engine/src/adapters/laravelApi.provider.ts'
+        ),
+        'utf8'
+      );
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+      const rejoinSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/RejoinScreen.tsx'),
+        'utf8'
+      );
+
+      // 1. Backend mints a 12-hour signed classroom JWT for all verified participants on /sessions/init and allows active-room rejoin
+      assert.equal(
+        broadcastRoutesSource.includes('exp: Math.floor(Date.now() / 1000) + 12 * 3600') &&
+          broadcastRoutesSource.includes('token: issuedSessionToken') &&
+          laravelProviderSource.includes('ignoreExpiration: true') &&
+          laravelProviderSource.includes("room.status !== 'ENDED'"),
+        true,
+        'Backend must issue a 12-hour classroom session JWT for all participants and allow active-session token validation until the class ends'
+      );
+
+      // 2. LearningSessionLayout resolves sessionId from token claims, persists per-session token backup, and isolates curriculum fetch errors
+      assert.equal(
+        layoutSource.includes('const derivedUrlSessId =') &&
+          layoutSource.includes('`broadcast_rejoin_token_${effectiveSessId}`') &&
+          layoutSource.includes('[LearningSessionLayout] Curriculum fetch warning:') &&
+          !layoutSource.includes('if (payload.exp && payload.exp * 1000 < Date.now()) return false;'),
+        true,
+        'LearningSessionLayout must derive sessionId from token claims when missing in URL, persist per-session token backup, and not fail auth on curriculum warnings'
+      );
+
+      // 3. RejoinScreen waits for client hydration before checking storage and clears stale ended flags when session is active
+      assert.equal(
+        rejoinSource.includes('const [hasMounted, setHasMounted] = useState<boolean>(false);') &&
+          rejoinSource.includes("sessionStorage.removeItem('broadcast_session_ended');") &&
+          rejoinSource.includes('`broadcast_rejoin_token_${selectedSessionId}`'),
+        true,
+        'RejoinScreen must wait for client mount before rendering auth-required error and clear stale ended flags when rejoining an active class'
+      );
+    });
   });
 
   describe('18. Finalized Word-by-Word Content Marking, Exact Cursor/Laser Tracking, SVG Overlay Height Fix & Smooth Mobile Scroll Sync', () => {
