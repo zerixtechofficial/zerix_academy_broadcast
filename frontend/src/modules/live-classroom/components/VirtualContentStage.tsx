@@ -25,11 +25,13 @@ import {
   computeFollowerTargetScrollTop,
   computeScrollAnchorForViewport,
   extractAnchorTokensFromPoints,
+  extractTokenBlockScope,
   hitTestWordToken,
   measureBlockDomLayout,
   projectPointToDevicePixels,
   sanitizeSvgMarkup,
   ScrollBlockMetric,
+  stripTokenBlockScope,
   TextTokenSegment,
   tokenizeHtmlContent,
   tokenizeText,
@@ -140,6 +142,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
   const isProgrammaticScrollRef = useRef<boolean>(false);
   const programmaticScrollTimeoutRef = useRef<number | null>(null);
+  const followerTargetScrollTopRef = useRef<number | null>(null);
+  const followerScrollRafRef = useRef<number | null>(null);
   const isUserScrollingRef = useRef<boolean>(false);
   const userScrollTimeoutRef = useRef<number | null>(null);
   const [isOutOfSync, setIsOutOfSync] = useState<boolean>(false);
@@ -152,6 +156,67 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   const lastTargetBlockIdRef = useRef<string | null>(null);
   const lastCursorScrollTimeRef = useRef<number>(0);
   const idlePointerTimerRef = useRef<number | null>(null);
+
+  /**
+   * Smooth 60fps requestAnimationFrame scroll interpolation controller for follower devices
+   * (especially Student Mobile Phones). Avoids repeatedly restarting browser `scrollTo({ behavior: 'smooth' })`
+   * ease-in-out curves on every 60ms WebSocket packet, delivering jitter-free mobile scroll syncing.
+   */
+  const smoothScrollFollowerTo = useCallback((container: HTMLElement, rawTargetTop: number) => {
+    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+    const targetTop = Math.max(0, Math.min(maxScroll, rawTargetTop));
+    followerTargetScrollTopRef.current = targetTop;
+
+    if (programmaticScrollTimeoutRef.current) {
+      window.clearTimeout(programmaticScrollTimeoutRef.current);
+    }
+    isProgrammaticScrollRef.current = true;
+    programmaticScrollTimeoutRef.current = window.setTimeout(() => {
+      isProgrammaticScrollRef.current = false;
+    }, 1000);
+
+    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') {
+      container.scrollTop = targetTop;
+      return;
+    }
+
+    if (followerScrollRafRef.current !== null) {
+      return;
+    }
+
+    const step = () => {
+      const el = scrollContainerRef.current;
+      const goal = followerTargetScrollTopRef.current;
+      if (!el || goal === null || isUserScrollingRef.current) {
+        followerScrollRafRef.current = null;
+        return;
+      }
+
+      const current = el.scrollTop;
+      const diff = goal - current;
+
+      if (Math.abs(diff) <= 1.2) {
+        el.scrollTop = goal;
+        followerScrollRafRef.current = null;
+        return;
+      }
+
+      const delta = diff * 0.28;
+      el.scrollTop = current + (Math.abs(delta) < 1 ? Math.sign(diff) : delta);
+      followerScrollRafRef.current = window.requestAnimationFrame(step);
+    };
+
+    followerScrollRafRef.current = window.requestAnimationFrame(step);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (followerScrollRafRef.current !== null) {
+        window.cancelAnimationFrame(followerScrollRafRef.current);
+        followerScrollRafRef.current = null;
+      }
+    };
+  }, []);
 
   /**
    * Re-measures all rendered block DOM layouts (`[data-token-id]` and `[data-region-id]`)
@@ -190,9 +255,76 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           return measureBlockDomLayout(blockId, liveEl);
         }
       }
+      if (cached && liveRect.width > 0 && liveRect.height > 0) {
+        cached.blockRect = liveRect;
+      }
       return cached;
     },
     [blockLayouts]
+  );
+
+  /**
+   * Resolves the most specific content block (`blk_header`, `blk_subheader`, or `block.blockId`)
+   * under or nearest to `(clientX, clientY)` before falling back to `blk_page_canvas`.
+   * Guarantees that pointing or drawing near any header, sub-header, heading, sub-heading, or
+   * paragraph always locks onto that block's word tokens instead of getting hijacked by the outer sheet.
+   */
+  const resolveTargetBlockAtPoint = useCallback(
+    (
+      clientX: number,
+      clientY: number,
+      domTarget?: EventTarget | null
+    ): { blockId: string; blockEl: HTMLElement | null } => {
+      const selector = '[data-block-id]:not([data-block-id="blk_page_canvas"])';
+      let matchedEl =
+        domTarget && typeof (domTarget as Element).closest === 'function'
+          ? ((domTarget as Element).closest(selector) as HTMLElement | null)
+          : null;
+
+      if (!matchedEl && typeof document !== 'undefined' && document.elementFromPoint) {
+        const hitNode = document.elementFromPoint(clientX, clientY);
+        matchedEl = (hitNode?.closest(selector) as HTMLElement | null) || null;
+      }
+
+      if (matchedEl) {
+        const id = matchedEl.getAttribute('data-block-id');
+        if (id) {
+          return { blockId: id, blockEl: matchedEl };
+        }
+      }
+
+      const candidateEntries: { id: string; el: HTMLElement | null }[] = [
+        { id: 'blk_header', el: blockRefs.current['blk_header'] },
+        { id: 'blk_subheader', el: blockRefs.current['blk_subheader'] },
+        ...blocks.map((b) => ({ id: b.blockId, el: blockRefs.current[b.blockId] })),
+      ];
+
+      let bestEntry: { id: string; el: HTMLElement } | null = null;
+      let bestDy = Infinity;
+
+      for (const entry of candidateEntries) {
+        if (!entry.el) continue;
+        const r = entry.el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        const dy =
+          clientY < r.top ? r.top - clientY : clientY > r.bottom ? clientY - r.bottom : 0;
+        if (dy <= 18 && dy < bestDy) {
+          bestDy = dy;
+          bestEntry = { id: entry.id, el: entry.el };
+          if (dy === 0) break;
+        }
+      }
+
+      if (bestEntry) {
+        return { blockId: bestEntry.id, blockEl: bestEntry.el };
+      }
+
+      return {
+        blockId: 'blk_page_canvas',
+        blockEl: blockRefs.current['blk_page_canvas'] || pageSheetRef.current,
+      };
+    },
+    [blocks]
   );
 
   useEffect(() => {
@@ -206,7 +338,12 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     });
 
     if (outerContainerRef.current) observer.observe(outerContainerRef.current);
-    if (pageSheetRef.current) observer.observe(pageSheetRef.current);
+    const sheetEl = pageSheetRef.current;
+    if (sheetEl) {
+      observer.observe(sheetEl);
+      sheetEl.addEventListener('toggle', measureAllBlocksLayout, true);
+      sheetEl.addEventListener('load', measureAllBlocksLayout, true);
+    }
     Object.values(blockRefs.current).forEach((el) => {
       if (el) observer.observe(el);
     });
@@ -221,6 +358,10 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       window.cancelAnimationFrame(rafId);
       window.clearTimeout(timerId);
       observer.disconnect();
+      if (sheetEl) {
+        sheetEl.removeEventListener('toggle', measureAllBlocksLayout, true);
+        sheetEl.removeEventListener('load', measureAllBlocksLayout, true);
+      }
       window.removeEventListener('resize', measureAllBlocksLayout);
     };
   }, [blocks, measureAllBlocksLayout]);
@@ -379,22 +520,14 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     lastTargetBlockIdRef.current = targetBlockId;
     lastCursorScrollTimeRef.current = now;
 
-    isProgrammaticScrollRef.current = true;
-    if (programmaticScrollTimeoutRef.current) window.clearTimeout(programmaticScrollTimeoutRef.current);
-    programmaticScrollTimeoutRef.current = window.setTimeout(() => {
-      isProgrammaticScrollRef.current = false;
-    }, 1000);
-
-    container.scrollTo({
-      top: Math.max(0, targetScrollTop),
-      behavior: 'smooth',
-    });
+    smoothScrollFollowerTo(container, Math.max(0, targetScrollTop));
     setIsOutOfSync(false);
   }, [
     followTeacher,
     isRemoteLaser,
     laserPointer,
     getFreshBlockLayout,
+    smoothScrollFollowerTo,
   ]);
 
   const collectScrollBlockMetrics = useCallback(
@@ -441,19 +574,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         setIsOutOfSync(false);
         return;
       }
-      if (programmaticScrollTimeoutRef.current) {
-        window.clearTimeout(programmaticScrollTimeoutRef.current);
-      }
-      isProgrammaticScrollRef.current = true;
-      programmaticScrollTimeoutRef.current = window.setTimeout(() => {
-        isProgrammaticScrollRef.current = false;
-      }, 1000);
-
-      container.scrollTo({
-        top: 0,
-        behavior: 'smooth',
-      });
-
+      smoothScrollFollowerTo(container, 0);
       setIsOutOfSync(false);
       return;
     }
@@ -474,18 +595,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       return;
     }
 
-    if (programmaticScrollTimeoutRef.current) {
-      window.clearTimeout(programmaticScrollTimeoutRef.current);
-    }
-    isProgrammaticScrollRef.current = true;
-    programmaticScrollTimeoutRef.current = window.setTimeout(() => {
-      isProgrammaticScrollRef.current = false;
-    }, 1000);
-
-    container.scrollTo({
-      top: targetScrollTop,
-      behavior: 'smooth',
-    });
+    smoothScrollFollowerTo(container, targetScrollTop);
 
     setIsOutOfSync(false);
   }, [
@@ -493,6 +603,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     canAnnotate,
     followTeacher,
     collectScrollBlockMetrics,
+    smoothScrollFollowerTo,
     contentState.scrollAnchor?.blockId,
     contentState.scrollAnchor?.offsetRatio,
     contentState.scrollAnchor?.authorId,
@@ -605,6 +716,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           blockId,
           'blk_page_canvas',
           'blk_header',
+          'blk_subheader',
           ...contentState.penStrokes.map((s) => s.blockId),
         ])
       );
@@ -627,14 +739,21 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         const localX = clientX - candRect.left;
         const localY = clientY - candRect.top;
         const pt = captureStrokePoint(clientX, clientY, candCache, candRect);
+        const hitRawToken = pt.tokenId ? stripTokenBlockScope(pt.tokenId) : undefined;
 
         for (const stroke of blockStrokes) {
           // 1. Check if pointer hit a word token that belongs to this stroke
           if (
             pt.tokenId &&
             ((Array.isArray(stroke.anchorTokens) &&
-              stroke.anchorTokens.includes(pt.tokenId)) ||
-              stroke.points.some((p: any) => p.tokenId === pt.tokenId))
+              stroke.anchorTokens.some(
+                (tid) => tid === pt.tokenId || stripTokenBlockScope(tid) === hitRawToken
+              )) ||
+              stroke.points.some(
+                (p: any) =>
+                  p.tokenId &&
+                  (p.tokenId === pt.tokenId || stripTokenBlockScope(p.tokenId) === hitRawToken)
+              ))
           ) {
             onDeleteStroke(stroke.id);
             continue;
@@ -658,7 +777,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   // Pointer handlers on each block for Pen and Eraser
   const handleBlockPointerDown = (
     e: React.PointerEvent<HTMLDivElement>,
-    blockId: string
+    rawBlockId: string
   ) => {
     if (!canAnnotate || activeTool === 'cursor') return;
     // Prevent native text selection whenever any non-cursor tool (pen, laser, eraser) is active
@@ -668,7 +787,17 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     } catch {
       // ignore
     }
+    handleSheetPointerMove(e);
     if (activeTool === 'laser') return;
+
+    let blockId = rawBlockId;
+    if (rawBlockId === 'blk_page_canvas') {
+      const resolved = resolveTargetBlockAtPoint(e.clientX, e.clientY, e.target);
+      if (resolved.blockId && blockRefs.current[resolved.blockId]) {
+        blockId = resolved.blockId;
+      }
+    }
+
     const blockEl = blockRefs.current[blockId];
     if (!blockEl) return;
 
@@ -737,11 +866,25 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       setCurrentPoints(next);
       setCurrentAnchorTokens(extractAnchorTokensFromPoints(next, cache));
 
+      const sheetEl = pageSheetRef.current;
+      let sheetXPct: number | undefined;
+      let sheetYPct: number | undefined;
+      let sheetYPx: number | undefined;
+      if (sheetEl) {
+        const sheetRect = sheetEl.getBoundingClientRect();
+        const sheetX = e.clientX - sheetRect.left;
+        const sheetY = e.clientY - sheetRect.top;
+        setTeacherLaserCoord({ x: sheetX, y: sheetY, active: true, tool: 'pen' });
+        sheetXPct = Math.round(((sheetX / Math.max(1, sheetRect.width)) * 100) * 10) / 10;
+        sheetYPct = Math.round(((sheetY / Math.max(1, sheetRect.height)) * 100) * 10) / 10;
+        sheetYPx = Math.round(sheetY);
+      }
+
       // Broadcast active block and word/region-anchored pen pointer so remote screens track exact pen position
       const now = Date.now();
       if (now - lastLaserEmitRef.current >= 30) {
         lastLaserEmitRef.current = now;
-        onLaserMove({
+        const payload: LaserPointerState = {
           blockId,
           x: pt.x,
           y: pt.y,
@@ -754,7 +897,12 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           regionId: pt.regionId,
           regionRx: pt.regionRx,
           regionRy: pt.regionRy,
-        });
+          sheetXPct,
+          sheetYPct,
+          sheetYPx,
+        } as any;
+        lastEmittedLaserRef.current = payload;
+        onLaserMove(payload);
       }
     }
   };
@@ -774,6 +922,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       activeTool === 'pen' &&
       (activeDrawingBlockIdRef.current === blockId || activeDrawingBlockId === blockId)
     ) {
+      activeDrawingBlockIdRef.current = null;
       try {
         e.currentTarget.releasePointerCapture(e.pointerId);
       } catch {
@@ -781,6 +930,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       }
       const pointsToCommit =
         currentPointsRef.current.length > 0 ? currentPointsRef.current : currentPoints;
+      currentPointsRef.current = [];
       if (pointsToCommit.length >= 1) {
         const cache = activeDrawCacheRef.current || blockLayouts[blockId];
         const finalTokens = extractAnchorTokensFromPoints(pointsToCommit, cache);
@@ -818,8 +968,6 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         };
         onAddStroke(stroke);
       }
-      activeDrawingBlockIdRef.current = null;
-      currentPointsRef.current = [];
       setActiveDrawingBlockId(null);
       setCurrentPoints([]);
       setCurrentAnchorTokens([]);
@@ -891,27 +1039,9 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     const throttleMs = activeTool === 'cursor' ? 120 : 30;
     if (now - lastLaserEmitRef.current >= throttleMs) {
       lastLaserEmitRef.current = now;
-      let targetBlockEl =
-        (document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-block-id]') as HTMLElement) ||
-        null;
-      let targetBlockId = targetBlockEl?.getAttribute('data-block-id') || undefined;
-
-      // Fallback: search all blockRefs by vertical position if pointer is in margin/gap
-      if (!targetBlockEl) {
-        const allEntries = [
-          { id: 'blk_header', el: blockRefs.current['blk_header'] },
-          ...blocks.map((b) => ({ id: b.blockId, el: blockRefs.current[b.blockId] })),
-        ];
-        for (const entry of allEntries) {
-          if (!entry.el) continue;
-          const r = entry.el.getBoundingClientRect();
-          if (e.clientY >= r.top - 12 && e.clientY <= r.bottom + 12) {
-            targetBlockId = entry.id;
-            targetBlockEl = entry.el;
-            break;
-          }
-        }
-      }
+      const resolvedTarget = resolveTargetBlockAtPoint(e.clientX, e.clientY, e.target);
+      const targetBlockEl = resolvedTarget.blockEl;
+      const targetBlockId = resolvedTarget.blockId || undefined;
 
       let blockRelX = 0;
       let blockRelY = 0;
@@ -925,9 +1055,9 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       if (targetBlockEl && targetBlockId) {
         const bRect = targetBlockEl.getBoundingClientRect();
         const cache =
-          activeTool === 'cursor'
-            ? blockLayouts[targetBlockId]
-            : getFreshBlockLayout(targetBlockId) || measureBlockDomLayout(targetBlockId, targetBlockEl);
+          getFreshBlockLayout(targetBlockId) ||
+          blockLayouts[targetBlockId] ||
+          measureBlockDomLayout(targetBlockId, targetBlockEl);
         if (cache) {
           const captured = captureStrokePoint(e.clientX, e.clientY, cache, bRect);
           blockRelX = captured.x;
@@ -1050,10 +1180,15 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         return <React.Fragment key={`ws_${idx}`}>{seg.text}</React.Fragment>;
       }
 
-      const info = tokenAnnotationMap.get(seg.tokenId);
+      const rawTokenId = stripTokenBlockScope(seg.tokenId);
+      const info = tokenAnnotationMap.get(seg.tokenId) || tokenAnnotationMap.get(rawTokenId);
       const isHighlighted = Boolean(info?.highlightedColor);
       const isMarked = Boolean(info?.markedColor);
-      const isLaserTarget = activeLaserTokenId === seg.tokenId;
+      const rawLaserTokenId = activeLaserTokenId
+        ? stripTokenBlockScope(activeLaserTokenId)
+        : undefined;
+      const isLaserTarget =
+        activeLaserTokenId === seg.tokenId || rawLaserTokenId === seg.tokenId;
 
       const style: React.CSSProperties = {};
       /* Word highlighting with underline commented out as of now — using Pen SVG marking only
@@ -1074,6 +1209,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           data-token-id={seg.tokenId}
           data-highlighted={isHighlighted ? 'true' : undefined}
           data-marked={isMarked ? 'true' : undefined}
+          data-laser-target={isLaserTarget ? 'true' : undefined}
           data-stroke-ids={info?.strokeIds?.length ? info.strokeIds.join(',') : undefined}
           style={style}
           className="inline transition-colors duration-75"
@@ -1134,6 +1270,11 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     [topicTitle, lessonTitle]
   );
 
+  const tokenizedSubheaderSegments = useMemo(
+    () => tokenizeText(topicTitle || lessonTitle, 'subheader'),
+    [topicTitle, lessonTitle]
+  );
+
   const memoizedBlockContentMap = useMemo(() => {
     const map = new Map<
       string,
@@ -1160,6 +1301,125 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     }
     return map;
   }, [blocks]);
+
+  // Synchronize word-level data-marked, data-highlighted, data-stroke-ids, and data-laser-target attributes
+  // onto tokenized DOM spans inside dangerouslySetInnerHTML (.content-html-fragment) without resetting innerHTML
+  useEffect(() => {
+    const activeTempStroke: ContentStroke | null =
+      activeDrawingBlockId && currentPoints.length > 0
+        ? {
+            id: 'temp-active-stroke',
+            blockId: activeDrawingBlockId,
+            color: penColor,
+            width: 3,
+            tool: 'pen',
+            opacity: 1,
+            anchorTokens: currentAnchorTokens,
+            points: currentPoints,
+          }
+        : null;
+
+    const allStrokes = activeTempStroke
+      ? [...contentState.penStrokes, activeTempStroke]
+      : contentState.penStrokes;
+
+    for (const block of blocks) {
+      const blockEl = blockRefs.current[block.blockId];
+      if (!blockEl) continue;
+      const htmlFragment = blockEl.querySelector('.content-html-fragment');
+      if (!htmlFragment) continue;
+
+      const tokenMap = new Map<string, TokenAnnotationInfo>();
+      for (const s of allStrokes) {
+        const isDirectBlockStroke = s.blockId === block.blockId;
+        const isPageCanvasStroke = s.blockId === 'blk_page_canvas';
+        if (!isDirectBlockStroke && !isPageCanvasStroke) continue;
+
+        const isHighlighter = s.tool === 'highlighter';
+        const touchedTokens = new Set<string>();
+
+        if (Array.isArray(s.anchorTokens)) {
+          for (const tid of s.anchorTokens) {
+            if (!tid) continue;
+            const scope = extractTokenBlockScope(tid);
+            if (isDirectBlockStroke && (!scope || scope === block.blockId)) {
+              touchedTokens.add(stripTokenBlockScope(tid));
+            } else if (isPageCanvasStroke && scope === block.blockId) {
+              touchedTokens.add(stripTokenBlockScope(tid));
+            }
+          }
+        }
+        if (Array.isArray(s.points)) {
+          for (const pt of s.points) {
+            if (!pt?.tokenId) continue;
+            const scope = extractTokenBlockScope(pt.tokenId);
+            if (isDirectBlockStroke && (!scope || scope === block.blockId)) {
+              touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+            } else if (isPageCanvasStroke && scope === block.blockId) {
+              touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+            }
+          }
+        }
+
+        touchedTokens.forEach((rawTid) => {
+          const existing = tokenMap.get(rawTid) || { strokeIds: [] };
+          if (isHighlighter) {
+            existing.highlightedColor = s.color || '#facc15';
+          } else {
+            existing.markedColor = s.color || '#ef4444';
+          }
+          if (s.id && s.id !== 'temp-active-stroke' && !existing.strokeIds.includes(s.id)) {
+            existing.strokeIds.push(s.id);
+          }
+          tokenMap.set(rawTid, existing);
+        });
+      }
+
+      const activeLaserRawTokenId =
+        laserPointer.active &&
+        laserPointer.tokenId &&
+        (laserPointer.blockId === block.blockId ||
+          extractTokenBlockScope(laserPointer.tokenId) === block.blockId)
+          ? stripTokenBlockScope(laserPointer.tokenId)
+          : undefined;
+
+      const tokenSpans = htmlFragment.querySelectorAll<HTMLElement>('[data-token-id]');
+      tokenSpans.forEach((span) => {
+        const rawTid = stripTokenBlockScope(span.getAttribute('data-token-id') || '');
+        const info = tokenMap.get(rawTid);
+        if (info?.markedColor) {
+          span.setAttribute('data-marked', 'true');
+        } else {
+          span.removeAttribute('data-marked');
+        }
+        if (info?.highlightedColor) {
+          span.setAttribute('data-highlighted', 'true');
+        } else {
+          span.removeAttribute('data-highlighted');
+        }
+        if (info?.strokeIds?.length) {
+          span.setAttribute('data-stroke-ids', info.strokeIds.join(','));
+        } else {
+          span.removeAttribute('data-stroke-ids');
+        }
+        if (activeLaserRawTokenId && rawTid === activeLaserRawTokenId) {
+          span.setAttribute('data-laser-target', 'true');
+        } else {
+          span.removeAttribute('data-laser-target');
+        }
+      });
+    }
+  }, [
+    blocks,
+    contentState.penStrokes,
+    activeDrawingBlockId,
+    currentPoints,
+    currentAnchorTokens,
+    penColor,
+    laserPointer.active,
+    laserPointer.blockId,
+    laserPointer.tokenId,
+  ]);
 
   // Block native browser selectstart event whenever activeTool is not 'cursor'
   useEffect(() => {
@@ -1344,29 +1604,37 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         }}
         onPointerMove={(e) => {
           handleSheetPointerMove(e);
-          if (canAnnotate && (activeTool === 'pen' || activeTool === 'eraser')) {
-            handleBlockPointerMove(e, activeDrawingBlockIdRef.current || 'blk_page_canvas');
+          if (
+            canAnnotate &&
+            (activeTool === 'pen' || activeTool === 'eraser') &&
+            activeDrawingBlockIdRef.current === 'blk_page_canvas'
+          ) {
+            handleBlockPointerMove(e, 'blk_page_canvas');
           }
         }}
         onPointerUp={(e) => {
           handleSheetPointerUp();
-          if (canAnnotate && (activeTool === 'pen' || activeTool === 'eraser')) {
-            handleBlockPointerUp(e, activeDrawingBlockIdRef.current || 'blk_page_canvas');
+          if (
+            canAnnotate &&
+            (activeTool === 'pen' || activeTool === 'eraser') &&
+            activeDrawingBlockIdRef.current
+          ) {
+            handleBlockPointerUp(e, activeDrawingBlockIdRef.current);
           }
         }}
         onPointerLeave={handleSheetPointerLeave}
         data-testid="content-scroll-container"
-        className={`flex-1 w-full min-w-0 overflow-y-auto overflow-x-hidden scroll-smooth px-2.5 py-3 sm:px-5 sm:py-5 md:px-6 lg:px-8 ${
+        className={`flex-1 w-full min-w-0 overflow-y-auto overflow-x-hidden overscroll-y-contain px-2.5 py-3 sm:px-5 sm:py-5 md:px-6 lg:px-8 ${
           canAnnotate && isToolboxVisible ? 'sm:pt-14 pb-16 sm:pb-8' : 'pb-10'
         } flex justify-center items-start ${
           canAnnotate && activeTool !== 'cursor' && activeTool !== 'laser'
             ? 'cursor-crosshair touch-none'
             : canAnnotate && activeTool === 'laser'
-            ? 'cursor-none'
+            ? 'cursor-none touch-none'
             : 'cursor-auto'
         }`}
       >
-        {/* Full-Width Responsive Content Sheet matching /learn page container across Mobile, Tablet, Laptop & Desktop */}
+        {/* Responsive Content Sheet: 100% full width on mobile phones (<768px), structured fixed reading box on tablet/laptop/desktop */}
         <div
           ref={(el) => {
             pageSheetRef.current = el;
@@ -1374,9 +1642,11 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           }}
           data-block-id="blk_page_canvas"
           data-testid="virtual-content-sheet"
-          className={`relative w-full min-w-0 max-w-4xl lg:max-w-5xl xl:max-w-6xl space-y-3.5 sm:space-y-5 pb-16 min-h-full ${
+          className={`relative w-full max-w-full min-w-0 md:w-[720px] lg:w-[860px] xl:w-[960px] max-w-4xl lg:max-w-5xl xl:max-w-6xl space-y-3.5 sm:space-y-5 pb-16 min-h-full ${
             canAnnotate && activeTool !== 'cursor' && activeTool !== 'laser'
               ? 'cursor-crosshair touch-none'
+              : canAnnotate && activeTool === 'laser'
+              ? 'cursor-none touch-none'
               : 'cursor-auto'
           }`}
         >
@@ -1419,6 +1689,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
             return (
               <svg
                 data-testid="whole-page-content-svg-overlay"
+                data-annotation-overlay="true"
                 viewBox={`0 0 ${pageSvgWidth} ${pageSvgHeight}`}
                 preserveAspectRatio="none"
                 className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-20"
@@ -1475,10 +1746,14 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
             for (const s of allHeaderStrokes) {
               const touchedTokens = new Set<string>();
               if (Array.isArray(s.anchorTokens)) {
-                for (const tid of s.anchorTokens) if (tid) touchedTokens.add(tid);
+                for (const tid of s.anchorTokens) {
+                  if (tid) touchedTokens.add(stripTokenBlockScope(tid));
+                }
               }
               if (Array.isArray(s.points)) {
-                for (const pt of s.points) if (pt?.tokenId) touchedTokens.add(pt.tokenId);
+                for (const pt of s.points) {
+                  if (pt?.tokenId) touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+                }
               }
               touchedTokens.forEach((tid) => {
                 const existing = headerTokenAnnotationMap.get(tid) || { strokeIds: [] };
@@ -1497,7 +1772,9 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
             const topicTitleSegments = tokenizedHeaderSegments;
             const isLaserOnHeader =
-              laserPointer.active && laserPointer.blockId === headerBlockId;
+              laserPointer.active &&
+              (laserPointer.blockId === headerBlockId ||
+                extractTokenBlockScope(laserPointer.tokenId) === headerBlockId);
 
             return (
               <div
@@ -1513,6 +1790,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                 } ${
                   canAnnotate && activeTool !== 'cursor' && activeTool !== 'laser'
                     ? 'cursor-crosshair touch-none'
+                    : canAnnotate && activeTool === 'laser'
+                    ? 'cursor-none touch-none'
                     : 'cursor-default'
                 }`}
               >
@@ -1532,6 +1811,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
                 {/* SVG Vector Drawing Overlay for Header */}
                 <svg
+                  data-annotation-overlay="true"
                   viewBox={`0 0 ${headerSvgWidth} ${headerSvgHeight}`}
                   preserveAspectRatio="none"
                   className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-10"
@@ -1560,10 +1840,131 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
           {/* Main Content Card matching /learn page (.content-main-container) */}
           <div className="w-full min-w-0 bg-white rounded-xl sm:rounded-2xl p-3 sm:p-5 md:p-6 lg:p-7 space-y-3.5 sm:space-y-4 shadow-xs border border-slate-200/90 overflow-hidden">
-            <div className="flex items-start sm:items-center gap-2 text-[#2563eb] font-extrabold text-sm sm:text-base break-words">
-              <BookOpen className="w-4 h-4 sm:w-5 sm:h-5 shrink-0 mt-0.5 sm:mt-0" />
-              <span className="min-w-0 break-words">{topicTitle || lessonTitle}</span>
-            </div>
+            {(() => {
+              const subheaderBlockId = 'blk_subheader';
+              const subheaderStrokes = contentState.penStrokes.filter(
+                (s) => s.blockId === subheaderBlockId
+              );
+              const isDrawingInSubheader =
+                activeDrawingBlockId === subheaderBlockId && currentPoints.length > 0;
+              const allSubheaderStrokes: ContentStroke[] = isDrawingInSubheader
+                ? [
+                    ...subheaderStrokes,
+                    {
+                      id: 'temp-active-stroke',
+                      blockId: subheaderBlockId,
+                      color: penColor,
+                      width: 3,
+                      tool: 'pen',
+                      opacity: 1,
+                      anchorTokens: currentAnchorTokens,
+                      points: currentPoints,
+                    },
+                  ]
+                : subheaderStrokes;
+
+              const subheaderTokenAnnotationMap = new Map<string, TokenAnnotationInfo>();
+              for (const s of allSubheaderStrokes) {
+                const touchedTokens = new Set<string>();
+                if (Array.isArray(s.anchorTokens)) {
+                  for (const tid of s.anchorTokens) {
+                    if (tid) touchedTokens.add(stripTokenBlockScope(tid));
+                  }
+                }
+                if (Array.isArray(s.points)) {
+                  for (const pt of s.points) {
+                    if (pt?.tokenId) touchedTokens.add(stripTokenBlockScope(pt.tokenId));
+                  }
+                }
+                touchedTokens.forEach((tid) => {
+                  const existing = subheaderTokenAnnotationMap.get(tid) || { strokeIds: [] };
+                  existing.markedColor = s.color || '#ef4444';
+                  if (s.id && s.id !== 'temp-active-stroke' && !existing.strokeIds.includes(s.id)) {
+                    existing.strokeIds.push(s.id);
+                  }
+                  subheaderTokenAnnotationMap.set(tid, existing);
+                });
+              }
+
+              const subheaderLayoutCache =
+                allSubheaderStrokes.length > 0
+                  ? getFreshBlockLayout(subheaderBlockId)
+                  : blockLayouts[subheaderBlockId];
+              const subheaderSvgWidth = Math.max(
+                100,
+                Number((subheaderLayoutCache?.blockRect.width || 720).toFixed(2))
+              );
+              const subheaderSvgHeight = Math.max(
+                28,
+                Number((subheaderLayoutCache?.blockRect.height || 36).toFixed(2))
+              );
+
+              const isLaserOnSubheader =
+                laserPointer.active &&
+                (laserPointer.blockId === subheaderBlockId ||
+                  extractTokenBlockScope(laserPointer.tokenId) === subheaderBlockId);
+
+              return (
+                <div
+                  data-block-id={subheaderBlockId}
+                  data-testid="content-block-blk_subheader"
+                  ref={(el) => {
+                    blockRefs.current[subheaderBlockId] = el;
+                  }}
+                  onPointerDown={(e) => handleBlockPointerDown(e, subheaderBlockId)}
+                  onPointerMove={(e) => handleBlockPointerMove(e, subheaderBlockId)}
+                  onPointerUp={(e) => handleBlockPointerUp(e, subheaderBlockId)}
+                  className={`relative flex items-start sm:items-center gap-2 text-[#2563eb] font-extrabold text-sm sm:text-base break-words ${
+                    isSelectionEnabled ? 'select-text' : 'select-none'
+                  } ${
+                    canAnnotate && activeTool !== 'cursor' && activeTool !== 'laser'
+                      ? 'cursor-crosshair touch-none'
+                      : canAnnotate && activeTool === 'laser'
+                      ? 'cursor-none touch-none'
+                      : 'cursor-default'
+                  }`}
+                >
+                  <BookOpen className="w-4 h-4 sm:w-5 sm:h-5 shrink-0 mt-0.5 sm:mt-0" />
+                  <span data-region-id="subheader" className="min-w-0 break-words">
+                    {renderTokenizedText(
+                      tokenizedSubheaderSegments,
+                      subheaderTokenAnnotationMap,
+                      isLaserOnSubheader ? laserPointer.tokenId : undefined
+                    )}
+                  </span>
+
+                  {/* SVG Vector Drawing Overlay for Sub-Header */}
+                  <svg
+                    data-annotation-overlay="true"
+                    viewBox={`0 0 ${subheaderSvgWidth} ${subheaderSvgHeight}`}
+                    preserveAspectRatio="none"
+                    className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-10"
+                  >
+                    {allSubheaderStrokes.map((stroke) => {
+                      const dPath = buildResponsiveSvgPath(
+                        stroke.points || [],
+                        subheaderLayoutCache,
+                        stroke.tool === 'pen'
+                      );
+                      if (!dPath) return null;
+                      return (
+                        <path
+                          key={stroke.id}
+                          data-stroke-id={stroke.id}
+                          d={dPath}
+                          fill="none"
+                          stroke={stroke.color}
+                          strokeOpacity={stroke.opacity ?? 0.92}
+                          strokeWidth={stroke.width || 3}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      );
+                    })}
+                  </svg>
+                </div>
+              );
+            })()}
 
             {blocks.length === 0 ? (
               <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-8 text-center text-sm text-slate-500">
@@ -1608,12 +2009,12 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
                     if (Array.isArray(s.anchorTokens)) {
                       for (const tid of s.anchorTokens) {
-                        if (tid) touchedTokens.add(tid);
+                        if (tid) touchedTokens.add(stripTokenBlockScope(tid));
                       }
                     }
                     if (Array.isArray(s.points)) {
                       for (const pt of s.points) {
-                        if (pt?.tokenId) touchedTokens.add(pt.tokenId);
+                        if (pt?.tokenId) touchedTokens.add(stripTokenBlockScope(pt.tokenId));
                       }
                     }
 
@@ -1644,7 +2045,9 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                   const formulaSegments = memoizedBlock?.formulaSegments || [];
 
                   const isLaserOnBlock =
-                    laserPointer.active && laserPointer.blockId === block.blockId;
+                    laserPointer.active &&
+                    (laserPointer.blockId === block.blockId ||
+                      extractTokenBlockScope(laserPointer.tokenId) === block.blockId);
                   const isTeacherAnchor =
                     contentState.scrollAnchor.blockId === block.blockId;
 
@@ -1662,8 +2065,10 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                       className={`section-block relative transition-all rounded-lg ${
                         isTeacherAnchor ? 'ring-1 ring-[#12a3ff]/20' : ''
                       } ${isSelectionEnabled ? 'select-text' : 'select-none'} ${
-                        canAnnotate && activeTool !== 'cursor'
+                        canAnnotate && activeTool !== 'cursor' && activeTool !== 'laser'
                           ? 'cursor-crosshair touch-none'
+                          : canAnnotate && activeTool === 'laser'
+                          ? 'cursor-none touch-none'
                           : 'cursor-auto'
                       }`}
                     >
@@ -1720,6 +2125,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
                       {/* Word-Anchored & Region-Anchored SVG Vector Overlay */}
                       <svg
+                        data-annotation-overlay="true"
                         viewBox={`0 0 ${svgWidth} ${svgHeight}`}
                         preserveAspectRatio="none"
                         className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-10"
@@ -1810,11 +2216,11 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
             </svg>
           )}
 
-          {/* Live Remote Collaborator Cursor (Select / Pen tool): Exact cursor tracking across all content blocks for Host, Co-Host & Students */}
+          {/* Live Remote Collaborator Cursor (Select / Pen tool): Exact cursor tip tracking across all content blocks for Host, Co-Host & Students */}
           {isRemoteLaser && remoteLaserCoord?.active && laserPointer.tool !== 'laser' && (
             <div
               data-testid="teacher-content-cursor"
-              className="pointer-events-none absolute z-40 transition-transform duration-75"
+              className="pointer-events-none absolute z-40"
               style={{
                 left: `${remoteLaserCoord.x}px`,
                 top: `${remoteLaserCoord.y}px`,
@@ -1822,7 +2228,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
               }}
             >
               <svg
-                className="w-4 h-4 -rotate-45 drop-shadow-md text-[#12a3ff]"
+                className="w-4 h-4 -translate-x-[2px] -translate-y-[2px] drop-shadow-md text-[#12a3ff]"
                 viewBox="0 0 24 24"
                 fill="currentColor"
                 stroke="white"
@@ -1830,7 +2236,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
               >
                 <path d="M3 3l7 18 3-7 7-3L3 3z" />
               </svg>
-              <div className="ml-3.5 -mt-2 px-1.5 py-0.5 rounded-md bg-[#12a3ff] text-white text-[10px] font-semibold shadow-md whitespace-nowrap">
+              <div className="ml-3.5 -mt-1.5 px-1.5 py-0.5 rounded-md bg-[#12a3ff] text-white text-[10px] font-semibold shadow-md whitespace-nowrap">
                 {laserPointer.authorName || 'Teacher'}
               </div>
             </div>

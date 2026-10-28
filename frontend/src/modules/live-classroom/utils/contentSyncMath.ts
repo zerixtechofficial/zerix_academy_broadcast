@@ -96,7 +96,7 @@ export interface BlockDomLayoutCache {
  */
 export function tokenizeText(
   text: string | undefined | null,
-  prefix: 'title' | 'content' | 'formula'
+  prefix: 'title' | 'content' | 'formula' | 'subheader'
 ): TextTokenSegment[] {
   if (!text) return [];
   const rawParts = text.split(/(\s+)/);
@@ -138,12 +138,14 @@ export function tokenizeText(
  */
 export function tokenizeHtmlContent(
   html: string | undefined | null,
-  prefix: 'title' | 'content' | 'formula' = 'content'
+  prefix: 'title' | 'content' | 'formula' | 'subheader' = 'content'
 ): string {
   if (!html || typeof html !== 'string') return '';
   if (html.includes('data-token-id=')) return html;
 
-  const parts = html.split(/(<[^>]+>)/g);
+  const parts = html.split(
+    /(<!--[\s\S]*?-->|<(?:script|style|svg|math|textarea)\b[^>]*>[\s\S]*?<\/\s*(?:script|style|svg|math|textarea)\s*>|<[^>]+>)/gi
+  );
   let wordCounter = 0;
   let skipDepth = 0;
 
@@ -265,6 +267,30 @@ export function computeFollowerTargetScrollTop(
   return Math.max(0, Math.min(maxScroll, rawScrollTop));
 }
 
+export function parseTokenId(
+  tokenId: string | undefined | null
+): { prefix: string; index: number } | null {
+  if (!tokenId) return null;
+  const colonIdx = tokenId.lastIndexOf(':');
+  if (colonIdx <= 0) return null;
+  const prefix = tokenId.slice(0, colonIdx);
+  const index = Number(tokenId.slice(colonIdx + 1));
+  if (Number.isNaN(index)) return null;
+  return { prefix, index };
+}
+
+export function stripTokenBlockScope(tokenId: string | undefined | null): string {
+  if (!tokenId) return '';
+  const scopeIdx = tokenId.indexOf('::');
+  return scopeIdx >= 0 ? tokenId.slice(scopeIdx + 2) : tokenId;
+}
+
+export function extractTokenBlockScope(tokenId: string | undefined | null): string | null {
+  if (!tokenId) return null;
+  const scopeIdx = tokenId.indexOf('::');
+  return scopeIdx > 0 ? tokenId.slice(0, scopeIdx) : null;
+}
+
 /**
  * Builds a fast layout cache of all `[data-token-id]` and `[data-region-id]` elements
  * within a block DOM element. Called once on pointerDown or during layout measurement
@@ -280,21 +306,39 @@ export function measureBlockDomLayout(
 
   const tokens = new Map<string, CachedTokenBox>();
   const tokenList: CachedTokenBox[] = [];
+  const isWholePageCanvas = blockId === 'blk_page_canvas';
 
   const tokenNodes = blockEl.querySelectorAll<HTMLElement>('[data-token-id]');
   tokenNodes.forEach((node) => {
-    const tokenId = node.getAttribute('data-token-id');
-    if (!tokenId) return;
+    const rawTokenId = node.getAttribute('data-token-id');
+    if (!rawTokenId) return;
     const r = node.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return;
+
+    let effectiveTokenId = rawTokenId;
+    if (isWholePageCanvas && !rawTokenId.includes('::')) {
+      const ownerBlockEl = node.closest<HTMLElement>(
+        '[data-block-id]:not([data-block-id="blk_page_canvas"])'
+      );
+      const ownerBlockId = ownerBlockEl?.getAttribute('data-block-id');
+      if (ownerBlockId) {
+        effectiveTokenId = `${ownerBlockId}::${rawTokenId}`;
+      }
+    }
+
     const box: CachedTokenBox = {
-      tokenId,
+      tokenId: effectiveTokenId,
       left: r.left - blockRect.left,
       top: r.top - blockRect.top,
       width: r.width,
       height: r.height,
     };
-    tokens.set(tokenId, box);
+    tokens.set(effectiveTokenId, box);
+    if (!isWholePageCanvas) {
+      tokens.set(`${blockId}::${rawTokenId}`, box);
+    } else if (!tokens.has(rawTokenId)) {
+      tokens.set(rawTokenId, box);
+    }
     tokenList.push(box);
   });
 
@@ -356,11 +400,12 @@ export function hitTestWordToken(
   // 1. Direct containment including each word's immediate underline zone
   for (let i = 0; i < cache.tokenList.length; i++) {
     const t = cache.tokenList[i];
+    const underlineAllowance = Math.max(6, Math.min(12, t.height * 0.28));
     if (
       localX >= t.left - 3 &&
       localX <= t.left + t.width + 3 &&
-      localY >= t.top - 1 &&
-      localY <= t.top + t.height + 6
+      localY >= t.top - 2 &&
+      localY <= t.top + t.height + underlineAllowance
     ) {
       const rx = Math.max(-1.5, Math.min(2.5, (localX - t.left) / Math.max(1, t.width)));
       const ry = Math.max(-1.0, Math.min(2.2, (localY - t.top) / Math.max(1, t.height)));
@@ -373,8 +418,8 @@ export function hitTestWordToken(
   }
 
   // 2. Asymmetric line-aware halo match (inter-word spaces and underlines below text)
-  const tolX = Math.max(tolerancePx, 28);
-  const tolY = Math.max(tolerancePx, 16);
+  const tolX = Math.max(tolerancePx, 32);
+  const tolY = Math.max(tolerancePx, 18);
   let bestToken: CachedTokenBox | null = null;
   let bestDist = Infinity;
 
@@ -383,8 +428,9 @@ export function hitTestWordToken(
     const dx =
       localX < t.left ? t.left - localX : localX > t.left + t.width ? localX - (t.left + t.width) : 0;
 
-    const effectiveTop = t.top - 1;
-    const effectiveBottom = t.top + t.height + 6;
+    const underlineAllowance = Math.max(6, Math.min(12, t.height * 0.28));
+    const effectiveTop = t.top - 2;
+    const effectiveBottom = t.top + t.height + underlineAllowance;
     const dy =
       localY < effectiveTop
         ? (effectiveTop - localY) * 2.0
@@ -508,25 +554,24 @@ export function extractAnchorTokensFromPoints(
     // and they are on roughly the same horizontal line on the author's screen, fill in 5, 6
     if (i > 0 && points[i - 1].tokenId && cache) {
       const prevId = points[i - 1].tokenId!;
-      const [prevPrefix, prevIdxStr] = prevId.split(':');
-      const [currPrefix, currIdxStr] = pt.tokenId.split(':');
-      const prevIdx = Number(prevIdxStr);
-      const currIdx = Number(currIdxStr);
+      const parsedPrev = parseTokenId(prevId);
+      const parsedCurr = parseTokenId(pt.tokenId);
 
       if (
-        prevPrefix === currPrefix &&
-        !Number.isNaN(prevIdx) &&
-        !Number.isNaN(currIdx) &&
-        Math.abs(currIdx - prevIdx) > 1 &&
-        Math.abs(currIdx - prevIdx) <= 8
+        parsedPrev &&
+        parsedCurr &&
+        parsedPrev.prefix === parsedCurr.prefix &&
+        Math.abs(parsedCurr.index - parsedPrev.index) > 1 &&
+        Math.abs(parsedCurr.index - parsedPrev.index) <= 8
       ) {
-        const prevBox = cache.tokens.get(prevId);
-        const currBox = cache.tokens.get(pt.tokenId);
+        const prevBox = cache.tokens.get(prevId) || cache.tokens.get(stripTokenBlockScope(prevId));
+        const currBox =
+          cache.tokens.get(pt.tokenId) || cache.tokens.get(stripTokenBlockScope(pt.tokenId));
         if (prevBox && currBox && Math.abs(prevBox.top - currBox.top) < prevBox.height * 0.8) {
-          const step = currIdx > prevIdx ? 1 : -1;
-          for (let k = prevIdx + step; k !== currIdx; k += step) {
-            const midId = `${prevPrefix}:${k}`;
-            if (cache.tokens.has(midId)) {
+          const step = parsedCurr.index > parsedPrev.index ? 1 : -1;
+          for (let k = parsedPrev.index + step; k !== parsedCurr.index; k += step) {
+            const midId = `${parsedPrev.prefix}:${k}`;
+            if (cache.tokens.has(midId) || cache.tokens.has(stripTokenBlockScope(midId))) {
               addToken(midId);
             }
           }
@@ -558,7 +603,8 @@ export function projectPointToDevicePixels(
 
   // 1. Word-token anchored point: maps directly onto the exact same word on this device!
   if (pt.tokenId && typeof pt.rx === 'number' && typeof pt.ry === 'number') {
-    const tokenBox = cache.tokens.get(pt.tokenId);
+    const tokenBox =
+      cache.tokens.get(pt.tokenId) || cache.tokens.get(stripTokenBlockScope(pt.tokenId));
     if (tokenBox) {
       return {
         px: tokenBox.left + pt.rx * tokenBox.width,
@@ -610,10 +656,14 @@ function expandWrappedTokenPoints(
     const nextPt = points[i + 1];
     if (!currPt.tokenId || !nextPt.tokenId || currPt.tokenId === nextPt.tokenId) continue;
 
-    const [currPrefix, currIdxStr] = currPt.tokenId.split(':');
-    const [nextPrefix, nextIdxStr] = nextPt.tokenId.split(':');
-    const currIdx = Number(currIdxStr);
-    const nextIdx = Number(nextIdxStr);
+    const parsedCurr = parseTokenId(currPt.tokenId);
+    const parsedNext = parseTokenId(nextPt.tokenId);
+    if (!parsedCurr || !parsedNext) continue;
+
+    const currPrefix = parsedCurr.prefix;
+    const nextPrefix = parsedNext.prefix;
+    const currIdx = parsedCurr.index;
+    const nextIdx = parsedNext.index;
 
     if (
       currPrefix !== nextPrefix ||
@@ -625,8 +675,10 @@ function expandWrappedTokenPoints(
       continue;
     }
 
-    const currBox = cache.tokens.get(currPt.tokenId);
-    const nextBox = cache.tokens.get(nextPt.tokenId);
+    const currBox =
+      cache.tokens.get(currPt.tokenId) || cache.tokens.get(stripTokenBlockScope(currPt.tokenId));
+    const nextBox =
+      cache.tokens.get(nextPt.tokenId) || cache.tokens.get(stripTokenBlockScope(nextPt.tokenId));
     if (!currBox || !nextBox) continue;
 
     const avgH = (currBox.height + nextBox.height) * 0.5;
@@ -639,8 +691,9 @@ function expandWrappedTokenPoints(
       for (let k = currIdx; k < nextIdx; k++) {
         const kId = `${currPrefix}:${k}`;
         const kNextId = `${currPrefix}:${k + 1}`;
-        const boxK = cache.tokens.get(kId);
-        const boxKNext = cache.tokens.get(kNextId);
+        const boxK = cache.tokens.get(kId) || cache.tokens.get(stripTokenBlockScope(kId));
+        const boxKNext =
+          cache.tokens.get(kNextId) || cache.tokens.get(stripTokenBlockScope(kNextId));
         if (!boxK || !boxKNext) continue;
 
         const lineGap = Math.abs(boxKNext.top - boxK.top);

@@ -50,6 +50,28 @@
   -webkit-user-select: none !important;
 }
 
+/* Enforce exact tool cursor across all nested content elements (headings, links, summaries, labels) */
+[data-active-content-tool="laser"],
+[data-active-content-tool="laser"] * {
+  cursor: none !important;
+}
+
+[data-active-content-tool="pen"],
+[data-active-content-tool="pen"] *,
+[data-active-content-tool="eraser"],
+[data-active-content-tool="eraser"] * {
+  cursor: crosshair !important;
+}
+
+/* Annotation & Laser SVG overlays must always span 100% width and height of their block */
+svg[data-annotation-overlay="true"],
+svg[data-testid="whole-page-content-svg-overlay"],
+svg[data-testid="content-laser-trail"] {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none !important;
+}
+
 /* Sections rendered as cards */
 .content-main-container section,
 .content-main-container .section-block section {
@@ -231,9 +253,9 @@
   border-radius: 0 0.75rem 0.75rem 0;
 }
 
-/* Images, SVGs, Videos, Figures */
+/* Images, SVGs, Videos, Figures (excluding absolute annotation/laser SVG overlays) */
 .content-main-container img,
-.content-main-container svg,
+.content-main-container svg:not([data-annotation-overlay="true"]):not([data-testid="whole-page-content-svg-overlay"]):not([data-testid="content-laser-trail"]),
 .content-main-container video,
 .content-main-container iframe,
 .content-main-container figure {
@@ -380,8 +402,7 @@
   color: var(--text-heading, #111827);
   cursor: pointer;
   outline: none;
-  display: flex;
-  align-items: center;
+  display: block;
   list-style: none;
 }
 
@@ -475,9 +496,7 @@
 }
 
 .content-main-container .mcq-option {
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
+  display: block;
   padding: 1rem 1.25rem;
   border: 1.5px solid var(--border, #e5e7eb);
   border-radius: 0.875rem;
@@ -504,8 +523,9 @@
   border: 2px solid var(--border-strong, #9ca3af);
   border-radius: 50%;
   outline: none;
-  margin: 0;
-  display: grid;
+  margin: -2px 0.75rem 0 0;
+  vertical-align: middle;
+  display: inline-grid;
   place-content: center;
   cursor: pointer;
   transition: border-color 0.2s, background-color 0.2s;
@@ -561,11 +581,10 @@
 
 /* 5. Custom Grid Article blocks and Practice Questions */
 .content-main-container article {
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: box-shadow 0.2s ease;
 }
 
 .content-main-container article:hover {
-  transform: translateY(-2px);
   box-shadow: var(--shadow-md, 0 10px 15px -3px rgba(0, 0, 0, 0.06));
 }
 

@@ -1995,4 +1995,128 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
       );
     });
   });
+
+  describe('18. Finalized Word-by-Word Content Marking, Exact Cursor/Laser Tracking, SVG Overlay Height Fix & Smooth Mobile Scroll Sync', () => {
+    it('tokenizes and hit-tests words across Header, Sub-Header, Headings (h1-h6), Lists, Tables, Accordions, and Main Content without cross-block token collisions', () => {
+      // 1. Subheader tokenization with 'subheader' prefix
+      const subheaderTokens = ContentSyncMath.tokenizeText('Electromagnetic Induction & Faraday Law', 'subheader');
+      const wordTokens = subheaderTokens.filter((t) => t.isWord);
+      assert.equal(wordTokens.length, 5);
+      assert.equal(wordTokens[0].tokenId, 'subheader:0');
+      assert.equal(wordTokens[4].tokenId, 'subheader:4');
+
+      // 2. HTML tokenization across h1, h2, h3, h4, summary, li, td, and p while preserving atomic <svg> and <math>
+      const richHtml = `
+        <h1>Main Heading Title</h1>
+        <h2>Section Subheading</h2>
+        <details><summary>Accordion Question Header</summary><p>Detailed answer paragraph.</p></details>
+        <svg viewBox="0 0 100 20"><text>DoNotTokenizeSvg</text></svg>
+      `;
+      const tokenizedHtml = ContentSyncMath.tokenizeHtmlContent(richHtml, 'content');
+      assert.equal(tokenizedHtml.includes('data-token-id="content:0" class="inline">Main</span>'), true);
+      assert.equal(tokenizedHtml.includes('data-token-id="content:3" class="inline">Section</span>'), true);
+      assert.equal(tokenizedHtml.includes('data-token-id="content:5" class="inline">Accordion</span>'), true);
+      assert.equal(tokenizedHtml.includes('<text>DoNotTokenizeSvg</text>'), true);
+
+      // 3. Proportional underline allowance in hitTestWordToken for large headings (e.g. 36px tall h1)
+      const token0 = { tokenId: 'content:0', left: 20, top: 12, width: 110, height: 36 };
+      const token1 = { tokenId: 'content:1', left: 140, top: 12, width: 150, height: 36 };
+      const token2 = { tokenId: 'content:2', left: 300, top: 12, width: 120, height: 36 };
+      const token3 = { tokenId: 'content:3', left: 430, top: 12, width: 140, height: 36 };
+      const headingLayout: ContentSyncMath.BlockDomLayoutCache = {
+        blockId: 'blk_1',
+        blockRect: { width: 860, height: 300 } as DOMRect,
+        regions: new Map([['content', { regionId: 'content', left: 0, top: 0, width: 860, height: 300 }]]),
+        tokens: new Map([
+          ['content:0', token0],
+          ['content:1', token1],
+          ['content:2', token2],
+          ['content:3', token3],
+        ]),
+        tokenList: [token0, token1, token2, token3],
+      };
+      // 9px below the 36px heading bottom (y = 12 + 36 + 9 = 57) must still hit-test the heading word
+      const headingUnderlineHit = ContentSyncMath.hitTestWordToken(75, 57, headingLayout);
+      assert.ok(headingUnderlineHit, 'Underline drawn 9px below a 36px heading must hit-test the heading token');
+      assert.equal(headingUnderlineHit?.token.tokenId, 'content:0');
+
+      // 4. Scoped token IDs on blk_page_canvas prevent cross-block token collisions and project accurately
+      assert.equal(ContentSyncMath.stripTokenBlockScope('blk_header::content:2'), 'content:2');
+      assert.equal(ContentSyncMath.extractTokenBlockScope('blk_header::content:2'), 'blk_header');
+      assert.equal(ContentSyncMath.stripTokenBlockScope('content:2'), 'content:2');
+      assert.equal(ContentSyncMath.extractTokenBlockScope('content:2'), null);
+
+      const extracted = ContentSyncMath.extractAnchorTokensFromPoints(
+        [
+          { x: 10, y: 10, tokenId: 'blk_1::content:0', rx: 0.1, ry: 0.8 },
+          { x: 55, y: 10, tokenId: 'blk_1::content:3', rx: 0.9, ry: 0.8 },
+        ],
+        headingLayout
+      );
+      assert.deepEqual(extracted, [
+        'blk_1::content:0',
+        'blk_1::content:1',
+        'blk_1::content:2',
+        'blk_1::content:3',
+      ]);
+    });
+
+    it('prevents .content-main-container svg CSS rule from collapsing block annotation SVG overlays and enforces exact tool cursors', () => {
+      const cssSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/styles/learning-content.css'),
+        'utf8'
+      );
+      const stageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/VirtualContentStage.tsx'),
+        'utf8'
+      );
+
+      // 1. learning-content.css excludes [data-annotation-overlay="true"] from height: auto and forces 100% width/height
+      assert.equal(
+        cssSource.includes('.content-main-container svg:not([data-annotation-overlay="true"])') &&
+          cssSource.includes('svg[data-annotation-overlay="true"]') &&
+          cssSource.includes('height: 100% !important;'),
+        true,
+        'learning-content.css must protect block annotation SVG overlays from height: auto distortion'
+      );
+
+      // 2. VirtualContentStage marks all block SVG overlays (whole-page, header, subheader, content blocks) with data-annotation-overlay="true"
+      const overlayCount = (stageSource.match(/data-annotation-overlay="true"/g) || []).length;
+      assert.equal(
+        overlayCount >= 4 &&
+          stageSource.includes('data-testid="content-block-blk_subheader"') &&
+          stageSource.includes('const resolveTargetBlockAtPoint = useCallback('),
+        true,
+        'VirtualContentStage must render data-annotation-overlay="true" on all SVG overlays, include blk_subheader, and resolve pointer targets to exact blocks'
+      );
+
+      // 3. Summary and mcq-option use display: block so tokenized word spans do not split into separate flex items
+      assert.equal(
+        cssSource.includes('[data-active-content-tool="laser"]') &&
+          cssSource.includes('cursor: none !important;') &&
+          cssSource.includes('.content-main-container . content-html-fragment [data-token-id]') === false &&
+          stageSource.includes("span.setAttribute('data-marked', 'true');") &&
+          stageSource.includes("span.setAttribute('data-laser-target', 'true');"),
+        true,
+        'CSS and VirtualContentStage must enforce exact tool cursors and synchronize word-level data-marked / data-laser-target attributes on HTML content tokens'
+      );
+    });
+
+    it('uses 60fps smoothScrollFollowerTo interpolation for Student Mobile scroll sync and responsive reading box width across devices', () => {
+      const stageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/VirtualContentStage.tsx'),
+        'utf8'
+      );
+
+      assert.equal(
+        stageSource.includes('const smoothScrollFollowerTo = useCallback(') &&
+          stageSource.includes('smoothScrollFollowerTo(container, targetScrollTop);') &&
+          stageSource.includes('overscroll-y-contain') &&
+          !stageSource.includes('overflow-x-hidden scroll-smooth') &&
+          stageSource.includes('w-full max-w-full min-w-0 md:w-[720px] lg:w-[860px] xl:w-[960px] max-w-4xl lg:max-w-5xl xl:max-w-6xl'),
+        true,
+        'VirtualContentStage must use 60fps smoothScrollFollowerTo without CSS scroll-smooth conflict and render 100% full width on mobile with a structured fixed box on larger viewports'
+      );
+    });
+  });
 });
