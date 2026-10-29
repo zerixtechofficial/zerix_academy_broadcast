@@ -344,9 +344,12 @@ export default function LearningSessionLayout() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(
     initialParams.isMobileViewport
   );
-  // Multi-Topic Teaching Mode vs Reference-Only Mode ('taught' | 'reference_only')
+  // Multi-Topic Teaching Mode state (default 'taught')
   const [teachingMode, setTeachingMode] = useState<CurriculumTeachingMode>('taught');
   const [lessonModesMap, setLessonModesMap] = useState<Record<string, CurriculumTeachingMode>>({});
+  const [completedLessonsMap, setCompletedLessonsMap] = useState<Record<string, boolean>>({});
+  const [completedTopicsMap, setCompletedTopicsMap] = useState<Record<string, boolean>>({});
+  const [isMarkingComplete, setIsMarkingComplete] = useState<boolean>(false);
   const lessonWhiteboardsRef = useRef<
     Record<
       string,
@@ -715,6 +718,31 @@ export default function LearningSessionLayout() {
             ? ctx.courseId
             : initialParams.courseId || ctx.courseId;
 
+        const resolvedUserId =
+          initData.user?.userId
+            ? String(initData.user.userId)
+            : effectiveRole === 'teacher'
+            ? teacherId
+            : studentId;
+
+        if (typeof window !== 'undefined' && courseId && resolvedUserId) {
+          try {
+            const localKey = `broadcast_progress_${courseId}_${effectiveRole}_${resolvedUserId}`;
+            const rawLocal = window.localStorage.getItem(localKey);
+            if (rawLocal) {
+              const parsedLocal = JSON.parse(rawLocal);
+              if (parsedLocal?.lessons && typeof parsedLocal.lessons === 'object') {
+                setCompletedLessonsMap((prev) => ({ ...prev, ...parsedLocal.lessons }));
+              }
+              if (parsedLocal?.topics && typeof parsedLocal.topics === 'object') {
+                setCompletedTopicsMap((prev) => ({ ...prev, ...parsedLocal.topics }));
+              }
+            }
+          } catch {
+            // Ignore localStorage parse errors
+          }
+        }
+
         let curData: any = null;
         if (courseId) {
           for (let attempt = 0; attempt < 2; attempt++) {
@@ -722,7 +750,8 @@ export default function LearningSessionLayout() {
               curData = await CurriculumClient.fetchCurriculum(
                 String(courseId),
                 resolvedLang,
-                activeSessionToken
+                activeSessionToken,
+                resolvedUserId
               );
               if (curData && Array.isArray(curData.chapters) && curData.chapters.length > 0) {
                 break;
@@ -731,7 +760,58 @@ export default function LearningSessionLayout() {
               console.warn('[LearningSessionLayout] Curriculum fetch warning:', curErr?.message);
             }
           }
-          if (isMounted && curData) setCurriculum(curData);
+          if (isMounted && curData) {
+            setCurriculum(curData);
+            if (Array.isArray(curData.completedLessonIds) && curData.completedLessonIds.length > 0) {
+              setCompletedLessonsMap((prev) => {
+                const next = { ...prev };
+                for (const lid of curData.completedLessonIds) {
+                  next[String(lid)] = true;
+                }
+                return next;
+              });
+            }
+            if (Array.isArray(curData.completedTopicIds) && curData.completedTopicIds.length > 0) {
+              setCompletedTopicsMap((prev) => {
+                const next = { ...prev };
+                for (const tid of curData.completedTopicIds) {
+                  next[String(tid)] = true;
+                }
+                return next;
+              });
+            }
+          }
+
+          // Also fetch per-user course progress from Academy API
+          CurriculumClient.fetchCourseProgress(
+            String(courseId),
+            activeSessionToken,
+            resolvedUserId
+          )
+            .then((prog) => {
+              if (!isMounted || !prog) return;
+              const lessonIds = prog.completedLessonIds || prog.completedLessons || [];
+              if (Array.isArray(lessonIds) && lessonIds.length > 0) {
+                setCompletedLessonsMap((prev) => {
+                  const next = { ...prev };
+                  for (const lid of lessonIds) {
+                    next[String(lid)] = true;
+                  }
+                  return next;
+                });
+              }
+              const topicIds = prog.completedTopicIds || prog.completedTopics || [];
+              if (Array.isArray(topicIds) && topicIds.length > 0) {
+                setCompletedTopicsMap((prev) => {
+                  const next = { ...prev };
+                  for (const tid of topicIds) {
+                    next[String(tid)] = true;
+                  }
+                  return next;
+                });
+              }
+            })
+            .catch(() => {});
         }
 
         const chaptersList = Array.isArray(curData?.chapters) ? curData.chapters : [];
@@ -882,7 +962,8 @@ export default function LearningSessionLayout() {
                 targetLessonId,
                 resolvedLang,
                 undefined,
-                activeSessionToken
+                activeSessionToken,
+                resolvedUserId
               );
               if (contentData) break;
             } catch (contentErr: any) {
@@ -894,6 +975,23 @@ export default function LearningSessionLayout() {
             if (contentData) {
               setLessonContent(contentData);
               setContentLoadError(null);
+              if (contentData.isCompleted) {
+                setCompletedLessonsMap((prev) => ({
+                  ...prev,
+                  [String(targetLessonId)]: true,
+                }));
+              }
+              if (Array.isArray(contentData.topics)) {
+                setCompletedTopicsMap((prev) => {
+                  const next = { ...prev };
+                  for (const t of contentData.topics) {
+                    if (t?.isCompleted && t?.topicId) {
+                      next[String(t.topicId)] = true;
+                    }
+                  }
+                  return next;
+                });
+              }
             } else {
               lastFetchedLessonKeyRef.current = '';
               if (lastContentErr) {
@@ -975,17 +1073,36 @@ export default function LearningSessionLayout() {
       lastFetchedLessonKeyRef.current = fetchKey;
       setIsContentLoading(true);
       setContentLoadError(null);
+      const resolvedCurrentUserId = role === 'teacher' ? teacherId : studentId;
       CurriculumClient.fetchLessonContent(
         activeLessonId,
         languageId,
         undefined,
-        currentAuthToken
+        currentAuthToken,
+        resolvedCurrentUserId
       )
         .then((data) => {
           if (isMounted) {
             if (data) {
               setLessonContent(data);
               setContentLoadError(null);
+              if (data.isCompleted) {
+                setCompletedLessonsMap((prev) => ({
+                  ...prev,
+                  [String(activeLessonId)]: true,
+                }));
+              }
+              if (Array.isArray(data.topics)) {
+                setCompletedTopicsMap((prev) => {
+                  const next = { ...prev };
+                  for (const t of data.topics) {
+                    if (t?.isCompleted && t?.topicId) {
+                      next[String(t.topicId)] = true;
+                    }
+                  }
+                  return next;
+                });
+              }
             } else {
               lastFetchedLessonKeyRef.current = '';
             }
@@ -1260,14 +1377,20 @@ export default function LearningSessionLayout() {
           les.hasContent || (les.description && String(les.description).trim() !== '')
         ),
         description: les.description || undefined,
+        isCompleted: Boolean(
+          les.isCompleted || completedLessonsMap[String(les.lessonId)]
+        ),
         topics: (les.topics || []).map((top: any) => ({
           topicId: String(top.topicId),
           title: top.title,
           durationMinutes: top.durationMinutes,
+          isCompleted: Boolean(
+            top.isCompleted || completedTopicsMap[String(top.topicId)]
+          ),
         })),
       })),
     }));
-  }, [curriculum]);
+  }, [curriculum, completedLessonsMap, completedTopicsMap]);
 
   // Determine current Chapter, Lesson, and Topic titles for the Top Header Breadcrumb
   const { activeChapterId, chapterTitle, lessonTitle, topicTitle } = useMemo(() => {
@@ -1802,38 +1925,79 @@ export default function LearningSessionLayout() {
     [audioStageState.raisedHands, currentUserId, studentId]
   );
 
-  // Toggle between 'taught' (Record & Save WB to VOD) and 'reference_only' (Protect existing VOD & WB)
-  const handleToggleTeachingMode = useCallback(() => {
-    if (role !== 'teacher' || !isHostTeacher) return;
-    const nextMode: CurriculumTeachingMode =
-      teachingMode === 'taught' ? 'reference_only' : 'taught';
-    setTeachingMode(nextMode);
-    setLessonModesMap((prev) => ({ ...prev, [activeLessonId]: nextMode }));
+  // Mark Lesson or Topic as Completed via Zerix Academy API (separate per Student and Teacher)
+  const handleMarkContentComplete = useCallback(
+    async (contentId: string, type: 'lesson' | 'topic') => {
+      if (!contentId || isMarkingComplete) return;
+      const resolvedCourseId = String(
+        (sessionMetadata as any)?.courseId ||
+          (curriculum as any)?.courseId ||
+          initialParams.courseId ||
+          '1'
+      );
+      const resolvedActorId = role === 'teacher' ? teacherId : studentId;
+      setIsMarkingComplete(true);
+      try {
+        await CurriculumClient.markContentComplete(
+          String(contentId),
+          {
+            type,
+            courseId: resolvedCourseId,
+            sessionId,
+            userId: resolvedActorId,
+            role,
+          },
+          activeTokenRef.current || token
+        );
+      } catch (err) {
+        console.warn('[LearningSessionLayout] Mark complete API notice:', err);
+      } finally {
+        const nextLessons =
+          type === 'lesson'
+            ? { ...completedLessonsMap, [String(contentId)]: true }
+            : completedLessonsMap;
+        const nextTopics =
+          type === 'topic'
+            ? { ...completedTopicsMap, [String(contentId)]: true }
+            : completedTopicsMap;
 
-    CurriculumClient.navigateCurriculum(sessionId, {
-      chapterId: activeChapterId,
-      lessonId: activeLessonId,
-      topicId: activeTopicId,
-      videoOffsetSec: getCurrentVideoOffsetSec(),
-      mode: nextMode,
+        if (type === 'lesson') {
+          setCompletedLessonsMap(nextLessons);
+        } else {
+          setCompletedTopicsMap(nextTopics);
+        }
+
+        if (typeof window !== 'undefined' && resolvedCourseId && resolvedActorId) {
+          try {
+            const localKey = `broadcast_progress_${resolvedCourseId}_${role}_${resolvedActorId}`;
+            window.localStorage.setItem(
+              localKey,
+              JSON.stringify({
+                lessons: nextLessons,
+                topics: nextTopics,
+              })
+            );
+          } catch {
+            // Ignore localStorage write errors
+          }
+        }
+        setIsMarkingComplete(false);
+      }
+    },
+    [
+      isMarkingComplete,
+      sessionMetadata,
+      curriculum,
+      initialParams.courseId,
+      role,
+      teacherId,
+      studentId,
+      sessionId,
       token,
-      relationalContext: {
-        ...relationalContext,
-        publishToVodCourse: nextMode === 'taught',
-      },
-    }).catch(() => {});
-  }, [
-    role,
-    isHostTeacher,
-    teachingMode,
-    activeLessonId,
-    sessionId,
-    activeChapterId,
-    activeTopicId,
-    getCurrentVideoOffsetSec,
-    token,
-    relationalContext,
-  ]);
+      completedLessonsMap,
+      completedTopicsMap,
+    ]
+  );
 
   // Multi-Topic Curriculum Navigation Handler (Never restarts 720p Video Recorder)
   const handleNavigateCurriculumTopic = useCallback(
@@ -2121,9 +2285,7 @@ export default function LearningSessionLayout() {
 
   const academyPortalUrl =
     process.env.NEXT_PUBLIC_ACADEMY_PORTAL_URL ||
-    process.env.NEXT_PUBLIC_ACADEMY_URL ||
-    process.env.NEXT_PUBLIC_APP_URL ||
-    'https://academy.zerixtech.com';
+    '';
 
   // Strict Classroom Authentication Gate: Block direct unauthenticated access to studio.zerixtech.com (Light Theme)
   if (authError || (!isAuthVerifying && (!sessionId || !token))) {
@@ -2210,8 +2372,6 @@ export default function LearningSessionLayout() {
         isTopNavVisible={isTopNavVisible}
         isFullscreen={isFullscreen}
         isContentToolboxVisible={isContentToolboxVisible}
-        teachingMode={teachingMode}
-        onToggleTeachingMode={handleToggleTeachingMode}
         isRecording={isRecording}
         isFinalizingRecording={isFinalizingRecording}
         recordingDurationSec={recordingDurationSec}
@@ -2431,9 +2591,6 @@ export default function LearningSessionLayout() {
           role={role}
           isCollapsed={isSidebarCollapsed}
           isTopNavVisible={isTopNavVisible}
-          teachingMode={teachingMode}
-          lessonModesMap={lessonModesMap}
-          onToggleTeachingMode={handleToggleTeachingMode}
           onCloseMobile={() => setIsSidebarCollapsed(true)}
           onSelectTopic={handleNavigateCurriculumTopic}
         />
@@ -2594,6 +2751,18 @@ export default function LearningSessionLayout() {
                   setIsSidebarCollapsed(true);
                   sendContentBlockToWhiteboard(block);
                 }}
+                isLessonCompleted={Boolean(
+                  completedLessonsMap[String(activeLessonId)] || lessonContent?.isCompleted
+                )}
+                isTopicCompleted={Boolean(
+                  activeTopicId &&
+                    (completedTopicsMap[String(activeTopicId)] ||
+                      lessonContent?.topics?.find(
+                        (t: any) => String(t.topicId) === String(activeTopicId)
+                      )?.isCompleted)
+                )}
+                isMarkingComplete={isMarkingComplete}
+                onMarkComplete={handleMarkContentComplete}
               />
             </>
           )}

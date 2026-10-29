@@ -16,6 +16,8 @@ import {
   MousePointer,
   Compass,
   BookOpen,
+  CheckCircle,
+  Circle,
 } from 'lucide-react';
 import {
   AnchoredStrokePoint,
@@ -68,6 +70,10 @@ interface VirtualContentStageProps {
   onClearStrokes: () => void;
   onLaserMove: (laser: LaserPointerState) => void;
   onSendBlockToWhiteboard?: (block: LessonBlock) => void;
+  isLessonCompleted?: boolean;
+  isTopicCompleted?: boolean;
+  isMarkingComplete?: boolean;
+  onMarkComplete?: (contentId: string, type: 'lesson' | 'topic') => void;
 }
 
 interface TokenAnnotationInfo {
@@ -109,6 +115,10 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   onClearStrokes,
   onLaserMove,
   onSendBlockToWhiteboard,
+  isLessonCompleted = false,
+  isTopicCompleted = false,
+  isMarkingComplete = false,
+  onMarkComplete,
 }) => {
   const canAnnotate = canEditContent ?? role === 'teacher';
   const effectiveIsHostTeacher = isHostTeacher ?? role === 'teacher';
@@ -156,6 +166,29 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
   const lastTargetBlockIdRef = useRef<string | null>(null);
   const lastCursorScrollTimeRef = useRef<number>(0);
   const idlePointerTimerRef = useRef<number | null>(null);
+  const [isScrolledToEnd, setIsScrolledToEnd] = useState<boolean>(false);
+
+  const checkScrollReachedEnd = useCallback((container: HTMLDivElement | null) => {
+    if (!container) return;
+    const remaining = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const fitsWithoutScroll = container.scrollHeight <= container.clientHeight + 32;
+    if (fitsWithoutScroll || remaining <= 90) {
+      setIsScrolledToEnd(true);
+    }
+  }, []);
+
+  // Reset and re-evaluate scroll-to-end state when lesson, topic, or blocks change
+  useEffect(() => {
+    setIsScrolledToEnd(false);
+    const container = scrollContainerRef.current;
+    const timer = window.setTimeout(() => {
+      checkScrollReachedEnd(scrollContainerRef.current);
+    }, 120);
+    if (container) {
+      checkScrollReachedEnd(container);
+    }
+    return () => window.clearTimeout(timer);
+  }, [contentState.lessonId, contentState.topicId, blocks.length, checkScrollReachedEnd]);
 
   /**
    * Smooth 60fps requestAnimationFrame scroll interpolation controller for follower devices
@@ -306,9 +339,16 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         if (!entry.el) continue;
         const r = entry.el.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0) continue;
+        if (clientX < r.left - 8 || clientX > r.right + 8) continue;
         const dy =
           clientY < r.top ? r.top - clientY : clientY > r.bottom ? clientY - r.bottom : 0;
-        if (dy <= 18 && dy < bestDy) {
+        if (dy <= 8 && dy < bestDy) {
+          // If the pointer is outside the block's vertical bounds, only snap to this block if a word token is within underline reach
+          if (dy > 0) {
+            const candCache = getFreshBlockLayout(entry.id) || measureBlockDomLayout(entry.id, entry.el);
+            const hit = hitTestWordToken(clientX - r.left, clientY - r.top, candCache, 12);
+            if (!hit) continue;
+          }
           bestDy = dy;
           bestEntry = { id: entry.id, el: entry.el };
           if (dy === 0) break;
@@ -642,6 +682,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     const container = scrollContainerRef.current;
     if (!container) return;
 
+    checkScrollReachedEnd(container);
+
     if (!canAnnotate) {
       const anchorBlockId = contentState.scrollAnchor?.blockId;
       const offsetRatio = contentState.scrollAnchor?.offsetRatio || 0;
@@ -698,6 +740,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
     collectScrollBlockMetrics,
     onScrollSync,
     contentState.scrollAnchor,
+    checkScrollReachedEnd,
   ]);
 
   // Erase strokes near a pointer coordinate or matching a touched word token across all content blocks and full-page canvas
@@ -852,6 +895,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
         activeDrawingBlockId === blockId ||
         e.buttons === 1)
     ) {
+      e.stopPropagation();
       eraseStrokeAtPointer(blockId, e.clientX, e.clientY, cache, liveRect);
       return;
     }
@@ -860,21 +904,54 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       (activeTool === 'pen' || activeTool === 'highlighter') &&
       (activeDrawingBlockIdRef.current === blockId || activeDrawingBlockId === blockId)
     ) {
-      let preferredLineTop: number | undefined;
-      for (let k = currentPointsRef.current.length - 1; k >= 0; k--) {
-        const prevTid = currentPointsRef.current[k].tokenId;
-        if (prevTid) {
+      e.stopPropagation();
+      const rawCoalesced =
+        typeof (e.nativeEvent as any)?.getCoalescedEvents === 'function'
+          ? (e.nativeEvent as any).getCoalescedEvents()
+          : null;
+      const sampleEvents: Array<{ clientX: number; clientY: number }> =
+        Array.isArray(rawCoalesced) && rawCoalesced.length > 0 ? rawCoalesced : [e];
+
+      let next = [...currentPointsRef.current];
+      let latestPt: AnchoredStrokePoint | null = null;
+
+      for (const sample of sampleEvents) {
+        let preferredLineTop: number | undefined;
+        const lastPt = next[next.length - 1];
+        if (lastPt?.tokenId) {
           const prevBox =
-            cache.tokens.get(prevTid) || cache.tokens.get(stripTokenBlockScope(prevTid));
+            cache.tokens.get(lastPt.tokenId) ||
+            cache.tokens.get(stripTokenBlockScope(lastPt.tokenId));
           if (prevBox) {
             preferredLineTop = prevBox.top;
-            break;
           }
         }
+
+        const pt = captureStrokePoint(
+          sample.clientX,
+          sample.clientY,
+          cache,
+          liveRect,
+          preferredLineTop
+        );
+        if (
+          lastPt &&
+          Math.abs(pt.x - lastPt.x) < 0.02 &&
+          Math.abs(pt.y - lastPt.y) < 0.02 &&
+          pt.tokenId === lastPt.tokenId
+        ) {
+          continue;
+        }
+        next.push(pt);
+        latestPt = pt;
       }
 
-      const pt = captureStrokePoint(e.clientX, e.clientY, cache, liveRect, preferredLineTop);
-      const next = [...currentPointsRef.current, pt];
+      if (!latestPt) {
+        latestPt = next[next.length - 1];
+      }
+      if (!latestPt) return;
+
+      const pt = latestPt;
       currentPointsRef.current = next;
       setCurrentPoints(next);
       setCurrentAnchorTokens(extractAnchorTokensFromPoints(next, cache));
@@ -935,6 +1012,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
       (activeTool === 'pen' || activeTool === 'highlighter') &&
       (activeDrawingBlockIdRef.current === blockId || activeDrawingBlockId === blockId)
     ) {
+      e.stopPropagation();
       activeDrawingBlockIdRef.current = null;
       try {
         e.currentTarget.releasePointerCapture(e.pointerId);
@@ -954,7 +1032,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                 pointsToCommit[0],
                 {
                   ...pointsToCommit[0],
-                  x: Math.min(100, Math.round((pointsToCommit[0].x + 0.6) * 10) / 10),
+                  x: Math.round((pointsToCommit[0].x + 0.4) * 100) / 100,
                   rx:
                     typeof pointsToCommit[0].rx === 'number'
                       ? Math.min(1, pointsToCommit[0].rx + 0.2)
@@ -965,8 +1043,8 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
 
         const normalizedPoints: AnchoredStrokePoint[] = rawPoints.map((pt) => ({
           ...pt,
-          x: Math.round(pt.x * 10) / 10,
-          y: Math.round(pt.y * 10) / 10,
+          x: Math.round(pt.x * 100) / 100,
+          y: Math.round(pt.y * 100) / 100,
         }));
 
         const strokeTool = activeTool === 'highlighter' ? 'highlighter' : 'pen';
@@ -1658,12 +1736,22 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           if (
             canAnnotate &&
             (activeTool === 'pen' || activeTool === 'highlighter' || activeTool === 'eraser') &&
-            activeDrawingBlockIdRef.current === 'blk_page_canvas'
+            activeDrawingBlockIdRef.current
           ) {
-            handleBlockPointerMove(e, 'blk_page_canvas');
+            handleBlockPointerMove(e, activeDrawingBlockIdRef.current);
           }
         }}
         onPointerUp={(e) => {
+          handleSheetPointerUp();
+          if (
+            canAnnotate &&
+            (activeTool === 'pen' || activeTool === 'highlighter' || activeTool === 'eraser') &&
+            activeDrawingBlockIdRef.current
+          ) {
+            handleBlockPointerUp(e, activeDrawingBlockIdRef.current);
+          }
+        }}
+        onPointerCancel={(e) => {
           handleSheetPointerUp();
           if (
             canAnnotate &&
@@ -1725,9 +1813,10 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                 ]
               : pageCanvasStrokes;
 
-            if (allPageCanvasStrokes.length === 0) return null;
-
-            const pageLayoutCache = getFreshBlockLayout(pageCanvasId);
+            const pageLayoutCache =
+              allPageCanvasStrokes.length > 0
+                ? getFreshBlockLayout(pageCanvasId)
+                : blockLayouts[pageCanvasId];
             const pageSvgWidth = Math.max(
               100,
               Number((pageLayoutCache?.blockRect.width || 896).toFixed(2))
@@ -1743,7 +1832,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                 data-annotation-overlay="true"
                 viewBox={`0 0 ${pageSvgWidth} ${pageSvgHeight}`}
                 preserveAspectRatio="none"
-                className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-20"
+                className="pointer-events-none absolute inset-0 w-full h-full overflow-visible z-20 m-0"
               >
                 {allPageCanvasStrokes.map((stroke) => {
                   const isHighlighter = stroke.tool === 'highlighter';
@@ -1882,6 +1971,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                 onPointerDown={(e) => handleBlockPointerDown(e, headerBlockId)}
                 onPointerMove={(e) => handleBlockPointerMove(e, headerBlockId)}
                 onPointerUp={(e) => handleBlockPointerUp(e, headerBlockId)}
+                onPointerCancel={(e) => handleBlockPointerUp(e, headerBlockId)}
                 className={`relative space-y-2 ${
                   isSelectionEnabled ? 'select-text' : 'select-none'
                 } ${
@@ -1941,7 +2031,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
           })()}
 
           {/* Main Content Card matching /learn page (.content-main-container) */}
-          <div className="w-full min-w-0 bg-white rounded-xl sm:rounded-2xl p-3 sm:p-5 md:p-6 lg:p-7 space-y-3.5 sm:space-y-4 shadow-xs border border-slate-200/90 overflow-hidden">
+          <div className="w-full min-w-0 bg-white rounded-xl sm:rounded-2xl p-3 sm:p-5 md:p-6 lg:p-7 pb-20 sm:pb-28 min-h-[360px] sm:min-h-[460px] space-y-3.5 sm:space-y-4 shadow-xs border border-slate-200/90 overflow-visible">
             {(() => {
               const subheaderBlockId = 'blk_subheader';
               const subheaderStrokes = contentState.penStrokes.filter(
@@ -2057,6 +2147,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                   onPointerDown={(e) => handleBlockPointerDown(e, subheaderBlockId)}
                   onPointerMove={(e) => handleBlockPointerMove(e, subheaderBlockId)}
                   onPointerUp={(e) => handleBlockPointerUp(e, subheaderBlockId)}
+                  onPointerCancel={(e) => handleBlockPointerUp(e, subheaderBlockId)}
                   className={`relative flex items-start sm:items-center gap-2 text-[#2563eb] font-extrabold text-sm sm:text-base break-words ${
                     isSelectionEnabled ? 'select-text' : 'select-none'
                   } ${
@@ -2246,6 +2337,7 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
                       onPointerDown={(e) => handleBlockPointerDown(e, block.blockId)}
                       onPointerMove={(e) => handleBlockPointerMove(e, block.blockId)}
                       onPointerUp={(e) => handleBlockPointerUp(e, block.blockId)}
+                      onPointerCancel={(e) => handleBlockPointerUp(e, block.blockId)}
                       className={`section-block relative transition-all rounded-lg ${
                         isTeacherAnchor ? 'ring-1 ring-[#12a3ff]/20' : ''
                       } ${isSelectionEnabled ? 'select-text' : 'select-none'} ${
@@ -2351,6 +2443,99 @@ export const VirtualContentStage: React.FC<VirtualContentStageProps> = ({
               </div>
             )}
           </div>
+
+          {/* End-of-Lesson / End-of-Topic Completion Bar (Academy Laravel Progress API — Student & Teacher tracked separately) */}
+          {blocks.length > 0 &&
+            (() => {
+              const isTopicView = Boolean(
+                contentState.topicId && String(contentState.topicId).trim() !== ''
+              );
+              const completionType: 'lesson' | 'topic' = isTopicView ? 'topic' : 'lesson';
+              const targetContentId = isTopicView
+                ? String(contentState.topicId)
+                : String(contentState.lessonId);
+              const isCurrentCompleted = isTopicView
+                ? Boolean(isTopicCompleted)
+                : Boolean(isLessonCompleted);
+
+              if (!targetContentId) return null;
+
+              return (
+                <div
+                  data-testid="content-completion-bar"
+                  data-completion-type={completionType}
+                  data-content-id={targetContentId}
+                  data-scrolled-to-end={isScrolledToEnd ? 'true' : 'false'}
+                  className={`bg-white border border-slate-200/90 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm transition-all duration-300 ${
+                    isScrolledToEnd || isCurrentCompleted
+                      ? 'opacity-100 translate-y-0'
+                      : 'opacity-90'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    {isCurrentCompleted ? (
+                      <div className="w-10 h-10 bg-emerald-100 rounded-xl flex items-center justify-center shrink-0">
+                        <CheckCircle className="w-5 h-5 text-emerald-600" />
+                      </div>
+                    ) : (
+                      <div className="w-10 h-10 bg-slate-100 rounded-xl flex items-center justify-center shrink-0">
+                        <Circle className="w-5 h-5 text-slate-400" />
+                      </div>
+                    )}
+                    <div>
+                      <p className="font-semibold text-slate-900 text-sm">
+                        {isCurrentCompleted
+                          ? isTopicView
+                            ? 'Topic Completed!'
+                            : 'Lesson Completed!'
+                          : isTopicView
+                          ? 'In Progress'
+                          : 'Finish reading this lesson to mark it complete'}
+                      </p>
+                      <p className="text-xs text-slate-500">
+                        {isCurrentCompleted
+                          ? `Great job completing this ${completionType} (${
+                              role === 'teacher' ? 'Teacher' : 'Student'
+                            })`
+                          : isTopicView
+                          ? `Mark this topic as complete when you are done (${
+                              role === 'teacher' ? 'Teacher' : 'Student'
+                            })`
+                          : `${lessonTitle} (${role === 'teacher' ? 'Teacher' : 'Student'})`}
+                      </p>
+                    </div>
+                  </div>
+
+                  {!isCurrentCompleted ? (
+                    <button
+                      type="button"
+                      data-testid="mark-complete-btn"
+                      disabled={isMarkingComplete || !onMarkComplete}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onMarkComplete?.(targetContentId, completionType);
+                      }}
+                      className="flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white px-5 py-2.5 rounded-xl font-medium transition-colors text-sm shrink-0 shadow-xs cursor-pointer"
+                    >
+                      <CheckCircle className="w-4 h-4" />
+                      {isMarkingComplete
+                        ? 'Saving...'
+                        : isTopicView
+                        ? 'Mark as Completed'
+                        : 'Mark Lesson as Completed'}
+                    </button>
+                  ) : (
+                    <span
+                      data-testid="content-completed-badge"
+                      className="inline-flex items-center justify-center gap-1.5 text-sm font-medium text-emerald-700 bg-emerald-50 border border-emerald-200/80 px-4 py-2 rounded-xl shrink-0"
+                    >
+                      <CheckCircle className="w-4 h-4" />
+                      {isTopicView ? 'Completed' : 'Lesson Completed'}
+                    </span>
+                  )}
+                </div>
+              );
+            })()}
 
           {/* Excalidraw-Style Decaying Laser Trail Across the Entire Content Stage */}
           {laserTrail.length > 1 && (

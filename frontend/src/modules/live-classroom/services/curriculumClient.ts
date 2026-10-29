@@ -153,12 +153,16 @@ export class CurriculumClient {
   public static async fetchCurriculum(
     courseId: string | number,
     languageId?: string | number,
-    token?: string
+    token?: string,
+    userId?: string | number
   ) {
     const authToken = getStoredAuthToken(token);
     const query = new URLSearchParams();
     if (languageId !== undefined && languageId !== null && String(languageId).trim() !== '') {
       query.set('language_id', String(languageId).trim());
+    }
+    if (userId !== undefined && userId !== null && String(userId).trim() !== '') {
+      query.set('user_id', String(userId).trim());
     }
     const qs = query.toString();
     const res = await this.request<{ success: boolean; data: any }>(
@@ -172,7 +176,8 @@ export class CurriculumClient {
     lessonId: string | number,
     languageId?: string | number,
     topicId?: string | number,
-    token?: string
+    token?: string,
+    userId?: string | number
   ) {
     const authToken = getStoredAuthToken(token);
     const query = new URLSearchParams();
@@ -182,9 +187,73 @@ export class CurriculumClient {
     if (topicId !== undefined && topicId !== null && String(topicId).trim() !== '') {
       query.set('topic_id', String(topicId).trim());
     }
+    if (userId !== undefined && userId !== null && String(userId).trim() !== '') {
+      query.set('user_id', String(userId).trim());
+    }
     const qs = query.toString();
     const res = await this.request<{ success: boolean; data: any }>(
       `/api/v1/lessons/${encodeURIComponent(String(lessonId))}/content${qs ? `?${qs}` : ''}`,
+      authToken ? { headers: { Authorization: `Bearer ${authToken}` } } : {}
+    );
+    return res.data;
+  }
+
+  public static async markContentComplete(
+    contentId: string | number,
+    payload: {
+      type: 'lesson' | 'topic';
+      courseId?: string | number;
+      sessionId?: string;
+      userId?: string | number;
+      role?: 'teacher' | 'student';
+    },
+    token?: string
+  ) {
+    const authToken = getStoredAuthToken(token);
+    const res = await this.request<{
+      success: boolean;
+      message?: string;
+      data: {
+        contentId: string;
+        type: 'lesson' | 'topic';
+        userId: string;
+        role?: string;
+        isCompleted: boolean;
+        completedAt?: string;
+        completedLessons?: string[];
+        completedTopics?: string[];
+      };
+    }>(`/api/v1/content/${encodeURIComponent(String(contentId))}/complete`, {
+      method: 'POST',
+      headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+      body: JSON.stringify(payload),
+    });
+    return res.data;
+  }
+
+  public static async fetchCourseProgress(
+    courseId: string | number,
+    token?: string,
+    userId?: string | number
+  ) {
+    const authToken = getStoredAuthToken(token);
+    const query = new URLSearchParams();
+    if (userId !== undefined && userId !== null && String(userId).trim() !== '') {
+      query.set('user_id', String(userId).trim());
+    }
+    const qs = query.toString();
+    const res = await this.request<{
+      success: boolean;
+      data: {
+        completedLessonIds?: string[];
+        completedTopicIds?: string[];
+        completedLessons?: string[];
+        completedTopics?: string[];
+        lessons?: Record<string, any>;
+        topics?: Record<string, any>;
+      };
+    }>(
+      `/api/v1/courses/${encodeURIComponent(String(courseId))}/progress${qs ? `?${qs}` : ''}`,
       authToken ? { headers: { Authorization: `Bearer ${authToken}` } } : {}
     );
     return res.data;

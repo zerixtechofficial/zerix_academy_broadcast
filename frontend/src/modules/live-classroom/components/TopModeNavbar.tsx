@@ -281,8 +281,6 @@ interface TopModeNavbarProps {
   onEndClass?: () => void;
   isContentToolboxVisible?: boolean;
   onToggleContentToolbox?: () => void;
-  teachingMode?: 'taught' | 'reference_only';
-  onToggleTeachingMode?: () => void;
   isRecording?: boolean;
   isFinalizingRecording?: boolean;
   recordingDurationSec?: number;
@@ -345,8 +343,6 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
   onEndClass,
   isContentToolboxVisible = true,
   onToggleContentToolbox,
-  teachingMode = 'taught',
-  onToggleTeachingMode,
   isRecording = false,
   isFinalizingRecording = false,
   recordingDurationSec = 0,
@@ -589,48 +585,8 @@ export const TopModeNavbar: React.FC<TopModeNavbarProps> = ({
           </button>
         </div>
 
-        {/* RIGHT: Minimalist Controls + 720p Recorder + Teaching/Ref Mode + Fullscreen + Users + Leave */}
+        {/* RIGHT: Minimalist Controls + 720p Recorder + Fullscreen + Users + Leave */}
         <div className="flex items-center justify-end gap-1 sm:gap-2 sm:flex-1 min-w-0">
-          {/* Teacher Multi-Topic Mode Toggle: Teaching Mode vs Reference-Only (Protects Old VOD & WB) */}
-          {role === 'teacher' && isHostTeacher && onToggleTeachingMode && (
-            <button
-              type="button"
-              data-testid="teaching-mode-toggle-btn"
-              data-teaching-mode={teachingMode}
-              onClick={onToggleTeachingMode}
-              title={
-                teachingMode === 'reference_only'
-                  ? 'Reference-Only Mode Active: Old VOD & Whiteboard are protected from overwrite. Click to switch back to Teaching Mode.'
-                  : 'Teaching Mode Active: Lesson timeline & Whiteboard will be saved to VOD. Click to switch to Reference-Only Mode.'
-              }
-              className={`hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all shrink-0 cursor-pointer ${
-                teachingMode === 'reference_only'
-                  ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200'
-                  : 'bg-sky-50 hover:bg-sky-100 text-[#12a3ff] border-sky-200'
-              }`}
-            >
-              <span
-                className={`w-2 h-2 rounded-full shrink-0 ${
-                  teachingMode === 'reference_only' ? 'bg-amber-500' : 'bg-[#12a3ff]'
-                }`}
-              />
-              <span>
-                {teachingMode === 'reference_only' ? 'Ref Only (Protected)' : 'Teaching Mode'}
-              </span>
-            </button>
-          )}
-
-          {/* Student Reference-Only Indicator Badge */}
-          {role === 'student' && teachingMode === 'reference_only' && (
-            <span
-              data-testid="student-ref-only-badge"
-              className="hidden md:inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-semibold shrink-0"
-              title="Teacher opened this lesson for quick reference only"
-            >
-              Ref Topic
-            </span>
-          )}
-
           {/* Teacher Manual Screen Recording Controls (Start / Stop / Restart) */}
           {role === 'teacher' &&
             isHostTeacher &&

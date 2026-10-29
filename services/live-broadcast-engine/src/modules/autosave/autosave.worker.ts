@@ -146,11 +146,21 @@ export class AutoSaveService {
         return;
       }
 
-      const [elements, files, cam] = await Promise.all([
+      const nowIso = new Date().toISOString();
+      const [elements, files, cam, attendanceSummary] = await Promise.all([
         WhiteboardEngine.getAllElements(sessionId),
         WhiteboardEngine.getAllFiles(sessionId),
         WhiteboardEngine.getTeacherCam(sessionId),
+        AttendanceEngine.finalizeSessionAttendance(
+          sessionId,
+          room.sessionContext,
+          room.sessionContext?.startTime || nowIso,
+          nowIso
+        ),
       ]);
+
+      const elapsedSeconds = attendanceSummary.totalClassDurationSeconds || 0;
+      const totalDurationMinutes = Math.round((elapsedSeconds / 60) * 100) / 100;
 
       const snapshot: SessionSnapshot = {
         ...room,
@@ -158,6 +168,10 @@ export class AutoSaveService {
         excalidrawElements: elements,
         excalidrawFiles: files,
         lastSavedAt: Date.now(),
+        elapsedSeconds,
+        totalDurationMinutes,
+        students: attendanceSummary.students,
+        records: attendanceSummary.students,
       };
 
       const provider = getDataProvider();

@@ -351,24 +351,26 @@ export function measureBlockDomLayout(
     height: safeBlockH,
   });
 
-  const regionNodes = blockEl.querySelectorAll<HTMLElement>('[data-region-id]');
-  regionNodes.forEach((node) => {
-    const regionId = node.getAttribute('data-region-id') as ContentRegionId | null;
-    if (!regionId) return;
-    const targetEl =
-      regionId === 'diagram'
-        ? (node.querySelector('svg') as Element | null) || node
-        : node;
-    const r = targetEl.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) return;
-    regions.set(regionId, {
-      regionId,
-      left: r.left - blockRect.left,
-      top: r.top - blockRect.top,
-      width: r.width,
-      height: r.height,
+  if (!isWholePageCanvas) {
+    const regionNodes = blockEl.querySelectorAll<HTMLElement>('[data-region-id]');
+    regionNodes.forEach((node) => {
+      const regionId = node.getAttribute('data-region-id') as ContentRegionId | null;
+      if (!regionId) return;
+      const targetEl =
+        regionId === 'diagram'
+          ? (node.querySelector('svg') as Element | null) || node
+          : node;
+      const r = targetEl.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) return;
+      regions.set(regionId, {
+        regionId,
+        left: r.left - blockRect.left,
+        top: r.top - blockRect.top,
+        width: r.width,
+        height: r.height,
+      });
     });
-  });
+  }
 
   return {
     blockId,
@@ -459,8 +461,8 @@ export function hitTestWordToken(
   }
 
   // 2. Asymmetric line-aware halo match (inter-word spaces and underlines below text)
-  const tolX = Math.max(tolerancePx, 32);
-  const tolY = Math.max(tolerancePx, 18);
+  const tolX = Math.max(tolerancePx, 16);
+  const tolY = 4;
   let bestToken: CachedTokenBox | null = null;
   let bestDist = Infinity;
 
@@ -527,12 +529,12 @@ export function captureStrokePoint(
   const localY = clientY - blockRect.top;
 
   const isWholePageCanvas = cache.blockId === 'blk_page_canvas';
-  const minPct = isWholePageCanvas ? -100 : 0;
-  const maxPct = isWholePageCanvas ? 200 : 100;
+  const minPct = isWholePageCanvas ? -100 : -100;
+  const maxPct = isWholePageCanvas ? 200 : 400;
   const rawPctX = Math.max(minPct, Math.min(maxPct, (localX / safeW) * 100));
   const rawPctY = Math.max(minPct, Math.min(maxPct, (localY / safeH) * 100));
-  const pctX = Math.round(rawPctX * 10) / 10;
-  const pctY = Math.round(rawPctY * 10) / 10;
+  const pctX = Math.round(rawPctX * 100) / 100;
+  const pctY = Math.round(rawPctY * 100) / 100;
 
   const point: AnchoredStrokePoint = {
     x: pctX,
@@ -552,13 +554,9 @@ export function captureStrokePoint(
     ) {
       point.regionId = regId;
       point.regionRx =
-        Math.round(
-          Math.max(0, Math.min(1, (localX - reg.left) / Math.max(1, reg.width))) * 1000
-        ) / 1000;
+        Math.round(((localX - reg.left) / Math.max(1, reg.width)) * 10000) / 10000;
       point.regionRy =
-        Math.round(
-          Math.max(0, Math.min(1, (localY - reg.top) / Math.max(1, reg.height))) * 1000
-        ) / 1000;
+        Math.round(((localY - reg.top) / Math.max(1, reg.height)) * 10000) / 10000;
       break;
     }
   }
@@ -655,7 +653,7 @@ export function projectPointToDevicePixels(
     const tokenBox =
       cache.tokens.get(pt.tokenId) || cache.tokens.get(stripTokenBlockScope(pt.tokenId));
     if (tokenBox) {
-      const effectiveRy = _isPenStroke ? Math.max(-0.15, Math.min(1.25, pt.ry)) : pt.ry;
+      const effectiveRy = _isPenStroke ? Math.max(-1.0, Math.min(2.2, pt.ry)) : pt.ry;
       return {
         px: tokenBox.left + pt.rx * tokenBox.width,
         py: tokenBox.top + effectiveRy * tokenBox.height,
@@ -837,7 +835,9 @@ export function buildResponsiveSvgPath(
   const workingPoints = expandWrappedTokenPoints(cleanedInputPoints, cache);
   const projected = workingPoints.map((pt) => projectPointToDevicePixels(pt, cache, isPenStroke));
 
-  // If a stroke is primarily word-anchored, keep any un-tokenized margin points tightly bounded relative to their nearest word-anchored neighbor
+  // If a stroke is primarily word-anchored, keep only immediate leading/trailing margin-overshoot points
+  // attached to their adjacent word token when that word wrapped on the viewer's device, while allowing
+  // freehand strokes in whitespace (or strokes extending into whitespace) to render at their exact coordinates.
   const hasTokenAnchoredPoint = projected.some((p) => Boolean(p.tokenBox));
   if (hasTokenAnchoredPoint && projected.length > 1) {
     const blockW = Math.max(1, cache.blockRect.width);
@@ -853,7 +853,7 @@ export function buildResponsiveSvgPath(
           nearestIdx = j;
         }
       }
-      if (nearestIdx !== -1) {
+      if (nearestIdx !== -1 && minStepDist === 1) {
         const anchorProj = projected[nearestIdx];
         const anchorPt = workingPoints[nearestIdx];
         const currPt = workingPoints[i];
@@ -862,11 +862,13 @@ export function buildResponsiveSvgPath(
         const maxDy = Math.max(6, anchorH * 0.35);
         const rawDx = ((currPt.x - anchorPt.x) / 100) * blockW;
         const rawDy = ((currPt.y - anchorPt.y) / 100) * blockH;
-        projected[i] = {
-          px: anchorProj.px + Math.max(-maxDx, Math.min(maxDx, rawDx)),
-          py: anchorProj.py + Math.max(-maxDy, Math.min(maxDy, rawDy)),
-          tokenBox: anchorProj.tokenBox,
-        };
+        if (Math.abs(rawDx) <= maxDx && Math.abs(rawDy) <= maxDy) {
+          projected[i] = {
+            px: anchorProj.px + rawDx,
+            py: anchorProj.py + rawDy,
+            tokenBox: anchorProj.tokenBox,
+          };
+        }
       }
     }
 
@@ -896,11 +898,11 @@ export function buildResponsiveSvgPath(
     return `M ${p.px.toFixed(1)} ${p.py.toFixed(1)} L ${(p.px + 0.5).toFixed(1)} ${(p.py + 0.5).toFixed(1)}`;
   }
 
-  const commands: string[] = [];
+  const subpaths: Array<typeof projected> = [[]];
   for (let i = 0; i < projected.length; i++) {
     const curr = projected[i];
     if (i === 0) {
-      commands.push(`M ${curr.px.toFixed(1)} ${curr.py.toFixed(1)}`);
+      subpaths[0].push(curr);
       continue;
     }
 
@@ -916,17 +918,51 @@ export function buildResponsiveSvgPath(
       }
     }
 
-    // Never draw a long vertical or diagonal connecting line across lines of text in a word-anchored stroke
-    if (!shouldBreakSubpath && hasTokenAnchoredPoint) {
+    // Never draw a long vertical or diagonal connecting line across lines of text between two word-anchored points
+    if (!shouldBreakSubpath && prev.tokenBox && curr.tokenBox) {
       const refHeight = curr.tokenBox?.height || prev.tokenBox?.height || 20;
       if (Math.abs(curr.py - prev.py) > refHeight * 1.15) {
         shouldBreakSubpath = true;
       }
     }
 
-    commands.push(
-      `${shouldBreakSubpath ? 'M' : 'L'} ${curr.px.toFixed(1)} ${curr.py.toFixed(1)}`
-    );
+    if (shouldBreakSubpath) {
+      subpaths.push([curr]);
+    } else {
+      subpaths[subpaths.length - 1].push(curr);
+    }
+  }
+
+  const commands: string[] = [];
+  for (const subpath of subpaths) {
+    if (subpath.length === 0) continue;
+    if (subpath.length === 1) {
+      const p = subpath[0];
+      commands.push(`M ${p.px.toFixed(1)} ${p.py.toFixed(1)} L ${(p.px + 0.5).toFixed(1)} ${(p.py + 0.5).toFixed(1)}`);
+      continue;
+    }
+
+    commands.push(`M ${subpath[0].px.toFixed(1)} ${subpath[0].py.toFixed(1)}`);
+    for (let k = 1; k < subpath.length; k++) {
+      const curr = subpath[k];
+      // Apply Chaikin corner-smoothing to interior freehand (non-token-anchored) points for smooth curves
+      if (!curr.tokenBox && k < subpath.length - 1) {
+        const prev = subpath[k - 1];
+        const next = subpath[k + 1];
+        const dPrev = Math.hypot(curr.px - prev.px, curr.py - prev.py);
+        const dNext = Math.hypot(next.px - curr.px, next.py - curr.py);
+        if (dPrev > 1.5 && dNext > 1.5) {
+          const q1x = 0.75 * curr.px + 0.25 * prev.px;
+          const q1y = 0.75 * curr.py + 0.25 * prev.py;
+          const q2x = 0.75 * curr.px + 0.25 * next.px;
+          const q2y = 0.75 * curr.py + 0.25 * next.py;
+          commands.push(`L ${q1x.toFixed(1)} ${q1y.toFixed(1)}`);
+          commands.push(`L ${q2x.toFixed(1)} ${q2y.toFixed(1)}`);
+          continue;
+        }
+      }
+      commands.push(`L ${curr.px.toFixed(1)} ${curr.py.toFixed(1)}`);
+    }
   }
 
   return commands.join(' ');

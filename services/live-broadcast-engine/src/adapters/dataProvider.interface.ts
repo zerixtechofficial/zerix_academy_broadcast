@@ -24,7 +24,11 @@ export interface IDataProvider {
   /**
    * Fetch curriculum hierarchy (Chapters -> Lessons -> Topics)
    */
-  getCurriculumSidebar(courseId: string, languageId?: string): Promise<CurriculumSidebar | null>;
+  getCurriculumSidebar(
+    courseId: string,
+    languageId?: string,
+    userId?: string
+  ): Promise<CurriculumSidebar | null>;
 
   /**
    * Fetch 800px virtual stage blocks for a specific lesson (and optional topic/language)
@@ -32,8 +36,36 @@ export interface IDataProvider {
   getLessonContent(
     lessonId: string,
     languageId?: string,
-    topicId?: string
+    topicId?: string,
+    userId?: string
   ): Promise<LessonContent | null>;
+
+  /**
+   * Mark a lesson or topic as completed for a specific user (Teacher or Student separately)
+   */
+  markContentComplete(
+    contentId: string,
+    payload: {
+      type: 'lesson' | 'topic';
+      userId: string;
+      role?: string;
+      courseId?: string;
+      sessionId?: string;
+    }
+  ): Promise<any>;
+
+  /**
+   * Fetch completed lesson/topic IDs for a specific user in a course
+   */
+  getCourseProgress(
+    courseId: string,
+    userId: string
+  ): Promise<{
+    completedLessons: string[];
+    completedTopics: string[];
+    lessons: Record<string, any>;
+    topics: Record<string, any>;
+  }>;
 
   /**
    * Persist room checkpoint (R2 or local disk fallback)

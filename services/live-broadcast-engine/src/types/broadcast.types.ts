@@ -57,6 +57,7 @@ export interface TopicItem {
   durationMinutes: number;
   boardId: string;
   languageId: string;
+  isCompleted?: boolean;
 }
 
 export interface LessonItem {
@@ -65,6 +66,7 @@ export interface LessonItem {
   title: string;
   hasContent?: boolean;
   description?: string;
+  isCompleted?: boolean;
   topics: TopicItem[];
 }
 
@@ -81,6 +83,8 @@ export interface CurriculumSidebar {
   courseName: string;
   boardId: string;
   languageId: string;
+  completedLessonIds?: string[];
+  completedTopicIds?: string[];
   chapters: ChapterItem[];
 }
 
@@ -108,11 +112,13 @@ export interface LessonContent {
   languageId?: string;
   description?: string;
   contentHtml?: string;
+  isCompleted?: boolean;
   lessonBlocks?: ContentBlock[];
   topics?: Array<{
     topicId: string;
     title: string;
     contentHtml?: string;
+    isCompleted?: boolean;
     blocks?: ContentBlock[];
   }>;
   blocks: ContentBlock[];
@@ -247,6 +253,10 @@ export interface SessionSnapshot {
   contentState: ContentSyncState;
   audioStage: AudioStageState;
   lastSavedAt: number;
+  elapsedSeconds?: number;
+  totalDurationMinutes?: number;
+  students?: any[];
+  records?: any[];
 }
 
 // ============================================================================

@@ -109,9 +109,11 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
       const query = (request.query || {}) as Record<string, any>;
       const languageId =
         query.language_id || query.languageId || request.user?.languageId || undefined;
+      const userId = query.user_id || query.userId || request.user?.userId || undefined;
       const curriculum = await provider.getCurriculumSidebar(
         courseId,
-        languageId ? String(languageId) : undefined
+        languageId ? String(languageId) : undefined,
+        userId ? String(userId) : undefined
       );
       if (!curriculum) {
         return reply.status(404).send({
@@ -141,10 +143,12 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
       const languageId =
         query.language_id || query.languageId || request.user?.languageId || undefined;
       const topicId = query.topic_id || query.topicId || undefined;
+      const userId = query.user_id || query.userId || request.user?.userId || undefined;
       const content = await provider.getLessonContent(
         lessonId,
         languageId ? String(languageId) : undefined,
-        topicId ? String(topicId) : undefined
+        topicId ? String(topicId) : undefined,
+        userId ? String(userId) : undefined
       );
       if (!content) {
         return reply.status(404).send({
@@ -154,6 +158,85 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         });
       }
       return { success: true, data: content };
+    }
+  );
+
+  // 4b. Mark Lesson or Topic as Completed (Student and Teacher separately)
+  fastify.post(
+    '/api/v1/content/:contentId/complete',
+    {
+      preHandler: [authenticateFastify],
+      schema: {
+        params: Type.Object({
+          contentId: Type.String({ minLength: 1, description: 'Lesson or Topic ID' }),
+        }),
+        body: Type.Object({
+          type: Type.Optional(Type.Union([Type.Literal('lesson'), Type.Literal('topic')])),
+          courseId: Type.Optional(Type.Union([Type.String(), Type.Number()])),
+          course_id: Type.Optional(Type.Union([Type.String(), Type.Number()])),
+          sessionId: Type.Optional(Type.String()),
+          session_id: Type.Optional(Type.String()),
+          userId: Type.Optional(Type.Union([Type.String(), Type.Number()])),
+          user_id: Type.Optional(Type.Union([Type.String(), Type.Number()])),
+          role: Type.Optional(Type.String()),
+        }),
+      },
+    },
+    async (request) => {
+      const { contentId } = request.params as { contentId: string };
+      const body = (request.body || {}) as Record<string, any>;
+      const resolvedType: 'lesson' | 'topic' = body.type === 'lesson' ? 'lesson' : 'topic';
+      const resolvedUserId = String(
+        body.userId || body.user_id || request.user?.userId || '1'
+      );
+      const resolvedRole = String(body.role || request.user?.role || 'student');
+      const resolvedCourseId =
+        body.courseId || body.course_id || request.user?.courseId
+          ? String(body.courseId || body.course_id || request.user?.courseId)
+          : undefined;
+      const resolvedSessionId =
+        body.sessionId || body.session_id || request.user?.sessionId
+          ? String(body.sessionId || body.session_id || request.user?.sessionId)
+          : undefined;
+
+      const result = await provider.markContentComplete(contentId, {
+        type: resolvedType,
+        userId: resolvedUserId,
+        role: resolvedRole,
+        courseId: resolvedCourseId,
+        sessionId: resolvedSessionId,
+      });
+
+      return {
+        success: true,
+        message: `${resolvedType === 'lesson' ? 'Lesson' : 'Topic'} marked as completed`,
+        data: result,
+      };
+    }
+  );
+
+  // 4c. Get Course Progress for Current User (Student and Teacher separately)
+  fastify.get(
+    '/api/v1/courses/:courseId/progress',
+    {
+      preHandler: [authenticateFastify],
+      schema: {
+        params: Type.Object({
+          courseId: Type.String({ minLength: 1, description: 'Course ID' }),
+        }),
+      },
+    },
+    async (request) => {
+      const { courseId } = request.params as { courseId: string };
+      const query = (request.query || {}) as Record<string, any>;
+      const resolvedUserId = String(
+        query.userId || query.user_id || request.user?.userId || '1'
+      );
+      const progress = await provider.getCourseProgress(courseId, resolvedUserId);
+      return {
+        success: true,
+        data: progress,
+      };
     }
   );
 

@@ -147,8 +147,9 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
       assert.equal(layoutSource.includes('key="student-rough-pad"'), false);
       assert.equal(layoutSource.includes("studentTab === 'roughpad'"), false);
 
-      // New Phase 2 controls must be present
-      assert.equal(navbarSource.includes('data-testid="teaching-mode-toggle-btn"'), true);
+      // Teaching mode / Ref Only button must be removed from TopModeNavbar, while Recorder status pill remains
+      assert.equal(navbarSource.includes('data-testid="teaching-mode-toggle-btn"'), false);
+      assert.equal(navbarSource.includes('data-testid="student-ref-only-badge"'), false);
       assert.equal(navbarSource.includes('data-testid="recorder-status-pill"'), true);
     });
   });
@@ -1858,7 +1859,6 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
 
       assert.equal(
         rejoinSource.includes('process.env.NEXT_PUBLIC_ACADEMY_PORTAL_URL') &&
-          rejoinSource.includes('process.env.NEXT_PUBLIC_ACADEMY_URL') &&
           rejoinSource.includes('overflow-y-auto') &&
           rejoinSource.includes('bg-white border border-slate-200') &&
           !rejoinSource.includes('ID: {selectedSessionId}') &&
@@ -2428,6 +2428,395 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
           reconnectModalSource.includes('onManualReconnect();'),
         true,
         'useBroadcastSocket and ReconnectModal must automatically reconnect when connected to internet without requiring manual button clicks'
+      );
+    });
+  });
+
+  describe('21. Smooth Freehand Pen Drawing Anywhere in Content Area & Whitespace Below Content', () => {
+    it('allows freehand Pen drawing in whitespace below content without snapping to text tokens or clamping Y at 100%', () => {
+      const token0 = { tokenId: 'content:0', left: 20, top: 10, width: 90, height: 22 };
+      const token1 = { tokenId: 'content:1', left: 120, top: 10, width: 110, height: 22 };
+      const blockCache: ContentSyncMath.BlockDomLayoutCache = {
+        blockId: 'blk_1',
+        blockRect: { left: 100, top: 100, width: 800, height: 60 } as DOMRect,
+        tokens: new Map([
+          ['content:0', token0],
+          ['content:1', token1],
+        ]),
+        tokenList: [token0, token1],
+        regions: new Map(),
+      };
+
+      // 1. Whitespace 25px below the text line (localY = 10 + 22 + 25 = 57) must NOT snap to the text token above it
+      const whitespaceHit = ContentSyncMath.hitTestWordToken(60, 57, blockCache);
+      assert.equal(
+        whitespaceHit,
+        null,
+        'Drawing in empty whitespace 25px below text must not magnetically snap to the text line above it'
+      );
+
+      // 2. Underlining right below the word (localY = 10 + 22 + 5 = 37) still anchors to the word token
+      const underlineHit = ContentSyncMath.hitTestWordToken(60, 37, blockCache);
+      assert.ok(underlineHit, 'Underlining 5px below a word must still anchor to that word token');
+      assert.equal(underlineHit?.token.tokenId, 'content:0');
+
+      // 3. Drawing below the block's bounding box (clientY = 220 -> localY = 120 on a 60px tall block -> y = 200%) must NOT clamp to 100%
+      const belowBlockPt = ContentSyncMath.captureStrokePoint(260, 220, blockCache);
+      assert.equal(belowBlockPt.tokenId, undefined);
+      assert.equal(
+        belowBlockPt.y,
+        200,
+        'captureStrokePoint must preserve Y percentages > 100% when a stroke extends into whitespace below a content block'
+      );
+
+      // 4. High-precision 0.01% coordinate capture prevents stair-stepping on tall pages
+      const precisePt = ContentSyncMath.captureStrokePoint(260.35, 115.27, blockCache);
+      assert.equal(precisePt.x, 20.04);
+      assert.equal(precisePt.y, 25.45);
+    });
+
+    it('renders continuous un-clamped strokes from text into whitespace below content and smooths freehand curves', () => {
+      const token0 = { tokenId: 'content:0', left: 20, top: 10, width: 90, height: 22 };
+      const blockCache: ContentSyncMath.BlockDomLayoutCache = {
+        blockId: 'blk_1',
+        blockRect: { left: 0, top: 0, width: 800, height: 100 } as DOMRect,
+        tokens: new Map([['content:0', token0]]),
+        tokenList: [token0],
+        regions: new Map(),
+      };
+
+      // Teacher starts a Pen stroke on 'content:0' (y ≈ 21px) and drags an arrow/diagram 140px down into whitespace below content (y = 160px)
+      const textToWhitespaceStroke = [
+        { x: 5, y: 20, tokenId: 'content:0', rx: 0.2, ry: 0.5 },
+        { x: 10, y: 25, tokenId: 'content:0', rx: 0.8, ry: 0.9 },
+        { x: 15, y: 60 },
+        { x: 20, y: 110 },
+        { x: 25, y: 160 },
+      ];
+
+      const pathData = ContentSyncMath.buildResponsiveSvgPath(
+        textToWhitespaceStroke,
+        blockCache,
+        true
+      );
+
+      // Must remain a single continuous subpath (only 1 'M' command) without breaking when leaving text into whitespace
+      const moveCount = (pathData.match(/M\s*[\d.]+\s+[\d.]+/g) || []).length;
+      assert.equal(
+        moveCount,
+        1,
+        `Stroke extending from text into whitespace must stay a single continuous subpath (1 M), got: ${pathData}`
+      );
+
+      // Must reach the full Y = 160px in whitespace (not clamped to token0.top + 7px)
+      const yCoords = Array.from(pathData.matchAll(/[ML]\s*[\d.]+\s+([\d.]+)/g)).map((m) =>
+        parseFloat(m[1])
+      );
+      const maxY = Math.max(...yCoords);
+      assert.equal(
+        maxY >= 159,
+        true,
+        `Stroke extending into whitespace below content must reach y=160px without being clamped near the text line (maxY=${maxY})`
+      );
+    });
+
+    it('forwards scroll-container pointer events for all active blocks, keeps whole-page SVG overlay mounted, and provides whitespace canvas below content', () => {
+      const stageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/VirtualContentStage.tsx'),
+        'utf8'
+      );
+      const mathSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/utils/contentSyncMath.ts'),
+        'utf8'
+      );
+
+      // 1. scrollContainerRef forwards pointer move/up/cancel for any activeDrawingBlockIdRef.current (not only blk_page_canvas)
+      assert.equal(
+        stageSource.includes('handleBlockPointerMove(e, activeDrawingBlockIdRef.current);') &&
+          !stageSource.includes("activeDrawingBlockIdRef.current === 'blk_page_canvas'") &&
+          stageSource.includes('onPointerCancel={(e) => {'),
+        true,
+        'scrollContainerRef must forward pointer movements whenever activeDrawingBlockIdRef.current is active'
+      );
+
+      // 2. handleBlockPointerMove uses getCoalescedEvents for smooth curves and only locks preferredLineTop from the immediately preceding point
+      assert.equal(
+        stageSource.includes('getCoalescedEvents') &&
+          stageSource.includes('const lastPt = next[next.length - 1];') &&
+          stageSource.includes('e.stopPropagation();'),
+        true,
+        'handleBlockPointerMove must process coalesced pointer events, stop propagation to prevent duplicate points, and release preferredLineTop when leaving text'
+      );
+
+      // 3. whole-page-content-svg-overlay stays mounted to avoid :first-child margin jump on pointerdown, and main card uses overflow-visible with bottom padding
+      assert.equal(
+        !stageSource.includes('allPageCanvasStrokes.length > 0 && (\n            <svg\n              data-testid="whole-page-content-svg-overlay"') &&
+          stageSource.includes('pb-20 sm:pb-28 min-h-[360px] sm:min-h-[460px]') &&
+          stageSource.includes('border-slate-200/90 overflow-visible'),
+        true,
+        'VirtualContentStage must keep whole-page-content-svg-overlay mounted and provide unclipped whitespace canvas below content'
+      );
+
+      // 4. measureBlockDomLayout skips overwriting regions map on blk_page_canvas
+      assert.equal(
+        mathSource.includes("if (!isWholePageCanvas) {\n    const regionNodes = blockEl.querySelectorAll<HTMLElement>('[data-region-id]');"),
+        true,
+        'measureBlockDomLayout must not overwrite regions with duplicate child [data-region-id="content"] elements when measuring blk_page_canvas'
+      );
+    });
+  });
+
+  describe('22. TopNav Teaching/Ref-Only Removal, Sidebar Lesson Mode Removal, End-of-Lesson/Topic Mark as Completed & Attendance in Minutes', () => {
+    it('removes Teaching Mode & Ref Only button from TopModeNavbar and Lesson Mode bar from ChapterLessonSidebar', () => {
+      const navbarSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/TopModeNavbar.tsx'),
+        'utf8'
+      );
+      const sidebarSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/ChapterLessonSidebar.tsx'),
+        'utf8'
+      );
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+
+      // 1. TopModeNavbar must not render Teaching Mode or Ref Only buttons
+      assert.equal(
+        navbarSource.includes('data-testid="teaching-mode-toggle-btn"'),
+        false,
+        'TopModeNavbar must not include teaching-mode-toggle-btn'
+      );
+      assert.equal(
+        navbarSource.includes('data-testid="student-ref-only-badge"'),
+        false,
+        'TopModeNavbar must not include student-ref-only-badge'
+      );
+      assert.equal(
+        navbarSource.includes('onToggleTeachingMode'),
+        false,
+        'TopModeNavbar must not accept onToggleTeachingMode prop'
+      );
+
+      // 2. ChapterLessonSidebar must not render Lesson Mode bar or REF badges
+      assert.equal(
+        sidebarSource.includes('data-testid="sidebar-teaching-mode-btn"'),
+        false,
+        'ChapterLessonSidebar must not include sidebar-teaching-mode-btn'
+      );
+      assert.equal(
+        sidebarSource.includes('Lesson Mode:'),
+        false,
+        'ChapterLessonSidebar must not display Lesson Mode bar'
+      );
+      assert.equal(
+        sidebarSource.includes('onToggleTeachingMode'),
+        false,
+        'ChapterLessonSidebar must not accept onToggleTeachingMode prop'
+      );
+
+      // 3. LearningSessionLayout must not pass onToggleTeachingMode to TopModeNavbar or ChapterLessonSidebar
+      assert.equal(
+        layoutSource.includes('onToggleTeachingMode={'),
+        false,
+        'LearningSessionLayout must not pass onToggleTeachingMode prop'
+      );
+    });
+
+    it('renders Mark as Completed button at the end of lessons and topics when scrolled to end and allows Student & Teacher to mark separately via Academy API', async () => {
+      const stageSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/VirtualContentStage.tsx'),
+        'utf8'
+      );
+      const sidebarSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/ChapterLessonSidebar.tsx'),
+        'utf8'
+      );
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+      const clientSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/services/curriculumClient.ts'),
+        'utf8'
+      );
+
+      // 1. VirtualContentStage detects scroll-to-end and renders Mark as Completed button for both lessons and topics
+      assert.equal(
+        stageSource.includes('checkScrollReachedEnd') &&
+          stageSource.includes('isScrolledToEnd') &&
+          stageSource.includes('data-testid="content-completion-bar"') &&
+          stageSource.includes('data-testid="mark-complete-btn"') &&
+          stageSource.includes('data-testid="content-completed-badge"'),
+        true,
+        'VirtualContentStage must detect scroll-to-end and render the Mark as Completed button and completed badge'
+      );
+
+      // 2. ChapterLessonSidebar displays completion checkmarks for both completed lessons and completed topics
+      assert.equal(
+        sidebarSource.includes('lesson-completed-icon-') &&
+          sidebarSource.includes('topic.isCompleted'),
+        true,
+        'ChapterLessonSidebar must display completion checkmarks for both lessons and topics'
+      );
+
+      // 3. LearningSessionLayout wires handleMarkContentComplete with userId & role so Student and Teacher mark separately
+      assert.equal(
+        layoutSource.includes('const handleMarkContentComplete = useCallback(') &&
+          layoutSource.includes('CurriculumClient.markContentComplete(') &&
+          layoutSource.includes('onMarkComplete={handleMarkContentComplete}') &&
+          clientSource.includes('/content/${encodeURIComponent(String(contentId))}/complete'),
+        true,
+        'LearningSessionLayout and CurriculumClient must wire markContentComplete to the Academy completion endpoint'
+      );
+
+      // 4. Verify CurriculumClient.markContentComplete and fetchCourseProgress against a mock Academy/Broadcast server for Teacher & Student separately
+      const completionStore: Record<string, Set<string>> = {};
+      const mockServer = http.createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (c) => chunks.push(c));
+        req.on('end', () => {
+          const bodyStr = Buffer.concat(chunks).toString('utf8');
+          const parsed = bodyStr ? JSON.parse(bodyStr) : {};
+          res.setHeader('Content-Type', 'application/json');
+
+          const completeMatch = req.url?.match(/\/api\/v1\/content\/([^/?]+)\/complete/);
+          if (req.method === 'POST' && completeMatch) {
+            const contentId = decodeURIComponent(completeMatch[1]);
+            const userKey = `${parsed.role || 'student'}_${String(parsed.userId || '').replace(/^(teacher_|student_)/, '')}`;
+            if (!completionStore[userKey]) completionStore[userKey] = new Set();
+            completionStore[userKey].add(`${parsed.type || 'topic'}:${contentId}`);
+            res.writeHead(200);
+            res.end(
+              JSON.stringify({
+                success: true,
+                data: {
+                  contentId,
+                  type: parsed.type || 'topic',
+                  userId: parsed.userId,
+                  isCompleted: true,
+                  completedAt: new Date().toISOString(),
+                },
+              })
+            );
+            return;
+          }
+
+          const progressMatch = req.url?.match(/\/api\/v1\/courses\/([^/?]+)\/progress/);
+          if (req.method === 'GET' && progressMatch) {
+            const urlObj = new URL(req.url || '/', 'http://127.0.0.1');
+            const rawUserId =
+              urlObj.searchParams.get('user_id') || urlObj.searchParams.get('userId') || '';
+            const rolePrefix = rawUserId.startsWith('teacher_') ? 'teacher' : 'student';
+            const cleanId = rawUserId.replace(/^(teacher_|student_)/, '');
+            const userKey = `${rolePrefix}_${cleanId}`;
+            const entries = Array.from(completionStore[userKey] || []);
+            const completedLessonIds = entries
+              .filter((e) => e.startsWith('lesson:'))
+              .map((e) => e.slice('lesson:'.length));
+            const completedTopicIds = entries
+              .filter((e) => e.startsWith('topic:'))
+              .map((e) => e.slice('topic:'.length));
+            res.writeHead(200);
+            res.end(
+              JSON.stringify({
+                success: true,
+                data: {
+                  courseId: progressMatch[1],
+                  userId: cleanId,
+                  completedLessonIds,
+                  completedTopicIds,
+                  completedLessons: completedLessonIds,
+                  completedTopics: completedTopicIds,
+                },
+              })
+            );
+            return;
+          }
+
+          res.writeHead(404);
+          res.end(JSON.stringify({ message: 'Not found' }));
+        });
+      });
+
+      await new Promise<void>((resolve) => {
+        mockServer.listen(0, '127.0.0.1', () => {
+          const addr = mockServer.address() as { port: number };
+          process.env.NEXT_PUBLIC_BROADCAST_API_URL = `http://127.0.0.1:${addr.port}`;
+          resolve();
+        });
+      });
+
+      try {
+        // Teacher marks Lesson 101 complete
+        const teacherRes = await CurriculumClient.markContentComplete('101', {
+          type: 'lesson',
+          courseId: '12',
+          sessionId: 'sess_1',
+          userId: 'teacher_501',
+          role: 'teacher',
+        });
+        assert.equal(teacherRes.isCompleted, true);
+        assert.equal(teacherRes.contentId, '101');
+
+        // Student marks Topic 1001 complete independently
+        const studentRes = await CurriculumClient.markContentComplete('1001', {
+          type: 'topic',
+          courseId: '12',
+          sessionId: 'sess_1',
+          userId: 'student_14',
+          role: 'student',
+        });
+        assert.equal(studentRes.isCompleted, true);
+        assert.equal(studentRes.contentId, '1001');
+
+        // Verify Teacher progress is isolated from Student progress
+        const teacherProg = await CurriculumClient.fetchCourseProgress('12', undefined, 'teacher_501');
+        assert.deepEqual(teacherProg.completedLessonIds, ['101']);
+        assert.deepEqual(teacherProg.completedTopicIds, []);
+
+        const studentProg = await CurriculumClient.fetchCourseProgress('12', undefined, 'student_14');
+        assert.deepEqual(studentProg.completedLessonIds, []);
+        assert.deepEqual(studentProg.completedTopicIds, ['1001']);
+      } finally {
+        await new Promise<void>((resolve) => mockServer.close(() => resolve()));
+      }
+    });
+
+    it('tracks and stores attendance in minutes (totalJoinedMinutes & watch_duration_minutes) across TopModeNavbar, Broadcast Engine, and Laravel API', () => {
+      const navbarSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/components/TopModeNavbar.tsx'),
+        'utf8'
+      );
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+      const autosaveSource = fs.readFileSync(
+        path.resolve(__dirname, '../../services/live-broadcast-engine/src/modules/autosave/autosave.worker.ts'),
+        'utf8'
+      );
+      const engineIndexSource = fs.readFileSync(
+        path.resolve(__dirname, '../../services/live-broadcast-engine/src/index.ts'),
+        'utf8'
+      );
+
+      // 1. Frontend normalizes and displays attendance in minutes (totalJoinedMinutes)
+      assert.equal(
+        layoutSource.includes('totalJoinedMinutes: s.totalJoinedMinutes ?? 0') &&
+          navbarSource.includes('student.totalJoinedMinutes'),
+        true,
+        'LearningSessionLayout and TopModeNavbar must track and display student attendance in minutes'
+      );
+
+      // 2. Broadcast Engine AutoSaveWorker includes live attendance in minutes in periodic checkpoints and on student leave/disconnect
+      assert.equal(
+        autosaveSource.includes('AttendanceEngine.finalizeSessionAttendance(') &&
+          autosaveSource.includes('totalDurationMinutes') &&
+          autosaveSource.includes('students: attendanceSummary.students') &&
+          engineIndexSource.includes('AutoSaveService.performCheckpoint(sessionId)'),
+        true,
+        'Broadcast Engine must compute and persist attendance in minutes during checkpoints and upon student leave/disconnect'
       );
     });
   });

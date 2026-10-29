@@ -266,9 +266,7 @@ export default function RejoinScreen() {
 
   const academyPortalUrl = (
     process.env.NEXT_PUBLIC_ACADEMY_PORTAL_URL ||
-    process.env.NEXT_PUBLIC_ACADEMY_URL ||
-    process.env.NEXT_PUBLIC_APP_URL ||
-    'https://academy.zerixtech.com'
+    ''
   ).replace(/\/+$/, '');
 
   if (!hasMounted) {

@@ -1040,6 +1040,7 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
             io.to(sessionId).emit('AUDIO_MIC_REVOKED', { studentId: user.userId });
             io.to(sessionId).emit('AUDIO_HAND_LOWERED', { userId: user.userId });
             scheduleAttendanceBroadcast(sessionId, true);
+            AutoSaveService.performCheckpoint(sessionId).catch(() => {});
           } else if (!removal.anyDeviceMicActive) {
             await AudioStageController.muteStudentDevice(sessionId, user.userId, devId);
             io.to(sessionId).emit('AUDIO_MIC_REVOKED', {
@@ -1148,6 +1149,7 @@ export async function createBroadcastServer(options?: { disableBackgroundInterva
             try {
               const liveMetrics = await AttendanceEngine.getLiveAttendanceList(sessionId);
               io.to(sessionId).emit('ATTENDANCE_METRICS_UPDATE', liveMetrics);
+              await AutoSaveService.performCheckpoint(sessionId);
             } catch {
               // ignore
             }
