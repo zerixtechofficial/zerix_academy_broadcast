@@ -1069,8 +1069,9 @@ export function useCompressedClassRecorder({
    * waits for all in-flight chunk uploads to complete, and calls CurriculumClient.finalizeSession
    * (saving the active taught lesson's Whiteboard JSON while stripping Content Mode strokes).
    */
-  const stopAndFinalizeRecording = useCallback(async () => {
-    setIsFinalizing(true);
+  const stopAndFinalizeRecording = useCallback(
+    async (options?: { keepSessionLive?: boolean }) => {
+      setIsFinalizing(true);
     try {
       if (durationTimerRef.current) {
         window.clearInterval(durationTimerRef.current);
@@ -1154,6 +1155,7 @@ export function useCompressedClassRecorder({
       const finalizeRes = await CurriculumClient.finalizeSession(sessionIdRef.current, {
         totalDurationSec: Math.max(1, finalDurationSec),
         relationalContext: effectiveRelCtx,
+        keepSessionLive: options?.keepSessionLive,
         whiteboard: wbSnapshot,
         token: tokenRef.current,
       }).catch((err) => {

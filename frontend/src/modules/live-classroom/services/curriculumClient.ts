@@ -533,6 +533,7 @@ export class CurriculumClient {
     payload: {
       totalDurationSec?: number;
       relationalContext?: Partial<RelationalLessonContext>;
+      keepSessionLive?: boolean;
       whiteboard?: {
         elements: any[];
         appState?: Record<string, any>;
@@ -547,6 +548,9 @@ export class CurriculumClient {
       totalDurationSec: payload.totalDurationSec,
       relationalContext: payload.relationalContext,
     };
+    if (payload.keepSessionLive !== undefined) {
+      bodyPayload.keepSessionLive = Boolean(payload.keepSessionLive);
+    }
     if (payload.whiteboard) {
       bodyPayload.whiteboard = sanitizeWhiteboardPayloadForStorage(payload.whiteboard);
     }

@@ -2819,5 +2819,57 @@ describe('Phase 2 Unit & Integration Suite — 720p Recorder, Jitter, Multi-Topi
         'Broadcast Engine must compute and persist attendance in minutes during checkpoints and upon student leave/disconnect'
       );
     });
+
+    it('synchronizes session completion to Laravel when teacher ends class or 5-min Host/Co-Host grace timer auto-ends broadcast while preserving live status on mid-class recording stop', () => {
+      const layoutSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/LearningSessionLayout.tsx'),
+        'utf8'
+      );
+      const recorderSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/hooks/useCompressedClassRecorder.ts'),
+        'utf8'
+      );
+      const clientSource = fs.readFileSync(
+        path.resolve(__dirname, '../src/modules/live-classroom/services/curriculumClient.ts'),
+        'utf8'
+      );
+      const autosaveSource = fs.readFileSync(
+        path.resolve(__dirname, '../../services/live-broadcast-engine/src/modules/autosave/autosave.worker.ts'),
+        'utf8'
+      );
+      const laravelProviderSource = fs.readFileSync(
+        path.resolve(__dirname, '../../services/live-broadcast-engine/src/adapters/laravelApi.provider.ts'),
+        'utf8'
+      );
+
+      // 1. Mid-class stop recording passes keepSessionLive: true, whereas handleEndClass passes keepSessionLive: false
+      assert.equal(
+        layoutSource.includes('stopAndFinalizeRecording({ keepSessionLive: true })') &&
+          layoutSource.includes('stopAndFinalizeRecording({ keepSessionLive: false })'),
+        true,
+        'LearningSessionLayout must pass keepSessionLive: true when stopping recording mid-class and keepSessionLive: false when ending class'
+      );
+      assert.equal(
+        recorderSource.includes('keepSessionLive: options?.keepSessionLive') &&
+          clientSource.includes('bodyPayload.keepSessionLive = Boolean(payload.keepSessionLive);'),
+        true,
+        'useCompressedClassRecorder and CurriculumClient.finalizeSession must forward keepSessionLive to the Broadcast Engine'
+      );
+
+      // 2. Grace period auto-finalize ends room and publishes completed status to Laravel
+      assert.equal(
+        autosaveSource.includes('await RoomManager.endSession(sessionId);') &&
+          autosaveSource.includes('await provider.publishSessionCompleted(summary);'),
+        true,
+        'AutoSaveService.executeGraceFinalize must end the room and publish session completion to Laravel'
+      );
+      assert.equal(
+        laravelProviderSource.includes("status: 'completed'") &&
+          laravelProviderSource.includes("session_status: 'completed'") &&
+          laravelProviderSource.includes('keepSessionLive: Boolean((summary as any).keepSessionLive)'),
+        true,
+        'LaravelApiDataProvider must send status=completed & session_status=completed on publishSessionCompleted and forward keepSessionLive on publishSessionFinalizedArtifacts'
+      );
+    });
   });
 });

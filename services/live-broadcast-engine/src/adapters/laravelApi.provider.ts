@@ -659,18 +659,48 @@ export class LaravelApiDataProvider implements IDataProvider {
     const storageProvider = getStorageProvider();
     await storageProvider.saveSessionSummary(summary);
 
+    const endedIso = summary.endTime || new Date().toISOString();
+
     try {
       await this.request(
         `/api/internal/broadcast/sessions/${encodeURIComponent(summary.sessionId)}/auto-complete`,
         {
           method: 'POST',
-          body: JSON.stringify(summary),
+          body: JSON.stringify({
+            ...summary,
+            status: 'completed',
+            session_status: 'completed',
+            endedAt: endedIso,
+          }),
         }
       );
       console.log(`[LaravelApiDataProvider] Session ${summary.sessionId} summary published to Laravel.`);
     } catch (err: any) {
-      console.error(`[LaravelApiDataProvider] Failed to publish session summary:`, err.message);
-      throw err;
+      console.warn(
+        `[LaravelApiDataProvider] Warning on auto-complete for ${summary.sessionId}, falling back to session complete: ${err.message}`
+      );
+    }
+
+    try {
+      await this.request(
+        `/api/v1/broadcast/sessions/${encodeURIComponent(summary.sessionId)}/complete`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            sessionId: summary.sessionId,
+            keepSessionLive: false,
+            status: 'completed',
+            session_status: 'completed',
+            endedAt: endedIso,
+            totalDurationSeconds: summary.totalClassDurationSeconds,
+            publishToVodCourse: false,
+          }),
+        }
+      );
+    } catch (fallbackErr: any) {
+      console.warn(
+        `[LaravelApiDataProvider] Warning marking session ${summary.sessionId} completed on Laravel: ${fallbackErr.message}`
+      );
     }
   }
 
@@ -717,6 +747,7 @@ export class LaravelApiDataProvider implements IDataProvider {
 
     const laravelPayload = {
       ...summary,
+      keepSessionLive: Boolean((summary as any).keepSessionLive),
       courseId: relCtx.courseId,
       linkedVodCourseId: relCtx.linkedVodCourseId,
       languageId: relCtx.languageId,

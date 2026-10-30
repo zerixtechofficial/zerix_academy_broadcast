@@ -333,6 +333,8 @@ export class AutoSaveService {
         }
       }
 
+      await RoomManager.endSession(sessionId);
+
       await this.ensureSessionVodFinalized(sessionId);
 
       const nowIso = new Date().toISOString();
@@ -345,8 +347,6 @@ export class AutoSaveService {
 
       const provider = getDataProvider();
       await provider.publishSessionCompleted(summary);
-
-      await RoomManager.endSession(sessionId);
 
       // Notify all connected students that the broadcast closed after 5-min Host/Co-Host inactivity and disconnect them
       if (this.ioServer) {

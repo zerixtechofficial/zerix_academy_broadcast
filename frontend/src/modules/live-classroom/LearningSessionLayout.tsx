@@ -2190,7 +2190,7 @@ export default function LearningSessionLayout() {
     if (isRecording) {
       try {
         await Promise.race([
-          stopAndFinalizeRecording(),
+          stopAndFinalizeRecording({ keepSessionLive: false }),
           new Promise((resolve) => setTimeout(resolve, 4000)),
         ]);
       } catch {
@@ -2384,14 +2384,14 @@ export default function LearningSessionLayout() {
           }
         }}
         onStopRecording={() => {
-          stopAndFinalizeRecording().catch(() => {});
+          stopAndFinalizeRecording({ keepSessionLive: true }).catch(() => {});
         }}
         onRestartRecording={() => {
           openRecordingSetupModal('restart');
         }}
         onToggleRecording={() => {
           if (isRecording) {
-            stopAndFinalizeRecording().catch(() => {});
+            stopAndFinalizeRecording({ keepSessionLive: true }).catch(() => {});
           } else if (hasResumableRecording) {
             startRecording('display_media').catch(() => {});
           } else {

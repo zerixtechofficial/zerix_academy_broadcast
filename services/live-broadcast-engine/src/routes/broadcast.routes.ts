@@ -315,6 +315,9 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
         await AutoSaveService.cancelTeacherGraceTimer(body.sessionId);
         await RoomManager.setTeacherStatus(body.sessionId, 'LIVE');
         room = await RoomManager.getOrInitRoom(body.sessionId, resolvedLanguageId);
+        if (body.restart === true) {
+          AutoSaveService.performCheckpoint(body.sessionId).catch(() => {});
+        }
       }
 
       const isCoHostJoin = Boolean(
@@ -1396,6 +1399,7 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
     const body = (request.body || {}) as {
       relationalContext?: Partial<RelationalLessonContext>;
       totalDurationSec?: number;
+      keepSessionLive?: boolean;
       whiteboard?: {
         elements?: any[];
         appState?: Record<string, any>;
@@ -1415,6 +1419,9 @@ export const broadcastRoutes: FastifyPluginAsync = async (fastify: FastifyInstan
       totalDurationSec: body.totalDurationSec,
       whiteboardPayload: body.whiteboard,
     });
+    if (body.keepSessionLive !== undefined) {
+      (summary as any).keepSessionLive = Boolean(body.keepSessionLive);
+    }
 
     if (provider.publishSessionFinalizedArtifacts) {
       await provider.publishSessionFinalizedArtifacts(summary);
